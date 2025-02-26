@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import os
 import requests
 from io import StringIO
 from sklearn.preprocessing import MinMaxScaler
@@ -16,7 +17,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 def main_app():
-    # Configuración de la página y estilo
+    # 1. Configuración de la página y estilo
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
     st.markdown(
         """
@@ -31,31 +32,38 @@ def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
 
-    # Barra lateral: configuración principal
+    # 2. Configuración de la barra lateral
     st.sidebar.header("Configuración de la predicción")
+
+    # Selección de criptomonedas disponibles
     alpha_symbols = {
-        "Bitcoin (BTC)":  "BTC",
-        "Ethereum (ETH)": "ETH",
-        "XRP":            "XRP",
-        "Stellar (XLM)":  "XLM",
-        "Solana (SOL)":   "SOL",
-        "Cardano (ADA)":  "ADA",
-        "Dogecoin (DOGE)": "DOGE",
-        "Polkadot (DOT)":  "DOT",
-        "Polygon (MATIC)": "MATIC",
-        "Litecoin (LTC)":  "LTC",
-        "TRON (TRX)":      "TRX",
+        "Bitcoin (BTC)":      "BTC",
+        "Ethereum (ETH)":     "ETH",
+        "XRP":                "XRP",
+        "Stellar (XLM)":      "XLM",
+        "Solana (SOL)":       "SOL",
+        "Cardano (ADA)":      "ADA",
+        "Dogecoin (DOGE)":    "DOGE",
+        "Polkadot (DOT)":     "DOT",
+        "Polygon (MATIC)":    "MATIC",
+        "Litecoin (LTC)":     "LTC",
+        "TRON (TRX)":         "TRX",
         "Binance Coin (BNB)": "BNB"
     }
     crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(alpha_symbols.keys()))
     symbol = alpha_symbols[crypto_choice]
 
+    # Parámetros básicos
     st.sidebar.subheader("Parámetros de Predicción Básicos")
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30)
     window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30)
     use_multivariate = st.sidebar.checkbox("Usar datos multivariados (Open, High, Low, Volume)", value=False)
+    
+    # Opción para incluir indicadores técnicos (RSI, Bollinger Bands, MACD)
+    use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, BBANDS, MACD)", value=False,
+                                         help="Si se activa, se descargarán y combinarán indicadores técnicos para mejorar la predicción.")
 
-    # Ajuste automático del modelo según escenario
+    # Escenario del modelo (ajuste automático de hiperparámetros)
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox("Elige un escenario:", ["Pesimista", "Neutro", "Optimista"])
     if scenario == "Pesimista":
@@ -71,9 +79,13 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
+    # 3. Función para descargar y limpiar los datos de precios
     @st.cache_data
     def load_and_clean_data(symbol):
-        """Descarga el CSV diario de Alpha Vantage, lo renombra y ordena."""
+        """
+        Descarga el CSV diario de Alpha Vantage para la criptomoneda dada,
+        renombra las columnas y ordena el DataFrame por fecha.
+        """
         api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
         url = (
             "https://www.alphavantage.co/query"
@@ -91,13 +103,13 @@ def main_app():
         data_io = StringIO(resp.text)
         df = pd.read_csv(data_io)
         df.rename(columns={
-            "timestamp": "ds",
-            "open":      "open_price",
-            "high":      "high_price",
-            "low":       "low_price",
-            "close":     "close_price",
-            "volume":    "volume",
-            "market cap": "market_cap"
+            "timestamp":   "ds",
+            "open":        "open_price",
+            "high":        "high_price",
+            "low":         "low_price",
+            "close":       "close_price",
+            "volume":      "volume",
+            "market cap":  "market_cap"
         }, inplace=True)
         df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
         df.dropna(subset=["ds"], inplace=True)
@@ -105,8 +117,120 @@ def main_app():
         df.reset_index(drop=True, inplace=True)
         return df
 
+    # 4. Funciones para descargar indicadores técnicos
+
+    def load_rsi_data(symbol):
+        """Descarga el RSI diario para la criptomoneda dada."""
+        api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
+        url = (
+            "https://www.alphavantage.co/query"
+            "?function=RSI"
+            f"&symbol={symbol}"
+            "&market=USD"
+            "&interval=daily"
+            "&time_period=14"
+            "&series_type=close"
+            f"&apikey={api_key}"
+            "&datatype=csv"
+        )
+        resp = requests.get(url)
+        if resp.status_code != 200:
+            st.warning("No se pudo descargar el RSI.")
+            return None
+        data_io = StringIO(resp.text)
+        df = pd.read_csv(data_io)
+        if "time" not in df.columns or "RSI" not in df.columns:
+            st.warning("El CSV de RSI no contiene las columnas esperadas.")
+            return None
+        df.rename(columns={"time": "ds", "RSI": "rsi"}, inplace=True)
+        df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+        df.dropna(subset=["ds"], inplace=True)
+        df.sort_values(by="ds", ascending=True, inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
+
+    def load_bbands_data(symbol):
+        """Descarga las Bollinger Bands diarias para la criptomoneda dada."""
+        api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
+        url = (
+            "https://www.alphavantage.co/query"
+            "?function=BBANDS"
+            f"&symbol={symbol}"
+            "&market=USD"
+            "&interval=daily"
+            "&time_period=20"
+            "&series_type=close"
+            f"&apikey={api_key}"
+            "&datatype=csv"
+        )
+        resp = requests.get(url)
+        if resp.status_code != 200:
+            st.warning("No se pudo descargar Bollinger Bands.")
+            return None
+        data_io = StringIO(resp.text)
+        df = pd.read_csv(data_io)
+        expected_cols = {"time", "Real Upper Band", "Real Middle Band", "Real Lower Band"}
+        if not expected_cols.issubset(set(df.columns)):
+            st.warning("El CSV de Bollinger Bands no tiene las columnas esperadas.")
+            return None
+        df.rename(columns={
+            "time": "ds",
+            "Real Upper Band": "upper_band",
+            "Real Middle Band": "middle_band",
+            "Real Lower Band": "lower_band"
+        }, inplace=True)
+        df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+        df.dropna(subset=["ds"], inplace=True)
+        df.sort_values(by="ds", ascending=True, inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
+
+    def load_macd_data(symbol):
+        """Descarga el MACD diario para la criptomoneda dada."""
+        api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
+        url = (
+            "https://www.alphavantage.co/query"
+            "?function=MACD"
+            f"&symbol={symbol}"
+            "&market=USD"
+            "&interval=daily"
+            "&series_type=close"
+            f"&apikey={api_key}"
+            "&datatype=csv"
+        )
+        resp = requests.get(url)
+        if resp.status_code != 200:
+            st.warning("No se pudo descargar MACD.")
+            return None
+        data_io = StringIO(resp.text)
+        df = pd.read_csv(data_io)
+        if "time" not in df.columns or "MACD" not in df.columns:
+            st.warning("El CSV de MACD no contiene las columnas esperadas.")
+            return None
+        df.rename(columns={"time": "ds", "MACD": "macd"}, inplace=True)
+        df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+        df.dropna(subset=["ds"], inplace=True)
+        df.sort_values(by="ds", ascending=True, inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
+
+    def merge_indicators(df_prices, df_rsi, df_bbands, df_macd):
+        """
+        Combina los datos de precios con RSI, Bollinger Bands y MACD por la columna ds.
+        Se realiza un merge left y se rellenan valores faltantes con forward fill.
+        """
+        merged = df_prices.copy()
+        if df_rsi is not None:
+            merged = pd.merge(merged, df_rsi, on="ds", how="left")
+        if df_bbands is not None:
+            merged = pd.merge(merged, df_bbands, on="ds", how="left")
+        if df_macd is not None:
+            merged = pd.merge(merged, df_macd, on="ds", how="left")
+        merged.fillna(method="ffill", inplace=True)
+        return merged
+
+    # 5. Función para crear secuencias para la LSTM
     def create_sequences(data, window_size=30):
-        """Genera secuencias de datos para entrenar la LSTM."""
         if len(data) <= window_size:
             st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
             return None, None
@@ -116,15 +240,37 @@ def main_app():
             y.append(data[i, 0])
         return np.array(X), np.array(y)
 
+    # 6. Función principal para entrenar el modelo y generar predicciones
     def train_and_predict_lstm(symbol, horizon_days=30, window_size=30, test_size=0.2,
-                               use_multivariate=False, epochs=10, batch_size=32, learning_rate=0.001):
-        """Entrena el modelo LSTM y genera predicciones futuras."""
-        df = load_and_clean_data(symbol)
-        if df is None:
+                               use_multivariate=False, use_indicators=False,
+                               epochs=10, batch_size=32, learning_rate=0.001):
+        # Cargamos los datos de precios
+        df_prices = load_and_clean_data(symbol)
+        if df_prices is None:
+            st.error("No se pudieron cargar los datos de precios.")
             return None
 
-        if use_multivariate:
-            df_model = df[["ds", "close_price", "open_price", "high_price", "low_price", "volume"]].copy()
+        # Si se solicita el uso de indicadores técnicos, los descargamos y combinamos
+        if use_indicators:
+            df_rsi = load_rsi_data(symbol)
+            df_bbands = load_bbands_data(symbol)
+            df_macd = load_macd_data(symbol)
+            df_merged = merge_indicators(df_prices, df_rsi, df_bbands, df_macd)
+            df_model = df_merged.copy()
+            # Definimos las columnas de características:
+            features_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
+            # Agregamos indicadores si existen
+            for col in ["rsi", "upper_band", "middle_band", "lower_band", "macd"]:
+                if col in df_model.columns:
+                    features_cols.append(col)
+            data_for_model = df_model[features_cols].values
+            scaler_features = MinMaxScaler(feature_range=(0, 1))
+            scaled_data = scaler_features.fit_transform(data_for_model)
+            scaler_target = MinMaxScaler(feature_range=(0, 1))
+            scaler_target.fit(df_model[["close_price"]])
+        elif use_multivariate:
+            # Usamos solo las columnas de precios
+            df_model = df_prices[["ds", "close_price", "open_price", "high_price", "low_price", "volume"]].copy()
             features_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
             data_for_model = df_model[features_cols].values
             scaler_features = MinMaxScaler(feature_range=(0, 1))
@@ -132,11 +278,13 @@ def main_app():
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaler_target.fit(df_model[["close_price"]])
         else:
-            df_model = df[["ds", "close_price"]].copy()
+            # Solo se usa el precio de cierre
+            df_model = df_prices[["ds", "close_price"]].copy()
             data_for_model = df_model[["close_price"]].values
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
+        # División en datos de entrenamiento y test
         split_index = int(len(scaled_data) * (1 - test_size))
         train_data = scaled_data[:split_index]
         test_data = scaled_data[split_index:]
@@ -152,6 +300,7 @@ def main_app():
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+        # Construcción del modelo con tres capas Bidirectional LSTM
         model = Sequential()
         model.add(Bidirectional(LSTM(64, return_sequences=True), input_shape=(X_train.shape[1], X_train.shape[2])))
         model.add(Dropout(0.3))
@@ -163,6 +312,7 @@ def main_app():
         optimizer = Adam(learning_rate=learning_rate)
         model.compile(optimizer=optimizer, loss="mean_squared_error")
 
+        # Entrenamiento del modelo con callbacks
         early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
         lr_reducer = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3)
         model.fit(X_train, y_train, validation_data=(X_val, y_val),
@@ -176,6 +326,7 @@ def main_app():
         rmse = np.sqrt(np.mean((y_test_deserialized - test_predictions_descaled) ** 2))
         mape = np.mean(np.abs((y_test_deserialized - test_predictions_descaled) / y_test_deserialized)) * 100
 
+        # Predicción futura iterativa
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
         current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -185,11 +336,11 @@ def main_app():
             new_feature = np.zeros((1, 1, X_train.shape[2]))
             new_feature[0, 0, 0] = future_pred
             current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
-
         future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
         return df_model, test_predictions_descaled, y_test_deserialized, future_preds, rmse, mape
 
+    # 7. Visualización del gráfico histórico de precio (sin horas)
     df = load_and_clean_data(symbol)
     if df is not None and len(df) > 0:
         df_chart = df.copy()
@@ -204,6 +355,7 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
+    # 8. Pestañas: Entrenamiento/Test y Predicción de Precios
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_choice}"])
 
     with tabs[0]:
@@ -216,6 +368,7 @@ def main_app():
                     window_size=window_size,
                     test_size=0.2,
                     use_multivariate=use_multivariate,
+                    use_indicators=use_indicators,
                     epochs=epochs_val,
                     batch_size=batch_size_val,
                     learning_rate=learning_rate_val
@@ -256,9 +409,9 @@ def main_app():
             df_model, test_preds, y_test_deserialized, future_preds, rmse, mape = result
             last_date = df_model["ds"].iloc[-1]
             current_price = df_model["close_price"].iloc[-1]
-            # Generamos un rango de fechas diarias sin horas
+            # Generamos un rango de fechas diarias sin horas (freq="D")
             future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
-            # Incluimos el precio actual como primer punto en la serie
+            # La serie de predicción comienza con el precio actual
             pred_series = np.concatenate(([current_price], future_preds))
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(
