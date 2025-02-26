@@ -26,14 +26,13 @@ def main_app():
         .stButton>button { background-color: #2E7BCF; color: white; }
         </style>
         """, unsafe_allow_html=True)
-
     st.title("Crypto Price Predictions 🔮")
     st.markdown("Utiliza la barra lateral para elegir la criptomoneda y el escenario de predicción.")
     st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
 
     # Configuración de la barra lateral
     st.sidebar.header("Configuración de la predicción")
-
+    
     # Diccionario ampliado de criptomonedas
     alpha_symbols = {
         "Bitcoin (BTC)":      "BTC",
@@ -56,6 +55,7 @@ def main_app():
     st.sidebar.subheader("Parámetros de Predicción Básicos")
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30,
                                 help="Cantidad de días a futuro que deseas predecir.")
+    # Se reduce el rango del tamaño de ventana a 5-60 días
     window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30,
                                     help="Número de días usados como ventana para entrenar la LSTM.")
     use_multivariate = st.sidebar.checkbox("Usar datos multivariados (Open, High, Low, Volume)",
@@ -79,7 +79,7 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Función para descargar y limpiar datos desde Alpha Vantage
+    # Función para descargar y limpiar datos de Alpha Vantage
     @st.cache_data
     def load_and_clean_data(symbol):
         api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
@@ -98,6 +98,7 @@ def main_app():
             return None
         data_io = StringIO(response.text)
         df = pd.read_csv(data_io)
+        # Renombramos las columnas para homogeneizar el DataFrame
         df.rename(columns={
             "timestamp":   "ds",
             "open":        "open_price",
@@ -113,21 +114,19 @@ def main_app():
         df.reset_index(drop=True, inplace=True)
         return df
 
-    # Función para crear secuencias para la LSTM
-    def create_sequences(data, window_size=60):
+    # Función para crear secuencias (ventanas) de datos para la LSTM
+    def create_sequences(data, window_size=30):
         if len(data) <= window_size:
             st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
             return None, None
         X, y = [], []
         for i in range(window_size, len(data)):
             X.append(data[i-window_size:i])
-            y.append(data[i, 0])
-        X, y = np.array(X), np.array(y)
-        return X, y
+            y.append(data[i, 0])  # Se utiliza el precio de cierre
+        return np.array(X), np.array(y)
 
-    # Función para entrenar el modelo y generar predicciones,
-    # guardando y cargando automáticamente los pesos del modelo.
-    def train_and_predict_lstm(symbol, horizon_days=30, window_size=60, test_size=0.2,
+    # Función para entrenar el modelo y generar predicciones
+    def train_and_predict_lstm(symbol, horizon_days=30, window_size=30, test_size=0.2,
                                use_multivariate=False, epochs=10, batch_size=32, learning_rate=0.001):
         df = load_and_clean_data(symbol)
         if df is None:
@@ -176,8 +175,9 @@ def main_app():
         optimizer = Adam(learning_rate=learning_rate)
         model.compile(optimizer=optimizer, loss='mean_squared_error')
 
-        if os.path.exists("model_weights.h5"):
-            model.load_weights("model_weights.h5")
+        # Cargar pesos guardados si existen
+        if os.path.exists("model_weights.weights.h5"):
+            model.load_weights("model_weights.weights.h5")
 
         early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
         lr_reducer = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
@@ -185,7 +185,8 @@ def main_app():
                   epochs=epochs, batch_size=batch_size, verbose=1,
                   callbacks=[early_stop, lr_reducer])
 
-        model.save_weights("model_weights.h5")
+        # Guardar pesos para futuras ejecuciones
+        model.save_weights("model_weights.weights.h5")
 
         test_predictions = model.predict(X_test)
         test_predictions_descaled = scaler_target.inverse_transform(test_predictions)
@@ -218,12 +219,7 @@ def main_app():
             title=f"Histórico de Precio de {crypto_choice}",
             labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
-        fig_hist.update_layout(
-            xaxis=dict(
-                type='category',
-                tickangle=45
-            )
-        )
+        fig_hist.update_layout(xaxis=dict(type='category', tickangle=45))
         st.plotly_chart(fig_hist, use_container_width=True)
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
@@ -258,11 +254,8 @@ def main_app():
                                               mode='lines', name='Precio Real (Test)'))
                 fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(),
                                               mode='lines', name='Predicción (Test)'))
-                fig_test.update_layout(
-                    title=f"Comparación en Test: {crypto_choice}",
-                    xaxis_title="Fecha",
-                    yaxis_title="Precio"
-                )
+                fig_test.update_layout(title=f"Comparación en Test: {crypto_choice}",
+                                       xaxis_title="Fecha", yaxis_title="Precio")
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
                 st.error("No se pudo entrenar el modelo debido a un error en la carga de datos.")
@@ -271,21 +264,16 @@ def main_app():
         st.header(f"Predicción de Precios - {crypto_choice}")
         if 'result' in locals() and result is not None:
             df_model, test_preds, y_test_deserialized, future_preds, rmse, mape = result
-            # Incluimos el precio actual como punto de partida en la serie de predicción
+            # Incluir el precio actual como inicio de la serie de predicción
             last_date = df_model['ds'].iloc[-1]
             current_price = df_model['close_price'].iloc[-1]
-            # Generamos fechas para el pronóstico que incluyen el día actual
             future_dates = pd.date_range(start=last_date, periods=horizon+1)
-            # La serie de predicción empieza con el precio actual seguido de las predicciones
             pred_series = np.concatenate(([current_price], future_preds))
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(x=future_dates, y=pred_series,
                                             mode='lines+markers', name='Predicción Futura'))
-            fig_future.update_layout(
-                title=f"Predicción a Futuro ({horizon} días) - {crypto_choice}",
-                xaxis_title="Fecha",
-                yaxis_title="Precio"
-            )
+            fig_future.update_layout(title=f"Predicción a Futuro ({horizon} días) - {crypto_choice}",
+                                     xaxis_title="Fecha", yaxis_title="Precio")
             st.plotly_chart(fig_future, use_container_width=True)
             st.subheader("Valores Numéricos de la Predicción Futura")
             future_df = pd.DataFrame({'Fecha': future_dates, 'Predicción': pred_series})
