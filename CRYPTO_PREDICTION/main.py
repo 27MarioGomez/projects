@@ -258,12 +258,8 @@ def main_app():
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
 
 # ---------------------------------------------------------------------
-#  EJECUCIÓN CON PYTHON vs STREAMLIT
+# EJECUCIÓN
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    # Si ejecutas "python main.py", NO se lanza la app de Streamlit, solo muestra este mensaje
-    print("Script preparado. Si quieres ver la app, usa:  streamlit run main.py")
-else:
-    # Cuando uses "streamlit run main.py", Streamlit establecerá __name__ != '__main__'
-    # y entonces llamará a la función que contiene todo el dashboard
     main_app()
+
