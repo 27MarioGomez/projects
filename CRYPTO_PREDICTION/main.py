@@ -22,14 +22,14 @@ import time
 # 1. Funciones de apoyo y diccionarios
 #########################
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """Calcula el MAPE evitando divisiones por cero."""
+    """Calcula el MAPE evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario para CoinCap (solo se incluyen criptos con histórico completo)
+# Diccionario para CoinCap: se incluyen aquellas criptomonedas con histórico completo
 coincap_ids = {
     "Bitcoin (BTC)":      "bitcoin",
     "Ethereum (ETH)":     "ethereum",
-    "XRP":                "xrp",       # Usamos "xrp" en lugar de "ripple"
+    "XRP":                "ripple",       # XRP se encuentra como 'ripple'
     "Stellar (XLM)":      "stellar",
     "Solana (SOL)":       "solana",
     "Cardano (ADA)":      "cardano",
@@ -45,12 +45,13 @@ coincap_ids = {
 # 2. Función para descargar datos desde CoinCap con reintentos
 #########################
 @st.cache_data
-def load_coincap_data(coin_id, vs_currency="usd", days="max", max_retries=3):
+def load_coincap_data(coin_id, days="max", max_retries=3):
     """
-    Descarga el histórico de precios desde CoinCap con reintentos en caso de error 429.
+    Descarga el histórico de precios desde CoinCap usando el endpoint correcto.
+    Se utiliza 'interval=d1' y 'days=max' para obtener todo el histórico disponible.
     Devuelve un DataFrame con columnas 'ds' y 'close_price'.
     """
-    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?vs_currency={vs_currency}&days={days}"
+    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1&days={days}"
     headers = {"User-Agent": "Mozilla/5.0"}
     for attempt in range(max_retries):
         resp = requests.get(url, headers=headers)
@@ -60,7 +61,10 @@ def load_coincap_data(coin_id, vs_currency="usd", days="max", max_retries=3):
                 st.error("CoinCap: Datos no disponibles (falta 'data').")
                 return None
             df = pd.DataFrame(data["data"])
-            # Se asume que la API devuelve 'time' y 'priceUsd'
+            if df.empty:
+                st.error("CoinCap: CSV vacío.")
+                return None
+            # Se espera que CoinCap devuelva 'time' y 'priceUsd'
             if "time" not in df.columns or "priceUsd" not in df.columns:
                 st.error("CoinCap: Las columnas 'time' o 'priceUsd' no se encontraron.")
                 st.write(df.head())
@@ -87,7 +91,8 @@ def load_coincap_data(coin_id, vs_currency="usd", days="max", max_retries=3):
 #########################
 def add_indicators(df):
     """
-    Calcula RSI, MACD y Bollinger Bands con pandas_ta y aplica forward fill.
+    Calcula RSI, MACD y Bollinger Bands con pandas_ta.
+    Se aplica forward fill para alinear datos.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -230,7 +235,6 @@ def main_app():
                                  help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
-
     use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True,
                                           help="Calcula indicadores técnicos localmente para enriquecer los datos.")
 
@@ -264,7 +268,7 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
-    # Pestañas
+    # Pestañas para entrenamiento y predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
