@@ -29,7 +29,7 @@ def main_app():
 
     st.title("Crypto Price Predictions 🔮")
     st.markdown("Utiliza la barra lateral para elegir la criptomoneda y el escenario de predicción.")
-    st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
+    st.markdown("**Fuente de Datos:** Alpha Vantage")
 
     # Configuración de la barra lateral
     st.sidebar.header("Configuración de la predicción")
@@ -53,12 +53,12 @@ def main_app():
     symbol = alpha_symbols[crypto_choice]
 
     # Parámetros básicos de predicción
-    st.sidebar.subheader("Parámetros de Predicción Básicos")
+    st.sidebar.subheader("Ajustes de predicción")
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30,
                                 help="Cantidad de días a futuro que deseas predecir.")
     # Ajuste del rango del tamaño de ventana para el histórico disponible
     window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30,
-                                    help="Número de días usados como ventana para entrenar la LSTM.")
+                                    help="Número de días pasados para calcular el futuro. Wow!")
     use_multivariate = st.sidebar.checkbox("Usar datos multivariados (Open, High, Low, Volume)",
                                            value=False,
                                            help="Incluir datos adicionales además del precio de cierre.")
@@ -270,14 +270,14 @@ def main_app():
             future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=horizon)
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(x=future_dates, y=future_preds,
-                                            mode='lines+markers', name='Predicción Futura'))
+                                            mode='lines+markers', name='Predicción'))
             fig_future.update_layout(
                 title=f"Predicción a {horizon} días - {crypto_choice}",
                 xaxis_title="Fecha",
                 yaxis_title="Precio"
             )
             st.plotly_chart(fig_future, use_container_width=True)
-            st.subheader("Valores Numéricos de la Predicción Futura")
+            st.subheader("Valores Numéricos de la Predicción")
             future_df = pd.DataFrame({'Fecha': future_dates, 'Predicción': future_preds})
             st.dataframe(future_df)
         else:
