@@ -113,8 +113,12 @@ def main_app():
         if response.status_code != 200:
             st.error("Error al obtener datos de Alpha Vantage.")
             return None
+
         data_io = StringIO(response.text)
         df = pd.read_csv(data_io)
+
+        # Forzar la lectura con dayfirst=True para evitar fechas invertidas
+        # (p.ej. si viene 14-03-2024, interpretarlo como 14 de marzo, no 03/14/2024).
         df.rename(columns={
             "timestamp":   "ds",
             "open":        "open_price",
@@ -124,9 +128,14 @@ def main_app():
             "volume":      "volume",
             "market cap":  "market_cap"
         }, inplace=True)
-        df['ds'] = pd.to_datetime(df['ds'], errors='coerce')
+
+        # Parseo de fecha con dayfirst
+        df['ds'] = pd.to_datetime(df['ds'], dayfirst=True, errors='coerce')
+
+        # Eliminar fechas inválidas
         df.dropna(subset=['ds'], inplace=True)
-        df.sort_values(by='ds', inplace=True)
+        # Ordenar ascendente
+        df.sort_values(by='ds', ascending=True, inplace=True)
         df.reset_index(drop=True, inplace=True)
         return df
 
@@ -154,12 +163,14 @@ def main_app():
             st.error("No se pudieron cargar los datos. Verifica la API Key o la disponibilidad del servicio.")
             return None
 
+        # Selección de columnas y escalado
         if use_multivariate:
             df_model = df[['ds', 'close_price', 'open_price', 'high_price', 'low_price', 'volume']].copy()
             features_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
             data_for_model = df_model[features_cols].values
             scaler_features = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_features.fit_transform(data_for_model)
+
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaler_target.fit(df_model[["close_price"]])
         else:
@@ -168,6 +179,7 @@ def main_app():
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
+        # Dividir en train/test
         split_index = int(len(scaled_data) * (1 - test_size))
         train_data = scaled_data[:split_index]
         test_data = scaled_data[split_index:]
@@ -179,11 +191,12 @@ def main_app():
         if X_test is None:
             return None
 
+        # Dividir en train/val (90%/10%)
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # Modelo mejorado: tres capas Bidirectional LSTM
+        # TRES CAPAS RECURRENTES (mejora)
         model = Sequential()
         model.add(Bidirectional(LSTM(64, return_sequences=True), input_shape=(X_train.shape[1], X_train.shape[2])))
         model.add(Dropout(0.3))
@@ -225,21 +238,29 @@ def main_app():
         return df_model, test_predictions_descaled, y_test_descaled, future_preds, rmse, mape
 
     # ---------------------------------------------------------------------
-    # MOSTRAR GRÁFICO HISTÓRICO DE PRECIO
+    # MOSTRAR GRÁFICO HISTÓRICO DE PRECIO ENCIMA DE LAS PESTAÑAS
     # ---------------------------------------------------------------------
     df = load_and_clean_data(symbol)
-    if df is not None:
-        # Mostramos solo el gráfico histórico de precio (formateo de fecha DD-MM-YYYY para el gráfico)
+    if df is not None and len(df) > 0:
+        # Formateamos fecha y mostramos el gráfico
         df_chart = df.copy()
         df_chart['ds'] = df_chart['ds'].dt.strftime('%d-%m-%Y')
+
         fig_hist = px.line(
             df_chart, x="ds", y="close_price",
             title=f"Histórico de Precio de {crypto_choice}",
             labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
+        # Forzamos tipo fecha en el eje x (con ticks en %d-%m-%Y)
+        fig_hist.update_layout(
+            xaxis=dict(
+                type='category',  # Mantenemos category para que no salten huecos
+                tickangle=45
+            )
+        )
         st.plotly_chart(fig_hist, use_container_width=True)
     else:
-        st.error("No se pudieron cargar los datos históricos.")
+        st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
     # ---------------------------------------------------------------------
     # DOS PESTAÑAS: "Entrenamiento y Test" y "Predicción de Precios"
