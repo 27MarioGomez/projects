@@ -12,10 +12,9 @@ from io import StringIO
 from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 import pandas_ta as ta
-
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout, Input, MultiHeadAttention, GlobalAveragePooling1D
+from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 
 # Función robusta para calcular MAPE sin división por cero
@@ -24,14 +23,10 @@ def robust_mape(y_true, y_pred, eps=1e-9):
 
 def main_app():
     """
-    App para predecir precios de criptomonedas usando un ensamble de:
-      - Modelo híbrido (Conv1D + LSTM)
-      - Modelo basado en atención (una versión simplificada de TFT)
-    Se descargan datos completos de Alpha Vantage, se calculan indicadores técnicos 
-    (RSI, MACD, BBANDS) y se ensambla la predicción promediando la salida de ambos modelos.
-    Se implementan comprobaciones para evitar NaN en las métricas.
+    App para predecir precios de criptomonedas usando un modelo LSTM (Conv1D + Bidirectional LSTM)
+    que se entrena con datos completos de Alpha Vantage y, opcionalmente, incluye indicadores técnicos.
+    Se cuida el escalado, la división de datos y el cálculo robusto de las métricas para evitar NaN.
     """
-
     # -------------------------------------------------------------
     # 1. Configuración de la página y estilo
     # -------------------------------------------------------------
@@ -85,7 +80,7 @@ def main_app():
     )
     use_multivariate = st.sidebar.checkbox(
         "Usar datos multivariados (OHLCV)", value=False,
-        help="Incluir open, high, low y volumen además del precio de cierre."
+        help="Incluir datos de apertura, máximo, mínimo y volumen además del precio de cierre."
     )
     use_indicators = st.sidebar.checkbox(
         "Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True,
@@ -112,7 +107,7 @@ def main_app():
         learning_rate_val = 0.0005
 
     # -------------------------------------------------------------
-    # 3. Descarga y limpieza de datos desde Alpha Vantage
+    # 3. Descarga y limpieza de datos desde Alpha Vantage (outputsize=full)
     # -------------------------------------------------------------
     @st.cache_data
     def load_and_clean_data(symbol):
@@ -148,6 +143,7 @@ def main_app():
         df.dropna(subset=["ds"], inplace=True)
         df.sort_values(by="ds", ascending=True, inplace=True)
         df.reset_index(drop=True, inplace=True)
+        # Filtrar filas con close_price <= 0
         df = df[df["close_price"] > 0].copy()
         return df
 
@@ -163,7 +159,7 @@ def main_app():
         return df
 
     # -------------------------------------------------------------
-    # 5. Creación de secuencias (ventanas)
+    # 5. Creación de secuencias (ventanas) para LSTM
     # -------------------------------------------------------------
     def create_sequences(data, window_size=30):
         if len(data) <= window_size:
@@ -171,12 +167,12 @@ def main_app():
             return None, None
         X, y = [], []
         for i in range(window_size, len(data)):
-            X.append(data[i - window_size : i])
+            X.append(data[i - window_size:i])
             y.append(data[i, 0])
         return np.array(X), np.array(y)
 
     # -------------------------------------------------------------
-    # 6. Modelo híbrido LSTM (Conv1D + LSTM)
+    # 6. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
     # -------------------------------------------------------------
     def build_lstm_model(input_shape, learning_rate=0.001):
         model = Sequential()
@@ -193,24 +189,7 @@ def main_app():
         return model
 
     # -------------------------------------------------------------
-    # 7. Modelo basado en atención (TFT-like simplificado)
-    # -------------------------------------------------------------
-    def build_tft_model(input_shape, learning_rate=0.001):
-        """
-        Construye un modelo simplificado inspirado en el Temporal Fusion Transformer.
-        Utiliza una capa de atención multi-cabeza seguida de pooling global y capas densas.
-        """
-        model = Sequential()
-        model.add(Input(shape=input_shape))
-        model.add(MultiHeadAttention(num_heads=2, key_dim=input_shape[-1]))
-        model.add(GlobalAveragePooling1D())
-        model.add(Dense(64, activation="relu"))
-        model.add(Dense(1))
-        model.compile(optimizer=Adam(learning_rate=learning_rate), loss="mean_squared_error")
-        return model
-
-    # -------------------------------------------------------------
-    # 8. Ensamblado: Entrenamiento y predicción
+    # 7. Entrenamiento y predicción con el modelo LSTM
     # -------------------------------------------------------------
     def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
                           use_multivariate=False, use_indicators=False,
@@ -223,7 +202,6 @@ def main_app():
         if use_indicators:
             df_prices = add_indicators(df_prices)
 
-        # Selección de features
         if use_multivariate or use_indicators:
             feature_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
             for col in ["rsi", "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9",
@@ -242,7 +220,7 @@ def main_app():
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
-        # Verificar que hay suficientes datos
+        # Verificar que el conjunto de entrenamiento es suficiente
         split_index = int(len(scaled_data) * (1 - test_size))
         if split_index <= window_size:
             st.error("No hay suficientes datos para el conjunto de entrenamiento.")
@@ -263,7 +241,6 @@ def main_app():
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
         input_shape = (X_train.shape[1], X_train.shape[2])
-        # Entrenamos el modelo LSTM
         lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
         lstm_model.fit(
             X_train, y_train,
@@ -273,52 +250,36 @@ def main_app():
             verbose=1
         )
 
-        # Entrenamos el modelo TFT (simplificado)
-        tft_model = build_tft_model(input_shape, learning_rate=learning_rate)
-        tft_model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=1
-        )
-
-        # Predicción en test con ambos modelos
         lstm_preds_test = lstm_model.predict(X_test)
-        tft_preds_test = tft_model.predict(X_test)
-        ensemble_test = (lstm_preds_test + tft_preds_test) / 2.0
-
-        ensemble_test_descaled = scaler_target.inverse_transform(ensemble_test)
         y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
+        lstm_preds_descaled = scaler_target.inverse_transform(lstm_preds_test)
 
-        rmse = np.sqrt(np.mean((y_test_deserialized - ensemble_test_descaled) ** 2))
-        mape = robust_mape(y_test_deserialized, ensemble_test_descaled)
+        valid_mask = ~np.isnan(lstm_preds_descaled) & ~np.isnan(y_test_deserialized)
+        if np.sum(valid_mask) == 0:
+            rmse, mape = np.nan, np.nan
+        else:
+            rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - lstm_preds_descaled[valid_mask]) ** 2))
+            mape = robust_mape(y_test_deserialized[valid_mask], lstm_preds_descaled[valid_mask])
 
-        # Predicción futura iterativa (ensamblado LSTM + TFT)
+        # Predicción futura iterativa usando solo LSTM
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
         current_input = last_window.reshape(1, window_size, X_train.shape[2])
-        # Definimos wrappers para evitar retracing excesivo
         @tf.function
-        def predict_lstm(x):
+        def predict_model(x):
             return lstm_model(x)
-        @tf.function
-        def predict_tft(x):
-            return tft_model(x)
         for _ in range(horizon_days):
-            lstm_future_pred = predict_lstm(current_input)[0][0]
-            tft_future_pred = predict_tft(current_input)[0][0]
-            ensemble_future = (lstm_future_pred + tft_future_pred) / 2.0
-            future_preds_scaled.append(ensemble_future)
+            future_pred = predict_model(current_input)[0][0]
+            future_preds_scaled.append(future_pred)
             new_feature = np.zeros((1, 1, X_train.shape[2]))
-            new_feature[0, 0, 0] = ensemble_future
+            new_feature[0, 0, 0] = future_pred
             current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
         future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-        return df_model, ensemble_test_descaled, y_test_deserialized, future_preds, rmse, mape
+        return df_model, lstm_preds_descaled, y_test_deserialized, future_preds, rmse, mape
 
     # -------------------------------------------------------------
-    # 9. Visualización del histórico (formato DD-MM-YYYY)
+    # 8. Visualización del histórico (formato DD-MM-YYYY)
     # -------------------------------------------------------------
     df_prices = load_and_clean_data(symbol)
     if df_prices is not None and len(df_prices) > 0:
@@ -335,7 +296,7 @@ def main_app():
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
     # -------------------------------------------------------------
-    # 10. Pestañas: Entrenamiento/Test y Predicción Futura
+    # 9. Pestañas: Entrenamiento/Test y Predicción Futura
     # -------------------------------------------------------------
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
@@ -373,7 +334,7 @@ def main_app():
                     x=test_dates,
                     y=test_preds.flatten(),
                     mode="lines",
-                    name="Ensamble (Test)"
+                    name="Predicción (Test)"
                 ))
                 fig_test.update_layout(
                     title=f"Comparación en Test: {crypto_name}",
@@ -397,7 +358,7 @@ def main_app():
                 x=future_dates,
                 y=pred_series,
                 mode="lines+markers",
-                name="Predicción Futura (Ensamble)"
+                name="Predicción Futura"
             ))
             fig_future.update_layout(
                 title=f"Predicción a Futuro ({horizon} días) - {crypto_name}",
