@@ -13,21 +13,22 @@ from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 import pandas_ta as ta
 
-# Modelos LSTM + RF
+# Modelos: LSTM (usando Keras) y RandomForest de scikit-learn
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from sklearn.ensemble import RandomForestRegressor
 
-
 def main_app():
     """
-    Aplicación que ensambla un modelo Conv1D+LSTM con un RandomForest para
-    predecir precios de criptomonedas usando datos de Alpha Vantage.
+    Aplicación para predecir precios de criptomonedas usando datos de Alpha Vantage.
+    Se aprovecha el parámetro outputsize=full para obtener el máximo histórico.
+    Se calcula un ensamble entre un modelo híbrido (Conv1D+LSTM) y un RandomForestRegressor,
+    y se emplea un cálculo robusto de MAPE para evitar divisiones por cero.
     """
 
     # -------------------------------------------------------------
-    # 1. CONFIGURACIÓN DE LA PÁGINA Y ESTILO
+    # 1. Configuración de la página y estilo
     # -------------------------------------------------------------
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
     st.markdown(
@@ -44,10 +45,9 @@ def main_app():
     st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
 
     # -------------------------------------------------------------
-    # 2. CONFIGURACIÓN DE LA BARRA LATERAL
+    # 2. Configuración de la barra lateral
     # -------------------------------------------------------------
     st.sidebar.header("Configuración de la predicción")
-
     alpha_symbols = {
         "Bitcoin (BTC)":      "BTC",
         "Ethereum (ETH)":     "ETH",
@@ -80,7 +80,7 @@ def main_app():
     )
     use_multivariate = st.sidebar.checkbox(
         "Usar datos multivariados (OHLCV)", value=False,
-        help="Incluir open, high, low y volumen además del precio de cierre."
+        help="Incluir datos de apertura, máximo, mínimo y volumen además del precio de cierre."
     )
     use_indicators = st.sidebar.checkbox(
         "Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True,
@@ -89,7 +89,7 @@ def main_app():
 
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox(
-        "Elige un escenario:", 
+        "Elige un escenario:",
         ["Pesimista", "Neutro", "Optimista"],
         help="Ajusta automáticamente los hiperparámetros del modelo."
     )
@@ -107,10 +107,16 @@ def main_app():
         learning_rate_val = 0.0005
 
     # -------------------------------------------------------------
-    # 3. FUNCIÓN PARA DESCARGAR Y LIMPIAR DATOS DE ALPHA VANTAGE
+    # 3. Descarga y limpieza de datos desde Alpha Vantage (outputsize=full)
     # -------------------------------------------------------------
     @st.cache_data
     def load_and_clean_data(symbol):
+        """
+        Descarga el CSV diario de Alpha Vantage para la criptomoneda dada,
+        utilizando outputsize=full para obtener el histórico completo.
+        Renombra columnas y ordena el DataFrame por fecha.
+        Se filtran datos donde el precio de cierre sea <= 0.
+        """
         api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
         url = (
             "https://www.alphavantage.co/query"
@@ -143,12 +149,19 @@ def main_app():
         df.dropna(subset=["ds"], inplace=True)
         df.sort_values(by="ds", ascending=True, inplace=True)
         df.reset_index(drop=True, inplace=True)
+        # Filtrar datos inválidos
+        df = df[df["close_price"] > 0].copy()
         return df
 
     # -------------------------------------------------------------
-    # 4. AÑADIR INDICADORES TÉCNICOS (pandas_ta)
+    # 4. Cálculo de indicadores técnicos con pandas_ta
     # -------------------------------------------------------------
     def add_indicators(df):
+        """
+        Calcula RSI, MACD y Bollinger Bands a partir del precio de cierre.
+        Se añaden columnas como 'rsi', 'MACD_12_26_9', 'BBL_20_2.0', etc.
+        Se aplica forward fill para alinear datos.
+        """
         df["rsi"] = ta.rsi(df["close_price"], length=14)
         macd_df = ta.macd(df["close_price"])
         bbands_df = ta.bbands(df["close_price"], length=20, std=2)
@@ -157,7 +170,7 @@ def main_app():
         return df
 
     # -------------------------------------------------------------
-    # 5. CREACIÓN DE SECUENCIAS (WINDOW_SIZE)
+    # 5. Creación de secuencias para la LSTM
     # -------------------------------------------------------------
     def create_sequences(data, window_size=30):
         if len(data) <= window_size:
@@ -166,11 +179,11 @@ def main_app():
         X, y = [], []
         for i in range(window_size, len(data)):
             X.append(data[i - window_size : i])
-            y.append(data[i, 0])
+            y.append(data[i, 0])  # Se asume que la primera columna es close_price
         return np.array(X), np.array(y)
 
     # -------------------------------------------------------------
-    # 6. MODELO HÍBRIDO (Conv1D + LSTM)
+    # 6. Modelo híbrido: Conv1D + LSTM
     # -------------------------------------------------------------
     def build_hybrid_model(input_shape, learning_rate=0.001):
         model = Sequential()
@@ -187,22 +200,26 @@ def main_app():
         return model
 
     # -------------------------------------------------------------
-    # 7. ENTRENAMIENTO Y PREDICCIÓN (ENSAMBLE)
+    # 7. Cálculo robusto de MAPE
+    # -------------------------------------------------------------
+    def robust_mape(y_true, y_pred, eps=1e-9):
+        """
+        Calcula el MAPE de forma robusta para evitar división por cero.
+        """
+        return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
+
+    # -------------------------------------------------------------
+    # 8. Entrenamiento y predicción con ensamble (LSTM + RF)
     # -------------------------------------------------------------
     def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
                           use_multivariate=False, use_indicators=False,
                           epochs=10, batch_size=32, learning_rate=0.001):
-        """
-        Ensambla:
-          - Modelo híbrido (Conv1D+LSTM).
-          - RandomForestRegressor.
-        Hace un promedio de predicciones (ensemble).
-        """
+        # Descarga y limpieza de datos
         df_prices = load_and_clean_data(symbol)
         if df_prices is None:
             return None
 
-        # Indicadores
+        # Añadir indicadores si se solicita
         if use_indicators:
             df_prices = add_indicators(df_prices)
 
@@ -225,8 +242,12 @@ def main_app():
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
-        # Split train/test
+        # División en train y test
         split_index = int(len(scaled_data) * (1 - test_size))
+        if split_index <= window_size:
+            st.error("No hay suficientes datos para el conjunto de entrenamiento después de la división.")
+            return None
+
         train_data = scaled_data[:split_index]
         test_data = scaled_data[split_index:]
 
@@ -237,15 +258,14 @@ def main_app():
         if X_test is None:
             return None
 
-        # Subdivisión train/val
+        # Subdivisión de validación
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # --------------------- Modelo LSTM ---------------------
+        # Modelo LSTM
         input_shape = (X_train.shape[1], X_train.shape[2])
         lstm_model = build_hybrid_model(input_shape, learning_rate=learning_rate)
-        # Sin callbacks que generen el bug
         lstm_model.fit(
             X_train, y_train,
             validation_data=(X_val, y_val),
@@ -254,41 +274,24 @@ def main_app():
             verbose=1
         )
 
-        # --------------------- RandomForest ---------------------
-        # Flatten para random forest
+        # Modelo RandomForest
         X_train_flat = X_train.reshape(X_train.shape[0], -1)
-        X_val_flat = X_val.reshape(X_val.shape[0], -1)
         X_test_flat = X_test.reshape(X_test.shape[0], -1)
-
-        rf_model = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=10,
-            random_state=42,
-            n_jobs=-1
-        )
+        rf_model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42, n_jobs=-1)
         rf_model.fit(X_train_flat, y_train)
 
-        # Predicción en test con ambos
+        # Predicción en test
         lstm_preds_test = lstm_model.predict(X_test)
         rf_preds_test = rf_model.predict(X_test_flat).reshape(-1, 1)
-        # Ensamble
         ensemble_test = (lstm_preds_test + rf_preds_test) / 2.0
-        # Desescalado
+
         ensemble_test_descaled = scaler_target.inverse_transform(ensemble_test)
         y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
 
-        # Evitar NaN en RMSE/MAPE
-        mask_nonzero = (y_test_deserialized != 0).flatten()
-        y_test_valid = y_test_deserialized[mask_nonzero]
-        ensemble_test_valid = ensemble_test_descaled[mask_nonzero]
-        if len(y_test_valid) == 0:
-            rmse = np.nan
-            mape = np.nan
-        else:
-            rmse = np.sqrt(np.mean((y_test_valid - ensemble_test_valid) ** 2))
-            mape = np.mean(np.abs((y_test_valid - ensemble_test_valid) / y_test_valid)) * 100
+        rmse = np.sqrt(np.mean((y_test_deserialized - ensemble_test_descaled) ** 2))
+        mape = robust_mape(y_test_deserialized, ensemble_test_descaled)
 
-        # Predicción futura (ensamble)
+        # Predicción futura iterativa (ensamble)
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
         current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -297,18 +300,16 @@ def main_app():
             rf_input = current_input.reshape(1, -1)
             rf_future_pred = rf_model.predict(rf_input)[0]
             ensemble_future = (lstm_future_pred + rf_future_pred) / 2.0
-
             future_preds_scaled.append(ensemble_future)
             new_feature = np.zeros((1, 1, X_train.shape[2]))
             new_feature[0, 0, 0] = ensemble_future
             current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
-
         future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
         return df_model, ensemble_test_descaled, y_test_deserialized, future_preds, rmse, mape
 
     # -------------------------------------------------------------
-    # 8. VISUALIZACIÓN HISTÓRICA
+    # 9. Visualización del histórico (formato DD-MM-YYYY)
     # -------------------------------------------------------------
     df_prices = load_and_clean_data(symbol)
     if df_prices is not None and len(df_prices) > 0:
@@ -325,7 +326,7 @@ def main_app():
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
     # -------------------------------------------------------------
-    # 9. PESTAÑAS: ENTRENAMIENTO/TEST Y PREDICCIÓN
+    # 10. Pestañas: Entrenamiento/Test y Predicción Futura
     # -------------------------------------------------------------
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
@@ -348,13 +349,8 @@ def main_app():
                 df_model, test_preds, y_test_real, future_preds, rmse, mape = result
                 st.success("Entrenamiento y predicción completados!")
                 col1, col2 = st.columns(2)
-                if pd.isna(rmse) or pd.isna(mape):
-                    col1.metric("RMSE (Test)", "NaN")
-                    col2.metric("MAPE (Test)", "NaN%")
-                else:
-                    col1.metric("RMSE (Test)", f"{rmse:.2f}")
-                    col2.metric("MAPE (Test)", f"{mape:.2f}%")
-
+                col1.metric("RMSE (Test)", f"{rmse:.2f}")
+                col2.metric("MAPE (Test)", f"{mape:.2f}%")
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
