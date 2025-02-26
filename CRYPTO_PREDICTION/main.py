@@ -47,7 +47,6 @@ def main_app():
     st.sidebar.header("Configuración de la predicción")
 
     # Diccionario ampliado de símbolos para Alpha Vantage
-    # (Se incluyen algunas de las criptomonedas más populares soportadas)
     alpha_symbols = {
         "Bitcoin (BTC)":  "BTC",
         "Ethereum (ETH)": "ETH",
@@ -63,7 +62,6 @@ def main_app():
         "Binance Coin (BNB)": "BNB"
     }
 
-    # Selección de la cripto
     crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(alpha_symbols.keys()))
     symbol = alpha_symbols[crypto_choice]
 
@@ -122,8 +120,6 @@ def main_app():
             return None
         data_io = StringIO(response.text)
         df = pd.read_csv(data_io)
-
-        # Forzar la lectura con dayfirst=True para evitar fechas invertidas
         df.rename(columns={
             "timestamp":   "ds",
             "open":        "open_price",
@@ -133,7 +129,6 @@ def main_app():
             "volume":      "volume",
             "market cap":  "market_cap"
         }, inplace=True)
-
         df['ds'] = pd.to_datetime(df['ds'], dayfirst=True, errors='coerce')
         df.dropna(subset=['ds'], inplace=True)
         df.sort_values(by='ds', ascending=True, inplace=True)
@@ -170,7 +165,6 @@ def main_app():
             data_for_model = df_model[features_cols].values
             scaler_features = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_features.fit_transform(data_for_model)
-
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaler_target.fit(df_model[["close_price"]])
         else:
@@ -179,7 +173,6 @@ def main_app():
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
-        # Dividir en train/test
         split_index = int(len(scaled_data) * (1 - test_size))
         train_data = scaled_data[:split_index]
         test_data = scaled_data[split_index:]
@@ -191,12 +184,11 @@ def main_app():
         if X_test is None:
             return None
 
-        # Dividir en train/val (90%/10%)
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # TRES CAPAS RECURRENTES (mejora)
+        # Modelo mejorado: tres capas Bidirectional LSTM
         model = Sequential()
         model.add(Bidirectional(LSTM(64, return_sequences=True), input_shape=(X_train.shape[1], X_train.shape[2])))
         model.add(Dropout(0.3))
@@ -225,7 +217,6 @@ def main_app():
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
         current_input = last_window.reshape(1, window_size, X_train.shape[2])
-
         for _ in range(horizon_days):
             future_pred = model.predict(current_input)[0][0]
             future_preds_scaled.append(future_pred)
@@ -243,15 +234,12 @@ def main_app():
     df = load_and_clean_data(symbol)
     if df is not None and len(df) > 0:
         df_chart = df.copy()
-        # Formateamos fecha en DD-MM-YYYY para que sea más amigable
         df_chart['ds'] = df_chart['ds'].dt.strftime('%d-%m-%Y')
-
         fig_hist = px.line(
             df_chart, x="ds", y="close_price",
             title=f"Histórico de Precio de {crypto_choice}",
             labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
-        # Ajustes para la legibilidad del eje X
         fig_hist.update_layout(
             xaxis=dict(
                 type='category',
@@ -284,11 +272,9 @@ def main_app():
             if result is not None:
                 df_model, test_preds, y_test_real, future_preds, rmse, mape = result
                 st.success("Entrenamiento y predicción completados!")
-                
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
-                
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model['ds'].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
@@ -320,13 +306,11 @@ def main_app():
                 yaxis_title="Precio"
             )
             st.plotly_chart(fig_future, use_container_width=True)
-            
             st.subheader("Valores Numéricos de la Predicción Futura")
             future_df = pd.DataFrame({'Fecha': future_dates, 'Predicción': future_preds})
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
-
 
 # ---------------------------------------------------------------------
 # EJECUCIÓN
