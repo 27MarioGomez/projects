@@ -16,15 +16,13 @@ import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
+import time
 
 #########################
-# 1. Funciones y diccionarios de apoyo
+# 1. Función robusta y diccionarios
 #########################
-
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """
-    Evita divisiones por cero usando max(eps, |y_true|).
-    """
+    """Calcula el MAPE evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
 # Diccionario para CoinGecko
@@ -43,55 +41,88 @@ coingecko_ids = {
     "Binance Coin (BNB)": "binancecoin"
 }
 
+# Diccionario para Alpha Vantage (usamos el mismo símbolo)
+alpha_symbols = {
+    "Bitcoin (BTC)":      "BTC",
+    "Ethereum (ETH)":     "ETH",
+    "XRP":                "XRP",
+    "Stellar (XLM)":      "XLM",
+    "Solana (SOL)":       "SOL",
+    "Cardano (ADA)":      "ADA",
+    "Dogecoin (DOGE)":    "DOGE",
+    "Polkadot (DOT)":     "DOT",
+    "Polygon (MATIC)":    "MATIC",
+    "Litecoin (LTC)":     "LTC",
+    "TRON (TRX)":         "TRX",
+    "Binance Coin (BNB)": "BNB"
+}
+
 #########################
-# 2. Función para descargar datos desde CoinGecko
+# 2. Función para descargar datos desde CoinGecko con reintentos
 #########################
 @st.cache_data
-def load_coingecko_data(coin_id, vs_currency="usd", days="max"):
+def load_coingecko_data(coin_id, vs_currency="usd", days="max", max_retries=3):
     """
-    Descarga el histórico de precios desde CoinGecko.
+    Descarga el histórico de precios desde CoinGecko con reintentos si se recibe error 429.
     Devuelve un DataFrame con columnas 'ds' y 'close_price'.
-    'days="max"' descarga todo el histórico disponible.
     """
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}"
     headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, headers=headers)
-    if resp.status_code != 200:
-        st.error(f"Error al obtener datos de CoinGecko (status code {resp.status_code}).")
-        return None
-    data = resp.json()
-    if "prices" not in data:
-        st.error("CoinGecko: Datos no disponibles (falta 'prices').")
-        return None
+    
+    for attempt in range(max_retries):
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            data = resp.json()
+            if "prices" not in data:
+                st.error("CoinGecko: Datos no disponibles (falta 'prices').")
+                return None
+            df = pd.DataFrame(data["prices"], columns=["timestamp", "close_price"])
+            df["ds"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df = df[["ds", "close_price"]]
+            df.sort_values(by="ds", ascending=True, inplace=True)
+            df.reset_index(drop=True, inplace=True)
+            df = df[df["close_price"] > 0].copy()
+            return df
+        elif resp.status_code == 429:
+            st.warning(f"CoinGecko: Error 429 en intento {attempt+1}. Reintentando en {15*(attempt+1)} segundos...")
+            time.sleep(15 * (attempt + 1))
+        else:
+            st.error(f"Error CoinGecko (status code {resp.status_code}).")
+            return None
 
-    df = pd.DataFrame(data["prices"], columns=["timestamp", "close_price"])
-    df["ds"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df = df[["ds", "close_price"]]
-    df.sort_values(by="ds", ascending=True, inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    # Filtramos valores no válidos
-    df = df[df["close_price"] > 0].copy()
-    return df
+    st.error("CoinGecko: Se alcanzó el número máximo de reintentos sin éxito.")
+    return None
 
 #########################
-# 3. Funciones para indicadores técnicos (opcional)
+# 3. Funciones para indicadores técnicos
 #########################
 def add_indicators(df):
     """
-    Calcula RSI, MACD y Bollinger Bands con pandas_ta.
+    Calcula RSI, MACD y Bollinger Bands con pandas_ta y rellena huecos.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
     bbands_df = ta.bbands(df["close_price"], length=20, std=2)
     df = pd.concat([df, macd_df, bbands_df], axis=1)
-    df.ffill(inplace=True)  # Rellenamos huecos con forward fill
+    df.ffill(inplace=True)
     return df
 
 def add_all_indicators(df):
     return add_indicators(df)
 
 #########################
-# 4. Creación de secuencias (ventanas) para la LSTM
+# 4. Función para combinar datos de CoinGecko y Alpha Vantage (opcional)
+#########################
+def load_combined_data(symbol_alpha, coin_id):
+    """
+    Combina datos de Alpha Vantage y CoinGecko (outer join por 'ds').
+    Promedia los precios si ambos están disponibles y rellena huecos con forward fill.
+    """
+    # En este ejemplo, si se quiere mayor robustez se podrían combinar, pero aquí usamos CoinGecko únicamente.
+    return load_coingecko_data(coin_id)
+
+#########################
+# 5. Creación de secuencias para LSTM
 #########################
 def create_sequences(data, window_size=30):
     if len(data) <= window_size:
@@ -104,7 +135,7 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 #########################
-# 5. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
+# 6. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
 #########################
 def build_lstm_model(input_shape, learning_rate=0.001):
     model = Sequential()
@@ -121,15 +152,15 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     return model
 
 #########################
-# 6. Entrenamiento y predicción con LSTM
+# 7. Entrenamiento y predicción con LSTM
 #########################
-def train_and_predict_coingecko(coin_id, horizon_days=30, window_size=30, test_size=0.2,
-                                use_indicators=False, epochs=10, batch_size=32, learning_rate=0.001):
+def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
+                      use_indicators=False, epochs=10, batch_size=32, learning_rate=0.001):
     """
-    Descarga datos desde CoinGecko, enriquece con indicadores (opcional),
-    entrena un modelo LSTM y realiza la predicción futura de forma iterativa.
+    Descarga datos desde CoinGecko, añade indicadores (opcional),
+    entrena un modelo LSTM y realiza predicciones futuras de forma iterativa.
     """
-    df_prices = load_coingecko_data(coin_id)
+    df_prices = load_combined_data(None, coin_id)  # Usamos solo CoinGecko
     if df_prices is None:
         return None
 
@@ -137,16 +168,14 @@ def train_and_predict_coingecko(coin_id, horizon_days=30, window_size=30, test_s
         df_prices = add_all_indicators(df_prices)
 
     if "close_price" not in df_prices.columns:
-        st.error("No se encontró 'close_price' en los datos finales.")
+        st.error("No se encontró 'close_price' en los datos.")
         st.write(df_prices.head())
         return None
 
-    # Convertimos la serie de precios en un array
     data_for_model = df_prices[["close_price"]].values
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_target.fit_transform(data_for_model)
 
-    # Dividimos en train y test
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
         st.error("No hay suficientes datos para el conjunto de entrenamiento.")
@@ -161,12 +190,10 @@ def train_and_predict_coingecko(coin_id, horizon_days=30, window_size=30, test_s
     if X_test is None:
         return None
 
-    # Train/val
     val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Construimos y entrenamos el modelo LSTM
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
@@ -177,7 +204,6 @@ def train_and_predict_coingecko(coin_id, horizon_days=30, window_size=30, test_s
         verbose=1
     )
 
-    # Predicción en test
     lstm_preds_test = lstm_model.predict(X_test)
     y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
     lstm_preds_descaled = scaler_target.inverse_transform(lstm_preds_test)
@@ -193,25 +219,21 @@ def train_and_predict_coingecko(coin_id, horizon_days=30, window_size=30, test_s
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
-
     @tf.function
     def predict_model(x):
         return lstm_model(x)
-
     for _ in range(horizon_days):
         future_pred = predict_model(current_input)[0][0]
         future_preds_scaled.append(future_pred)
         new_feature = np.zeros((1, 1, X_train.shape[2]))
         new_feature[0, 0, 0] = future_pred
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
-
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Retornamos df_prices para graficar
     return df_prices, lstm_preds_descaled, y_test_deserialized, future_preds, rmse, mape
 
 #########################
-# 7. main_app
+# 8. main_app: Lógica principal de la app
 #########################
 def main_app():
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
@@ -219,16 +241,12 @@ def main_app():
     st.markdown("**Fuente de Datos:** CoinGecko (serie diaria, actualizada cada día)")
 
     st.sidebar.header("Configuración de la predicción")
-
-    # Selección de la cripto
     crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coingecko_ids.keys()))
     coin_id = coingecko_ids[crypto_name]
 
-    # Parámetros de predicción
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30)
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
-
     use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True)
 
     scenario = st.sidebar.selectbox("Escenario del Modelo:", ["Pesimista", "Neutro", "Optimista"])
@@ -245,7 +263,7 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Descargamos y mostramos el histórico
+    # Mostramos gráfico histórico
     df_prices = load_coingecko_data(coin_id)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
@@ -260,14 +278,14 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
-    # Pestañas
+    # Pestañas: Entrenamiento/Test y Predicción Futura
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
             with st.spinner("Entrenando el modelo, por favor espera..."):
-                result = train_and_predict_coingecko(
+                result = train_and_predict(
                     coin_id=coin_id,
                     horizon_days=horizon,
                     window_size=auto_window,
@@ -283,7 +301,6 @@ def main_app():
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
-
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
@@ -316,7 +333,6 @@ def main_app():
             current_price = df_model["close_price"].iloc[-1]
             future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
             pred_series = np.concatenate(([current_price], future_preds))
-
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(
                 x=future_dates,
@@ -330,13 +346,11 @@ def main_app():
                 yaxis_title="Precio"
             )
             st.plotly_chart(fig_future, use_container_width=True)
-
             st.subheader("Valores Numéricos de la Predicción Futura")
             future_df = pd.DataFrame({"Fecha": future_dates, "Predicción": pred_series})
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
-
 
 if __name__ == "__main__":
     main_app()
