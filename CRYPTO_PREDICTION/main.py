@@ -28,15 +28,11 @@ def robust_mape(y_true, y_pred, eps=1e-9):
     """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario para CoinCap con IDs correctos.
-# IMPORTANTE: 'xrp' para XRP, 'binance-coin' para BNB, etc.
-# Si alguna cripto falla, revisa la lista en: https://api.coincap.io/v2/assets
+# Diccionario para CoinCap con IDs que devuelven datos
 coincap_ids = {
     "Bitcoin (BTC)":       "bitcoin",
     "Ethereum (ETH)":      "ethereum",
-    "XRP":                 "xrp",        # ID para XRP es "xrp"
-    "Tether (USDT)":       "tether",
-    "USD Coin (USDC)":     "usd-coin",
+    "XRP":                 "xrp",
     "Binance Coin (BNB)":  "binance-coin",
     "Cardano (ADA)":       "cardano",
     "Solana (SOL)":        "solana",
@@ -45,13 +41,22 @@ coincap_ids = {
     "Polygon (MATIC)":     "polygon",
     "Litecoin (LTC)":      "litecoin",
     "TRON (TRX)":          "tron",
-    "Stellar (XLM)":       "stellar",
-    "Shiba Inu (SHIB)":    "shiba-inu"
+    "Stellar (XLM)":       "stellar"
 }
+# Nota: Si alguna cripto da problemas (400 o sin datos), retírala o revisa su ID en la API de CoinCap.
 
-# Lista de intervalos válidos para CoinCap:
-# (m1, m5, m15, m30, h1, h2, h6, h12, d1)
-coincap_intervals = ["m1", "m5", "m15", "m30", "h1", "h2", "h6", "h12", "d1"]
+# Diccionario para traducir intervalos amigables -> intervalos CoinCap
+friendly_intervals = {
+    "1 minuto": "m1",
+    "5 minutos": "m5",
+    "15 minutos": "m15",
+    "30 minutos": "m30",
+    "1 hora": "h1",
+    "2 horas": "h2",
+    "6 horas": "h6",
+    "12 horas": "h12",
+    "1 día": "d1"
+}
 
 ###############################################################
 # 2. Función para descargar datos desde CoinCap con reintentos
@@ -64,11 +69,8 @@ def load_coincap_data(coin_id, interval="d1", start_ms=None, end_ms=None, max_re
     - start_ms, end_ms: timestamps en milisegundos para definir el rango de fechas.
     Devuelve un DataFrame con 'ds' y 'close_price' o None si hay error.
     """
-    # Construimos la URL base
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval={interval}"
-    
-    # Si se ha seleccionado un rango de fechas, añadimos start y end
-    # (CoinCap doc: &start={msTimestamp}&end={msTimestamp})
+    # Añadimos start y end si están definidos
     if start_ms is not None and end_ms is not None:
         url += f"&start={start_ms}&end={end_ms}"
 
@@ -79,34 +81,41 @@ def load_coincap_data(coin_id, interval="d1", start_ms=None, end_ms=None, max_re
         if resp.status_code == 200:
             data = resp.json()
             if "data" not in data:
-                st.error("CoinCap: Datos no disponibles (falta 'data').")
+                st.warning("CoinCap: Datos no disponibles (falta 'data').")
                 return None
             df = pd.DataFrame(data["data"])
             if df.empty:
-                st.error("CoinCap: Datos vacíos para ese rango/intervalo.")
+                st.info("CoinCap devolvió datos vacíos. Reajusta el rango o el intervalo.")
                 return None
             if "time" not in df.columns or "priceUsd" not in df.columns:
-                st.error("CoinCap: Columnas 'time' o 'priceUsd' no encontradas.")
+                st.warning("CoinCap: Columnas 'time' o 'priceUsd' no encontradas en la respuesta.")
                 st.write(df.head())
                 return None
-            # Convertimos time a datetime y priceUsd a float
+
+            # Convertir time a datetime y priceUsd a float
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
             df = df[["ds", "close_price"]]
             df.dropna(subset=["ds", "close_price"], inplace=True)
             df.sort_values(by="ds", ascending=True, inplace=True)
             df.reset_index(drop=True, inplace=True)
+
+            # Filtrar valores <= 0
             df = df[df["close_price"] > 0].copy()
+
             return df
 
         elif resp.status_code == 429:
             st.warning(f"CoinCap: Error 429 en intento {attempt+1}. Esperando {15*(attempt+1)}s antes de reintentar...")
             time.sleep(15*(attempt+1))
+        elif resp.status_code == 400:
+            st.info("CoinCap: (400) Parámetros inválidos o rango excesivo. Reajusta intervalo o rango de fechas.")
+            return None
         else:
-            st.error(f"Error CoinCap (status code {resp.status_code}).")
+            st.info(f"CoinCap: status code {resp.status_code}. Revisa los parámetros o prueba otro rango.")
             return None
 
-    st.error("CoinCap: Se alcanzó el número máximo de reintentos sin éxito.")
+    st.info("CoinCap: Se alcanzó el número máximo de reintentos sin éxito.")
     return None
 
 ###############################################################
@@ -136,7 +145,7 @@ def create_sequences(data, window_size=30):
     Devuelve (X, y) como np.array.
     """
     if len(data) <= window_size:
-        st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
+        st.warning(f"No hay suficientes datos para una ventana de {window_size} días. Prueba otro rango/intervalo.")
         return None, None
     X, y = [], []
     for i in range(window_size, len(data)):
@@ -190,7 +199,8 @@ def train_and_predict(
     """
     # 1) Carga de datos
     df_prices = load_coincap_data(coin_id, interval=interval, start_ms=start_ms, end_ms=end_ms)
-    if df_prices is None:
+    if df_prices is None or len(df_prices) == 0:
+        st.warning("No se pudo descargar datos suficientes para entrenar. Reajusta parámetros.")
         return None
 
     # 2) Indicadores técnicos (opcional)
@@ -198,7 +208,7 @@ def train_and_predict(
         df_prices = add_all_indicators(df_prices)
 
     if "close_price" not in df_prices.columns:
-        st.error("No se encontró la columna 'close_price' tras la descarga.")
+        st.warning("No se encontró la columna 'close_price' tras la descarga o aplicación de indicadores.")
         return None
 
     # 3) Escalado
@@ -209,7 +219,7 @@ def train_and_predict(
     # 4) Split en train/test
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
-        st.error("No hay suficientes datos para entrenar (split_index <= window_size).")
+        st.warning("No hay suficientes datos para entrenar (split_index <= window_size). Reajusta parámetros.")
         return None
     train_data = scaled_data[:split_index]
     test_data = scaled_data[split_index:]
@@ -277,14 +287,15 @@ def main_app():
     usando datos de CoinCap con selección de:
     - Criptomoneda
     - Rango de fechas (start/end)
-    - Intervalo de velas (m1, m5, ... , d1)
+    - Intervalo de velas (m1, m5, m15, m30, h1, h2, h6, h12, d1)
     - Parámetros de LSTM
     - Indicadores técnicos
     """
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
     st.title("Crypto Price Predictions 🔮 - Solo CoinCap")
-    st.markdown("**Fuente de Datos:** CoinCap (histórico con rango e intervalos)")
+    st.markdown("**Fuente de Datos:** CoinCap (histórico con rango e intervalos).")
 
+    # Barra lateral: configuración principal
     st.sidebar.header("Configuración de la predicción")
 
     # 1) Selección de criptomoneda
@@ -301,17 +312,17 @@ def main_app():
     default_end = datetime.now()
     start_date = st.sidebar.date_input("Fecha de inicio", default_start)
     end_date = st.sidebar.date_input("Fecha de fin", default_end)
-    # Convertimos a milisegundos
     start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
     end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
 
     # 3) Intervalo
     st.sidebar.subheader("Intervalo de Velas (CoinCap)")
-    interval_choice = st.sidebar.selectbox(
+    interval_friendly = st.sidebar.selectbox(
         "Selecciona un intervalo:",
-        coincap_intervals,
-        help="Intervalo de velas para la API de CoinCap. Para rangos grandes, usar d1 o h12."
+        list(friendly_intervals.keys()),
+        help="Intervalo de velas para la API de CoinCap. Para rangos grandes, usar '1 día' o '12 horas'."
     )
+    interval_choice = friendly_intervals[interval_friendly]  # mapeo interno
 
     # 4) Parámetros de Predicción
     st.sidebar.subheader("Parámetros de Predicción")
@@ -354,17 +365,18 @@ def main_app():
     if df_prices is not None and len(df_prices) > 0:
         # Creamos una columna string para el eje X
         df_chart = df_prices.copy()
+        # Para un formato más detallado, incluyendo hora si el intervalo es pequeño
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%Y-%m-%d %H:%M")
         fig_hist = px.line(
             df_chart, x="ds_str", y="close_price",
-            title=f"Histórico de {crypto_name} - Intervalo {interval_choice}",
+            title=f"Histórico de {crypto_name} - Intervalo: {interval_friendly}",
             labels={"ds_str": "Fecha", "close_price": "Precio de Cierre"}
         )
         # Ajuste de rotación en eje X
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45))
         st.plotly_chart(fig_hist, use_container_width=True)
     else:
-        st.warning("No se encontraron datos históricos válidos para mostrar el gráfico con los parámetros seleccionados.")
+        st.info("No se encontraron datos históricos válidos con los parámetros seleccionados. Reajusta intervalo/fechas.")
 
     # Pestañas para separar Entrenamiento/Test y Predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
@@ -389,8 +401,7 @@ def main_app():
             if result is not None:
                 df_model, test_preds, y_test_real, future_preds, rmse, mape = result
                 st.success("Entrenamiento y predicción completados!")
-
-                # Mostramos métricas
+                # Métricas
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
@@ -417,7 +428,7 @@ def main_app():
                 )
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
-                st.error("No se pudo entrenar el modelo con los parámetros seleccionados.")
+                st.info("No se pudo entrenar el modelo con los parámetros seleccionados. Revisa los avisos arriba.")
 
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_name}")
@@ -426,7 +437,7 @@ def main_app():
             last_date = df_model["ds"].iloc[-1]
             current_price = df_model["close_price"].iloc[-1]
 
-            # Generamos fechas diarias a futuro (1 día por step)
+            # Generamos fechas diarias a futuro
             future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
             pred_series = np.concatenate(([current_price], future_preds))
 
@@ -449,7 +460,6 @@ def main_app():
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
-
 
 # Punto de entrada principal
 if __name__ == "__main__":
