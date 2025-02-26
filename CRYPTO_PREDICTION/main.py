@@ -24,8 +24,8 @@ def robust_mape(y_true, y_pred, eps=1e-9):
 def main_app():
     """
     App para predecir precios de criptomonedas usando un modelo LSTM (Conv1D + Bidirectional LSTM)
-    que se entrena con datos completos de Alpha Vantage y, opcionalmente, incluye indicadores técnicos.
-    Se cuida el escalado, la división de datos y el cálculo robusto de las métricas para evitar NaN.
+    entrenado con datos completos de Alpha Vantage. Se calcula automáticamente el tamaño de ventana
+    en función del horizonte de predicción (horizon) y se emplea un cálculo robusto de RMSE y MAPE.
     """
     # -------------------------------------------------------------
     # 1. Configuración de la página y estilo
@@ -74,10 +74,10 @@ def main_app():
         "Días a predecir:", 1, 60, 30,
         help="Número de días a futuro que se desea predecir."
     )
-    window_size = st.sidebar.slider(
-        "Tamaño de ventana (días):", 5, 60, 30,
-        help="Cantidad de días históricos utilizados para entrenar el modelo."
-    )
+    # Se determina automáticamente el tamaño de ventana en función del horizonte
+    auto_window = min(60, max(5, horizon * 2))
+    st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
+    
     use_multivariate = st.sidebar.checkbox(
         "Usar datos multivariados (OHLCV)", value=False,
         help="Incluir datos de apertura, máximo, mínimo y volumen además del precio de cierre."
@@ -107,7 +107,7 @@ def main_app():
         learning_rate_val = 0.0005
 
     # -------------------------------------------------------------
-    # 3. Descarga y limpieza de datos desde Alpha Vantage (outputsize=full)
+    # 3. Descarga y limpieza de datos desde Alpha Vantage
     # -------------------------------------------------------------
     @st.cache_data
     def load_and_clean_data(symbol):
@@ -159,7 +159,7 @@ def main_app():
         return df
 
     # -------------------------------------------------------------
-    # 5. Creación de secuencias (ventanas) para LSTM
+    # 5. Creación de secuencias para LSTM
     # -------------------------------------------------------------
     def create_sequences(data, window_size=30):
         if len(data) <= window_size:
@@ -167,7 +167,7 @@ def main_app():
             return None, None
         X, y = [], []
         for i in range(window_size, len(data)):
-            X.append(data[i - window_size:i])
+            X.append(data[i - window_size : i])
             y.append(data[i, 0])
         return np.array(X), np.array(y)
 
@@ -189,7 +189,7 @@ def main_app():
         return model
 
     # -------------------------------------------------------------
-    # 7. Entrenamiento y predicción con el modelo LSTM
+    # 7. Entrenamiento y predicción con modelo LSTM
     # -------------------------------------------------------------
     def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
                           use_multivariate=False, use_indicators=False,
@@ -198,10 +198,8 @@ def main_app():
         df_prices = load_and_clean_data(symbol)
         if df_prices is None:
             return None
-
         if use_indicators:
             df_prices = add_indicators(df_prices)
-
         if use_multivariate or use_indicators:
             feature_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
             for col in ["rsi", "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9",
@@ -219,27 +217,25 @@ def main_app():
             data_for_model = df_model[["close_price"]].values
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
-
-        # Verificar que el conjunto de entrenamiento es suficiente
+        
         split_index = int(len(scaled_data) * (1 - test_size))
         if split_index <= window_size:
             st.error("No hay suficientes datos para el conjunto de entrenamiento.")
             return None
-
+        
         train_data = scaled_data[:split_index]
         test_data = scaled_data[split_index:]
-
         X_train, y_train = create_sequences(train_data, window_size=window_size)
         if X_train is None:
             return None
         X_test, y_test = create_sequences(test_data, window_size=window_size)
         if X_test is None:
             return None
-
+        
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
-
+        
         input_shape = (X_train.shape[1], X_train.shape[2])
         lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
         lstm_model.fit(
@@ -249,18 +245,18 @@ def main_app():
             batch_size=batch_size,
             verbose=1
         )
-
+        
         lstm_preds_test = lstm_model.predict(X_test)
         y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
         lstm_preds_descaled = scaler_target.inverse_transform(lstm_preds_test)
-
+        
         valid_mask = ~np.isnan(lstm_preds_descaled) & ~np.isnan(y_test_deserialized)
         if np.sum(valid_mask) == 0:
             rmse, mape = np.nan, np.nan
         else:
             rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - lstm_preds_descaled[valid_mask]) ** 2))
             mape = robust_mape(y_test_deserialized[valid_mask], lstm_preds_descaled[valid_mask])
-
+        
         # Predicción futura iterativa usando solo LSTM
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
@@ -275,7 +271,7 @@ def main_app():
             new_feature[0, 0, 0] = future_pred
             current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
         future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
-
+        
         return df_model, lstm_preds_descaled, y_test_deserialized, future_preds, rmse, mape
 
     # -------------------------------------------------------------
@@ -304,10 +300,11 @@ def main_app():
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir", key="train_test"):
             with st.spinner("Entrenando el modelo, por favor espera..."):
+                # Usamos el window_size calculado automáticamente
                 result = train_and_predict(
                     symbol=symbol,
                     horizon_days=horizon,
-                    window_size=window_size,
+                    window_size=auto_window,
                     test_size=0.2,
                     use_multivariate=use_multivariate,
                     use_indicators=use_indicators,
