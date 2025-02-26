@@ -5,8 +5,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 from io import StringIO
 from datetime import datetime
@@ -17,11 +17,33 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 
-# Función robusta para calcular MAPE sin división por cero
+# -------------------------------------------------------------
+# 1. Función robusta para calcular MAPE sin división por cero
+# -------------------------------------------------------------
 def robust_mape(y_true, y_pred, eps=1e-9):
+    """
+    Evita divisiones por cero usando max(eps, |y_true|).
+    """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Mapeo para CoinGecko
+# -------------------------------------------------------------
+# 2. Diccionarios de mapeo
+# -------------------------------------------------------------
+alpha_symbols = {
+    "Bitcoin (BTC)":      "BTC",
+    "Ethereum (ETH)":     "ETH",
+    "XRP":                "XRP",
+    "Stellar (XLM)":      "XLM",
+    "Solana (SOL)":       "SOL",
+    "Cardano (ADA)":      "ADA",
+    "Dogecoin (DOGE)":    "DOGE",
+    "Polkadot (DOT)":     "DOT",
+    "Polygon (MATIC)":    "MATIC",
+    "Litecoin (LTC)":     "LTC",
+    "TRON (TRX)":         "TRX",
+    "Binance Coin (BNB)": "BNB"
+}
+
 coingecko_ids = {
     "Bitcoin (BTC)":      "bitcoin",
     "Ethereum (ETH)":     "ethereum",
@@ -38,16 +60,18 @@ coingecko_ids = {
 }
 
 # -------------------------------------------------------------
-# Funciones de descarga y combinación de datos
+# 3. Funciones de descarga de datos
 # -------------------------------------------------------------
 @st.cache_data
-def load_alpha_data(symbol):
-    """Descarga y limpia datos desde Alpha Vantage."""
+def load_alpha_data(symbol_alpha):
+    """
+    Descarga y limpia datos desde Alpha Vantage.
+    """
     api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
     url = (
         "https://www.alphavantage.co/query"
         "?function=DIGITAL_CURRENCY_DAILY"
-        f"&symbol={symbol}"
+        f"&symbol={symbol_alpha}"
         "&market=USD"
         f"&apikey={api_key}"
         "&datatype=csv"
@@ -75,13 +99,15 @@ def load_alpha_data(symbol):
     df.dropna(subset=["ds"], inplace=True)
     df.sort_values(by="ds", ascending=True, inplace=True)
     df.reset_index(drop=True, inplace=True)
-    # Filtrar filas con precios inválidos
+    # Filtrar filas con precios <= 0
     df = df[df["close_price"] > 0].copy()
     return df
 
 @st.cache_data
 def load_coingecko_data(coin_id, vs_currency="usd", days="max"):
-    """Descarga y limpia datos desde CoinGecko."""
+    """
+    Descarga y limpia datos desde CoinGecko.
+    """
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}"
     headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(url, headers=headers)
@@ -100,13 +126,13 @@ def load_coingecko_data(coin_id, vs_currency="usd", days="max"):
     df = df[df["close_price"] > 0].copy()
     return df
 
-def load_combined_data(symbol_alpha, coin_id):
+def load_combined_data(symbol_alpha, symbol_cg):
     """
-    Combina datos de Alpha Vantage y CoinGecko mediante un merge outer por fecha.
-    Se promedian los precios disponibles (si alguno falta, se usa el valor disponible).
+    Combina datos de Alpha Vantage y CoinGecko (outer join por 'ds').
+    Promedia los precios si ambos están disponibles, rellena huecos con ffill.
     """
     df_alpha = load_alpha_data(symbol_alpha)
-    df_cg = load_coingecko_data(coin_id)
+    df_cg = load_coingecko_data(symbol_cg)
     if df_alpha is None and df_cg is None:
         st.error("No se pudieron descargar datos de ninguna fuente.")
         return None
@@ -114,20 +140,24 @@ def load_combined_data(symbol_alpha, coin_id):
         return df_cg
     if df_cg is None:
         return df_alpha
+
     df_merge = pd.merge(df_alpha, df_cg, on="ds", how="outer", suffixes=("_alpha", "_cg"))
     df_merge.sort_values(by="ds", inplace=True)
+    # Promedia close_price de alpha y cg
     df_merge["close_price"] = df_merge[["close_price_alpha", "close_price_cg"]].mean(axis=1)
     df_result = df_merge[["ds", "close_price"]].copy()
+    # Forward fill para rellenar huecos
     df_result.ffill(inplace=True)
+    # Asegurar que no queden filas con NaN en close_price
+    df_result.dropna(subset=["close_price"], inplace=True)
     return df_result
 
 # -------------------------------------------------------------
-# 5. Función para añadir indicadores técnicos
+# 4. Funciones para añadir indicadores
 # -------------------------------------------------------------
 def add_indicators(df):
     """
-    Calcula RSI, MACD y Bollinger Bands y añade las columnas correspondientes.
-    Se aplica forward fill para alinear datos.
+    Calcula RSI, MACD y Bollinger Bands con pandas_ta.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -137,12 +167,10 @@ def add_indicators(df):
     return df
 
 def add_all_indicators(df):
-    """Llama a add_indicators y retorna el DataFrame enriquecido."""
-    df = add_indicators(df)
-    return df
+    return add_indicators(df)
 
 # -------------------------------------------------------------
-# 6. Creación de secuencias para LSTM
+# 5. Creación de secuencias (ventanas) para LSTM
 # -------------------------------------------------------------
 def create_sequences(data, window_size=30):
     if len(data) <= window_size:
@@ -155,7 +183,7 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 # -------------------------------------------------------------
-# 7. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
+# 6. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
 # -------------------------------------------------------------
 def build_lstm_model(input_shape, learning_rate=0.001):
     model = Sequential()
@@ -172,27 +200,27 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     return model
 
 # -------------------------------------------------------------
-# 8. Entrenamiento y predicción con el modelo LSTM
+# 7. Entrenamiento y predicción con el modelo LSTM
 # -------------------------------------------------------------
-def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
+def train_and_predict(symbol_alpha, symbol_cg, horizon_days=30, window_size=30, test_size=0.2,
                       use_multivariate=False, use_indicators=False,
                       epochs=10, batch_size=32, learning_rate=0.001):
-    # Cargar datos combinados
-    # Usamos los datos de Alpha y CoinGecko para maximizar el histórico
-    # Para Alpha Vantage usamos symbol_alpha; para CoinGecko, usamos coin_id
-    # Asumimos que symbol_alpha y coin_id se pasan como argumentos globalmente.
-    df_prices = load_combined_data(symbol, symbol)  # Aquí usamos el mismo símbolo para simplificar
+    """
+    Descarga datos combinados (Alpha + CoinGecko), enriquece con indicadores (opcional),
+    entrena un modelo LSTM y realiza la predicción futura de forma iterativa.
+    """
+    df_prices = load_combined_data(symbol_alpha, symbol_cg)
     if df_prices is None:
-        st.error("No se pudieron cargar datos combinados.")
         return None
+
     if use_indicators:
         df_prices = add_all_indicators(df_prices)
-    df_model = df_prices.copy()
-    data_for_model = df_model[["close_price"]].values
+
+    # Sólo se usa close_price en este ejemplo
+    data_for_model = df_prices[["close_price"]].values
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_target.fit_transform(data_for_model)
 
-    # Verificar cantidad suficiente de datos
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
         st.error("No hay suficientes datos para el conjunto de entrenamiento.")
@@ -206,10 +234,13 @@ def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
     X_test, y_test = create_sequences(test_data, window_size=window_size)
     if X_test is None:
         return None
+
+    # División en train/val
     val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+    # Construcción y entrenamiento del modelo
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
@@ -220,10 +251,12 @@ def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
         verbose=1
     )
 
+    # Predicción en test
     lstm_preds_test = lstm_model.predict(X_test)
     y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
     lstm_preds_descaled = scaler_target.inverse_transform(lstm_preds_test)
 
+    # Cálculo de métricas robustas
     valid_mask = ~np.isnan(lstm_preds_descaled) & ~np.isnan(y_test_deserialized)
     if np.sum(valid_mask) == 0:
         rmse, mape = np.nan, np.nan
@@ -231,29 +264,68 @@ def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - lstm_preds_descaled[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], lstm_preds_descaled[valid_mask])
 
-    # Predicción futura iterativa usando solo LSTM
+    # Predicción futura iterativa
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
+
     @tf.function
     def predict_model(x):
         return lstm_model(x)
+
     for _ in range(horizon_days):
         future_pred = predict_model(current_input)[0][0]
         future_preds_scaled.append(future_pred)
         new_feature = np.zeros((1, 1, X_train.shape[2]))
         new_feature[0, 0, 0] = future_pred
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
+
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    return df_model, lstm_preds_descaled, y_test_deserialized, future_preds, rmse, mape
+    # Retornamos DataFrame final (con ds y close_price) para graficar
+    df_final = df_prices.copy()
+    return df_final, lstm_preds_descaled, y_test_deserialized, future_preds, rmse, mape
 
-    # -------------------------------------------------------------
-    # Fin de train_and_predict
+# -------------------------------------------------------------
+# 8. main_app: Lógica principal de la app
+# -------------------------------------------------------------
+def main_app():
+    st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
+    st.title("Crypto Price Predictions 🔮")
+    st.markdown("**Fuentes de Datos:** Alpha Vantage y CoinGecko")
 
-    # -------------------------------------------------------------
-    # 9. Visualización del histórico (formato DD-MM-YYYY)
-    df_prices = load_combined_data(symbol, symbol)
+    st.sidebar.header("Configuración de la predicción")
+
+    # Selección de la cripto
+    cryptos_list = list(alpha_symbols.keys())
+    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", cryptos_list)
+    symbol_alpha = alpha_symbols[crypto_name]   # para Alpha
+    symbol_cg = coingecko_ids[crypto_name]      # para CoinGecko
+
+    # Parámetros de predicción
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30)
+    auto_window = min(60, max(5, horizon * 2))
+    st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
+
+    use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True)
+
+    # Escenario del modelo
+    scenario = st.sidebar.selectbox("Escenario del Modelo:", ["Pesimista", "Neutro", "Optimista"])
+    if scenario == "Pesimista":
+        epochs_val = 20
+        batch_size_val = 32
+        learning_rate_val = 0.001
+    elif scenario == "Neutro":
+        epochs_val = 30
+        batch_size_val = 32
+        learning_rate_val = 0.0008
+    else:
+        epochs_val = 50
+        batch_size_val = 16
+        learning_rate_val = 0.0005
+
+    # Mostramos gráfico histórico
+    df_prices = load_combined_data(symbol_alpha, symbol_cg)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds"] = df_chart["ds"].dt.strftime("%d-%m-%Y")
@@ -267,20 +339,20 @@ def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
-    # -------------------------------------------------------------
-    # 10. Pestañas: Entrenamiento/Test y Predicción Futura
+    # Pestañas
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
-        if st.button("Entrenar Modelo y Predecir", key="train_test"):
+        if st.button("Entrenar Modelo y Predecir"):
             with st.spinner("Entrenando el modelo, por favor espera..."):
                 result = train_and_predict(
-                    symbol=symbol_alpha,
+                    symbol_alpha=symbol_alpha,
+                    symbol_cg=symbol_cg,
                     horizon_days=horizon,
                     window_size=auto_window,
                     test_size=0.2,
-                    use_multivariate=use_multivariate,
+                    use_multivariate=False,   # se puede extender si lo deseas
                     use_indicators=use_indicators,
                     epochs=epochs_val,
                     batch_size=batch_size_val,
@@ -292,6 +364,7 @@ def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
+
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
@@ -324,6 +397,7 @@ def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
             current_price = df_model["close_price"].iloc[-1]
             future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
             pred_series = np.concatenate(([current_price], future_preds))
+
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(
                 x=future_dates,
@@ -337,11 +411,14 @@ def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
                 yaxis_title="Precio"
             )
             st.plotly_chart(fig_future, use_container_width=True)
+
             st.subheader("Valores Numéricos de la Predicción Futura")
             future_df = pd.DataFrame({"Fecha": future_dates, "Predicción": pred_series})
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
 
+
+# Punto de entrada principal
 if __name__ == "__main__":
     main_app()
