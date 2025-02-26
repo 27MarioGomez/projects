@@ -10,8 +10,9 @@ import plotly.express as px
 import os
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 def main_app():
     # ---------------------------------------------------------------------
@@ -156,19 +157,22 @@ def main_app():
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # Construir el modelo LSTM
+        # Construir el modelo con Bidirectional LSTM y callbacks
         model = Sequential()
-        model.add(LSTM(64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])))
-        model.add(Dropout(0.2))
-        model.add(LSTM(64, return_sequences=False))
-        model.add(Dropout(0.2))
+        model.add(Bidirectional(LSTM(64, return_sequences=True), input_shape=(X_train.shape[1], X_train.shape[2])))
+        model.add(Dropout(0.3))
+        model.add(Bidirectional(LSTM(64, return_sequences=False)))
+        model.add(Dropout(0.3))
         model.add(Dense(1))
 
         optimizer = Adam(learning_rate=learning_rate)
         model.compile(optimizer=optimizer, loss='mean_squared_error')
 
+        early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+        lr_reducer = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
         model.fit(X_train, y_train, validation_data=(X_val, y_val),
-                  epochs=epochs, batch_size=batch_size, verbose=1)
+                  epochs=epochs, batch_size=batch_size, verbose=1,
+                  callbacks=[early_stop, lr_reducer])
 
         # Predicciones en el set de test
         test_predictions = model.predict(X_test)
@@ -201,7 +205,6 @@ def main_app():
     df = load_and_clean_data(data_path)
     if show_raw_data:
         st.subheader("Datos Históricos")
-        # Copia para mostrar con nombres amigables
         df_show = df.copy()
         df_show['ds'] = df_show['ds'].astype(str)
         df_show.rename(
@@ -235,8 +238,6 @@ def main_app():
         st.header("Overview de Datos")
         st.markdown("Visualización general de los datos históricos y estadísticas descriptivas.")
 
-        # Gráfico con las columnas originales (ds, close_price),
-        # pero con etiquetas más amigables en "labels"
         fig_overview = px.line(
             df, x="ds", y="close_price",
             title=f"Histórico de {crypto_choice}",
@@ -245,9 +246,7 @@ def main_app():
         st.plotly_chart(fig_overview, use_container_width=True)
 
         st.markdown("**Estadísticas Descriptivas:**")
-        # Descriptivas solo de las columnas relevantes
         desc_df = df.copy()
-        # Renombramos para que se vea amigable
         desc_df.rename(
             columns={
                 "close_price": "Precio Cierre",
@@ -259,9 +258,7 @@ def main_app():
             inplace=True,
             errors="ignore"
         )
-        # Mostramos describe de las columnas numéricas
         numeric_cols = ["Precio Cierre", "Precio Apertura", "Precio Máximo", "Precio Mínimo", "Volumen"]
-        # Filtramos solo si existen en el df
         numeric_cols = [col for col in numeric_cols if col in desc_df.columns]
         st.dataframe(desc_df[numeric_cols].describe())
 
@@ -281,7 +278,6 @@ def main_app():
                 )
             st.success("Entrenamiento y predicción completados!")
             
-            # Mostrar métricas en columnas
             col1, col2 = st.columns(2)
             col1.metric("RMSE (Test)", f"{rmse:.2f}")
             col2.metric("MAPE (Test)", f"{mape:.2f}%")
@@ -302,7 +298,6 @@ def main_app():
             
     with tabs[2]:
         st.header("Predicción a Futuro")
-        # Para que esta pestaña funcione, se debe haber entrenado el modelo previamente y tener 'future_preds' en memoria
         if 'future_preds' in locals():
             last_date = df_model['ds'].iloc[-1]
             future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=horizon)
