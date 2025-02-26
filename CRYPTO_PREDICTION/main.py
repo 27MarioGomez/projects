@@ -31,9 +31,9 @@ def main_app():
     st.markdown("Utiliza la barra lateral para elegir la criptomoneda y el escenario de predicción.")
     st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
 
-    # Barra lateral: configuración
+    # Configuración de la barra lateral
     st.sidebar.header("Configuración de la predicción")
-    
+
     # Diccionario ampliado de criptomonedas
     alpha_symbols = {
         "Bitcoin (BTC)":      "BTC",
@@ -56,7 +56,6 @@ def main_app():
     st.sidebar.subheader("Parámetros de Predicción Básicos")
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30,
                                 help="Cantidad de días a futuro que deseas predecir.")
-    # Se ajusta el rango del tamaño de ventana
     window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30,
                                     help="Número de días usados como ventana para entrenar la LSTM.")
     use_multivariate = st.sidebar.checkbox("Usar datos multivariados (Open, High, Low, Volume)",
@@ -114,7 +113,7 @@ def main_app():
         df.reset_index(drop=True, inplace=True)
         return df
 
-    # Función para crear secuencias a partir de los datos
+    # Función para crear secuencias para la LSTM
     def create_sequences(data, window_size=60):
         if len(data) <= window_size:
             st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
@@ -177,7 +176,6 @@ def main_app():
         optimizer = Adam(learning_rate=learning_rate)
         model.compile(optimizer=optimizer, loss='mean_squared_error')
 
-        # Cargar pesos si existen
         if os.path.exists("model_weights.h5"):
             model.load_weights("model_weights.h5")
 
@@ -187,7 +185,6 @@ def main_app():
                   epochs=epochs, batch_size=batch_size, verbose=1,
                   callbacks=[early_stop, lr_reducer])
 
-        # Guardar los pesos del modelo para futuras ejecuciones
         model.save_weights("model_weights.h5")
 
         test_predictions = model.predict(X_test)
@@ -231,7 +228,7 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
-    # Dos pestañas: Entrenamiento y Test / Predicción de Precios
+    # Pestañas: "Entrenamiento y Test" y "Predicción de Precios"
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_choice}"])
 
     with tabs[0]:
@@ -274,10 +271,15 @@ def main_app():
         st.header(f"Predicción de Precios - {crypto_choice}")
         if 'result' in locals() and result is not None:
             df_model, test_preds, y_test_deserialized, future_preds, rmse, mape = result
+            # Incluimos el precio actual como punto de partida en la serie de predicción
             last_date = df_model['ds'].iloc[-1]
-            future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=horizon)
+            current_price = df_model['close_price'].iloc[-1]
+            # Generamos fechas para el pronóstico que incluyen el día actual
+            future_dates = pd.date_range(start=last_date, periods=horizon+1)
+            # La serie de predicción empieza con el precio actual seguido de las predicciones
+            pred_series = np.concatenate(([current_price], future_preds))
             fig_future = go.Figure()
-            fig_future.add_trace(go.Scatter(x=future_dates, y=future_preds,
+            fig_future.add_trace(go.Scatter(x=future_dates, y=pred_series,
                                             mode='lines+markers', name='Predicción Futura'))
             fig_future.update_layout(
                 title=f"Predicción a Futuro ({horizon} días) - {crypto_choice}",
@@ -286,7 +288,7 @@ def main_app():
             )
             st.plotly_chart(fig_future, use_container_width=True)
             st.subheader("Valores Numéricos de la Predicción Futura")
-            future_df = pd.DataFrame({'Fecha': future_dates, 'Predicción': future_preds})
+            future_df = pd.DataFrame({'Fecha': future_dates, 'Predicción': pred_series})
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
