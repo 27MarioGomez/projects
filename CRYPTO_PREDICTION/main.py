@@ -47,15 +47,15 @@ def main_app():
 
     # Diccionario con rutas de datos
     crypto_paths = {
-        "Bitcoin":  r"C:\Users\mario\Documents\GitHub\projects\CRYPTO PREDICTION\data\coin_Bitcoin.csv",
-        "Ethereum": r"C:\Users\mario\Documents\GitHub\projects\CRYPTO PREDICTION\data\coin_Ethereum.csv",
-        "XRP":      r"C:\Users\mario\Documents\GitHub\projects\CRYPTO PREDICTION\data\coin_XRP.csv",
-        "Stellar":  r"C:\Users\mario\Documents\GitHub\projects\CRYPTO PREDICTION\data\coin_Stellar.csv",
-        "Solana":   r"C:\Users\mario\Documents\GitHub\projects\CRYPTO PREDICTION\data\coin_Solana.csv",
-        "Cardano":  r"C:\Users\mario\Documents\GitHub\projects\CRYPTO PREDICTION\data\coin_Cardano.csv"
-    }
+    "Bitcoin":  "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Bitcoin.csv",
+    "Ethereum": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Ethereum.csv",
+    "XRP": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_XRP.csv",
+    "Stellar": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Stellar.csv",
+    "Solana": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Solana.csv",
+    "Cardano": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Cardano.csv"
+}
 
-    crypto_choice = st.sidebar.selectbox("Selecciona la criptomoneda:", list(crypto_paths.keys()))
+    crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(crypto_paths.keys()))
     data_path = crypto_paths[crypto_choice]
 
     st.sidebar.subheader("Parámetros de Predicción")
@@ -69,7 +69,7 @@ def main_app():
     learning_rate = st.sidebar.number_input("Learning rate:", min_value=0.0001, max_value=0.01, value=0.001, step=0.0001, format="%.4f")
     show_raw_data = st.sidebar.checkbox("Mostrar datos históricos", value=True)
 
-    # Consejo: Para mejorar aún más el modelo, podrías incluir indicadores técnicos (RSI, MACD, etc.) con la librería "ta"
+
 
     # ---------------------------------------------------------------------
     # 1. FUNCIÓN PARA CARGAR Y LIMPIAR LOS DATOS
@@ -265,10 +265,9 @@ def main_app():
 #  EJECUCIÓN CON PYTHON vs STREAMLIT
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
-    st.title("Dashboard de Predicción de Precios de Criptomonedas")
-    st.write("Cargando datos y modelo...")
-
-    # Verifica si Streamlit está ejecutando correctamente
-    st.success("✅ Streamlit está funcionando correctamente")
-
+    # Si ejecutas "python main.py", NO se lanza la app de Streamlit, solo muestra este mensaje
+    print("Script preparado. Si quieres ver la app, usa:  streamlit run main.py")
+else:
+    # Cuando uses "streamlit run main.py", Streamlit establecerá __name__ != '__main__'
+    # y entonces llamará a la función que contiene todo el dashboard
+    main_app()
