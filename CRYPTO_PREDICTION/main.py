@@ -8,6 +8,8 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import os
+import requests
+from io import StringIO
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
@@ -37,24 +39,26 @@ def main_app():
 
     st.title("Crypto Price Predictions 🔮")
     st.markdown("Utiliza la barra lateral para elegir la criptomoneda, parámetros del modelo de predicción y otras opciones.")
+    st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
 
     # ---------------------------------------------------------------------
     # BARRA LATERAL: CONFIGURACIÓN DEL PROYECTO Y PARÁMETROS AVANZADOS
     # ---------------------------------------------------------------------
     st.sidebar.header("Configuración de la predicción")
 
-    # Diccionario con rutas de datos (con refs/heads/main)
-    crypto_paths = {
-        "Bitcoin":  "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Bitcoin.csv",
-        "Ethereum": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Ethereum.csv",
-        "XRP": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_XRP.csv",
-        "Stellar": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Stellar.csv",
-        "Solana": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Solana.csv",
-        "Cardano": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Cardano.csv"
+    # Diccionario de símbolos para Alpha Vantage
+    alpha_symbols = {
+        "Bitcoin":  "BTC",
+        "Ethereum": "ETH",
+        "XRP":      "XRP",
+        "Stellar":  "XLM",
+        "Solana":   "SOL",
+        "Cardano":  "ADA"
     }
 
-    crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(crypto_paths.keys()))
-    data_path = crypto_paths[crypto_choice]
+    # Selección de la cripto
+    crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(alpha_symbols.keys()))
+    symbol = alpha_symbols[crypto_choice]
 
     st.sidebar.subheader("Parámetros de Predicción")
     horizon = st.sidebar.slider(
@@ -95,18 +99,48 @@ def main_app():
     )
 
     # ---------------------------------------------------------------------
-    # 1. FUNCIÓN PARA CARGAR Y LIMPIAR LOS DATOS
+    # 1. FUNCIÓN PARA DESCARGAR, CARGAR Y LIMPIAR DATOS DE ALPHA VANTAGE
     # ---------------------------------------------------------------------
     @st.cache_data
-    def load_and_clean_data(csv_path):
-        df = pd.read_csv(csv_path)
-        # Renombramos columnas relevantes: "Date" -> "ds", "Close" -> "close_price"
-        df.rename(columns={"Date": "ds", "Close": "close_price"}, inplace=True)
-        # Convertir a datetime; si hay valores inválidos, se convierten a NaT
+    def load_and_clean_data(symbol):
+        # Obtenemos la API key desde st.secrets
+        api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
+
+        # Construimos la URL para descargar en CSV
+        url = (
+            "https://www.alphavantage.co/query"
+            "?function=DIGITAL_CURRENCY_DAILY"
+            f"&symbol={symbol}"
+            "&market=USD"
+            f"&apikey={api_key}"
+            "&datatype=csv"
+        )
+
+        # Descarga del CSV
+        response = requests.get(url)
+        if response.status_code != 200:
+            st.error("Error al obtener datos de Alpha Vantage.")
+            return None
+
+        # Convertimos el contenido en un objeto StringIO para leerlo con pandas
+        data_io = StringIO(response.text)
+        df = pd.read_csv(data_io)
+
+        # Alpha Vantage CSV: timestamp, open (USD), high (USD), low (USD),
+        # close (USD), volume, market cap (USD)
+        # Renombramos para ajustarnos a la lógica interna
+        df.rename(columns={
+            "timestamp":     "ds",
+            "close (USD)":   "close_price",
+            "open (USD)":    "open_price",
+            "high (USD)":    "high_price",
+            "low (USD)":     "low_price",
+            "volume":        "volume",
+            "market cap (USD)": "market_cap"
+        }, inplace=True)
+
+        # Convertir ds a datetime y ordenar
         df['ds'] = pd.to_datetime(df['ds'], errors='coerce')
-        # Truncamos a segundos para evitar problemas de serialización con PyArrow
-        df['ds'] = df['ds'].dt.floor('s')
-        # Eliminamos filas donde la conversión falló
         df.dropna(subset=['ds'], inplace=True)
         df.sort_values(by='ds', inplace=True)
         df.reset_index(drop=True, inplace=True)
@@ -119,28 +153,35 @@ def main_app():
         X, y = [], []
         for i in range(window_size, len(data)):
             X.append(data[i-window_size:i])
-            y.append(data[i, 0])  # Se asume que la primera columna es close_price
+            y.append(data[i, 0])  # La primera columna es close_price
         X, y = np.array(X), np.array(y)
         return X, y
 
     # ---------------------------------------------------------------------
     # 3. FUNCIÓN PARA ENTRENAR EL MODELO LSTM Y REALIZAR PREDICCIONES
     # ---------------------------------------------------------------------
-    def train_and_predict_lstm(csv_path, horizon_days=30, window_size=60, test_size=0.2,
+    def train_and_predict_lstm(symbol, horizon_days=30, window_size=60, test_size=0.2,
                                use_multivariate=False, epochs=10, batch_size=32, learning_rate=0.001):
-        df = load_and_clean_data(csv_path)
+        df = load_and_clean_data(symbol)
+        if df is None:
+            st.error("No se pudieron cargar los datos. Verifica la API Key o la disponibilidad del servicio.")
+            return None
 
+        # Seleccionamos las columnas según si es multivariado o no
         if use_multivariate:
-            df_model = df[['ds', 'close_price', 'Open', 'High', 'Low', 'Volume']].copy()
-            features_cols = ["close_price", "Open", "High", "Low", "Volume"]
+            df_model = df[['ds', 'close_price', 'open_price', 'high_price', 'low_price', 'volume']].copy()
+            features_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
             data_for_model = df_model[features_cols].values
             scaler_features = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_features.fit_transform(data_for_model)
+
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaler_target.fit(df_model[["close_price"]])
+
         else:
             df_model = df[['ds', 'close_price']].copy()
             data_for_model = df_model[['close_price']].values
+
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
@@ -152,12 +193,12 @@ def main_app():
         X_train, y_train = create_sequences(train_data, window_size=window_size)
         X_test, y_test = create_sequences(test_data, window_size=window_size)
 
-        # Dividir el conjunto de entrenamiento en train/validación (90%/10%)
+        # Dividir en train/validación (90%/10%)
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # Construir el modelo con Bidirectional LSTM y callbacks
+        # Construir modelo Bidirectional LSTM
         model = Sequential()
         model.add(Bidirectional(LSTM(64, return_sequences=True), input_shape=(X_train.shape[1], X_train.shape[2])))
         model.add(Dropout(0.3))
@@ -174,7 +215,7 @@ def main_app():
                   epochs=epochs, batch_size=batch_size, verbose=1,
                   callbacks=[early_stop, lr_reducer])
 
-        # Predicciones en el set de test
+        # Predicciones en test
         test_predictions = model.predict(X_test)
         test_predictions_descaled = scaler_target.inverse_transform(test_predictions)
         y_test_descaled = scaler_target.inverse_transform(y_test.reshape(-1, 1))
@@ -192,7 +233,7 @@ def main_app():
             future_pred = model.predict(current_input)[0][0]
             future_preds_scaled.append(future_pred)
             new_feature = np.zeros((1, 1, X_train.shape[2]))
-            new_feature[0, 0, 0] = future_pred  # Se actualiza solo el target
+            new_feature[0, 0, 0] = future_pred  # Se actualiza solo la posición 0 (close_price)
             current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
 
         future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
@@ -202,20 +243,20 @@ def main_app():
     # ---------------------------------------------------------------------
     # MOSTRAR DATOS HISTÓRICOS (SI SE HA SELECCIONADO)
     # ---------------------------------------------------------------------
-    df = load_and_clean_data(data_path)
-    if show_raw_data:
+    df = load_and_clean_data(symbol)
+    if df is not None and show_raw_data:
         st.subheader("Datos Históricos")
         df_show = df.copy()
         df_show['ds'] = df_show['ds'].astype(str)
         df_show.rename(
             columns={
-                "ds": "Fecha",
+                "ds":         "Fecha",
                 "close_price": "Precio Cierre",
-                "Open": "Precio Apertura",
-                "High": "Precio Máximo",
-                "Low": "Precio Mínimo",
-                "Volume": "Volumen",
-                "SNo": "ID"
+                "open_price":  "Precio Apertura",
+                "high_price":  "Precio Máximo",
+                "low_price":   "Precio Mínimo",
+                "volume":      "Volumen",
+                "market_cap":  "Cap. Mercado"
             },
             inplace=True,
             errors="ignore"
@@ -238,36 +279,40 @@ def main_app():
         st.header("Overview de Datos")
         st.markdown("Visualización general de los datos históricos y estadísticas descriptivas.")
 
-        fig_overview = px.line(
-            df, x="ds", y="close_price",
-            title=f"Histórico de {crypto_choice}",
-            labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
-        )
-        st.plotly_chart(fig_overview, use_container_width=True)
+        if df is not None:
+            fig_overview = px.line(
+                df, x="ds", y="close_price",
+                title=f"Histórico de {crypto_choice}",
+                labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
+            )
+            st.plotly_chart(fig_overview, use_container_width=True)
 
-        st.markdown("**Estadísticas Descriptivas:**")
-        desc_df = df.copy()
-        desc_df.rename(
-            columns={
-                "close_price": "Precio Cierre",
-                "Open": "Precio Apertura",
-                "High": "Precio Máximo",
-                "Low": "Precio Mínimo",
-                "Volume": "Volumen"
-            },
-            inplace=True,
-            errors="ignore"
-        )
-        numeric_cols = ["Precio Cierre", "Precio Apertura", "Precio Máximo", "Precio Mínimo", "Volumen"]
-        numeric_cols = [col for col in numeric_cols if col in desc_df.columns]
-        st.dataframe(desc_df[numeric_cols].describe())
+            st.markdown("**Estadísticas Descriptivas:**")
+            desc_df = df.copy()
+            desc_df.rename(
+                columns={
+                    "close_price": "Precio Cierre",
+                    "open_price":  "Precio Apertura",
+                    "high_price":  "Precio Máximo",
+                    "low_price":   "Precio Mínimo",
+                    "volume":      "Volumen",
+                    "market_cap":  "Cap. Mercado"
+                },
+                inplace=True,
+                errors="ignore"
+            )
+            numeric_cols = ["Precio Cierre", "Precio Apertura", "Precio Máximo", "Precio Mínimo", "Volumen", "Cap. Mercado"]
+            numeric_cols = [col for col in numeric_cols if col in desc_df.columns]
+            st.dataframe(desc_df[numeric_cols].describe())
+        else:
+            st.warning("No se pudieron cargar los datos. Verifica tu API Key en Secrets o la conexión con Alpha Vantage.")
 
     with tabs[1]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir", key="train_test"):
             with st.spinner("Entrenando el modelo, por favor espera..."):
-                df_model, test_preds, y_test_real, future_preds, rmse, mape = train_and_predict_lstm(
-                    csv_path=data_path,
+                result = train_and_predict_lstm(
+                    symbol=symbol,
                     horizon_days=horizon,
                     window_size=window_size,
                     test_size=0.2,
@@ -276,29 +321,35 @@ def main_app():
                     batch_size=batch_size,
                     learning_rate=learning_rate
                 )
-            st.success("Entrenamiento y predicción completados!")
-            
-            col1, col2 = st.columns(2)
-            col1.metric("RMSE (Test)", f"{rmse:.2f}")
-            col2.metric("MAPE (Test)", f"{mape:.2f}%")
-            
-            st.subheader("Comparación en el Set de Test")
-            test_dates = df_model['ds'].iloc[-len(y_test_real):]
-            fig_test = go.Figure()
-            fig_test.add_trace(go.Scatter(x=test_dates, y=y_test_real.flatten(),
-                                          mode='lines', name='Precio Real (Test)'))
-            fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(),
-                                          mode='lines', name='Predicción (Test)'))
-            fig_test.update_layout(
-                title=f"Comparación en Test: {crypto_choice}",
-                xaxis_title="Fecha",
-                yaxis_title="Precio"
-            )
-            st.plotly_chart(fig_test, use_container_width=True)
-            
+            if result is not None:
+                df_model, test_preds, y_test_real, future_preds, rmse, mape = result
+                st.success("Entrenamiento y predicción completados!")
+                
+                col1, col2 = st.columns(2)
+                col1.metric("RMSE (Test)", f"{rmse:.2f}")
+                col2.metric("MAPE (Test)", f"{mape:.2f}%")
+                
+                st.subheader("Comparación en el Set de Test")
+                test_dates = df_model['ds'].iloc[-len(y_test_real):]
+                fig_test = go.Figure()
+                fig_test.add_trace(go.Scatter(x=test_dates, y=y_test_real.flatten(),
+                                              mode='lines', name='Precio Real (Test)'))
+                fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(),
+                                              mode='lines', name='Predicción (Test)'))
+                fig_test.update_layout(
+                    title=f"Comparación en Test: {crypto_choice}",
+                    xaxis_title="Fecha",
+                    yaxis_title="Precio"
+                )
+                st.plotly_chart(fig_test, use_container_width=True)
+            else:
+                st.error("No se pudo entrenar el modelo debido a un error en la carga de datos.")
+
     with tabs[2]:
         st.header("Predicción a Futuro")
-        if 'future_preds' in locals():
+        # Se muestra solo si 'result' existe
+        if 'result' in locals() and result is not None:
+            df_model, test_preds, y_test_real, future_preds, rmse, mape = result
             last_date = df_model['ds'].iloc[-1]
             future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=horizon)
             fig_future = go.Figure()
