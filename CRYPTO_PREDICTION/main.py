@@ -50,10 +50,11 @@ def main_app():
         "TRON (TRX)":         "TRX",
         "Binance Coin (BNB)": "BNB"
     }
-    # Definimos la variable "symbol" de forma consistente
-    symbol = st.sidebar.selectbox("Selecciona una criptomoneda:", list(alpha_symbols.keys()),
-                                   help="Elige la criptomoneda para la cual se realizará la predicción.")
-    symbol = alpha_symbols[symbol]
+    # Almacenar el nombre mostrado para usarlo en títulos y etiquetas
+    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(alpha_symbols.keys()),
+                                         help="Elige la criptomoneda para la cual se realizará la predicción.")
+    # Obtenemos el símbolo correspondiente
+    symbol = alpha_symbols[crypto_name]
 
     st.sidebar.subheader("Parámetros de Predicción Básicos")
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30,
@@ -175,7 +176,7 @@ def main_app():
                           use_multivariate=False, use_indicators=False,
                           epochs=10, batch_size=32, learning_rate=0.001):
         """
-        Descarga datos desde Alpha Vantage, calcula indicadores (si se solicita),
+        Descarga datos desde Alpha Vantage, calcula indicadores (opcional),
         prepara las secuencias, entrena el modelo híbrido y genera predicciones.
         """
         df_prices = load_and_clean_data(symbol)
@@ -252,7 +253,7 @@ def main_app():
         df_chart["ds"] = df_chart["ds"].dt.strftime("%d-%m-%Y")
         fig_hist = px.line(
             df_chart, x="ds", y="close_price",
-            title=f"Histórico de Precio de {crypto_choice}",
+            title=f"Histórico de Precio de {crypto_name}",
             labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45))
@@ -261,7 +262,7 @@ def main_app():
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
     # 9. Pestañas: Entrenamiento/Test y Predicción
-    tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_choice}"])
+    tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
@@ -300,7 +301,7 @@ def main_app():
                     name="Predicción (Test)"
                 ))
                 fig_test.update_layout(
-                    title=f"Comparación en Test: {crypto_choice}",
+                    title=f"Comparación en Test: {crypto_name}",
                     xaxis_title="Fecha",
                     yaxis_title="Precio"
                 )
@@ -309,7 +310,7 @@ def main_app():
                 st.error("No se pudo entrenar el modelo debido a un error en la carga de datos.")
 
     with tabs[1]:
-        st.header(f"Predicción de Precios - {crypto_choice}")
+        st.header(f"Predicción de Precios - {crypto_name}")
         if 'result' in locals() and result is not None:
             df_model, test_preds, y_test_deserialized, future_preds, rmse, mape = result
             last_date = df_model["ds"].iloc[-1]
@@ -324,7 +325,7 @@ def main_app():
                 name="Predicción Futura"
             ))
             fig_future.update_layout(
-                title=f"Predicción a Futuro ({horizon} días) - {crypto_choice}",
+                title=f"Predicción a Futuro ({horizon} días) - {crypto_name}",
                 xaxis_title="Fecha",
                 yaxis_title="Precio"
             )
