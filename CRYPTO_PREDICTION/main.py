@@ -145,6 +145,7 @@ def load_and_clean_data(symbol):
     df.reset_index(drop=True, inplace=True)
     return df
 
+
     # ---------------------------------------------------------------------
     # 2. FUNCIÓN PARA CREAR SECUENCIAS (VENTANAS) PARA LA LSTM
     # ---------------------------------------------------------------------
