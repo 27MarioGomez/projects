@@ -13,14 +13,12 @@ from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 import pandas_ta as ta
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout, Input
+from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 def main_app():
-    # -----------------------------
-    # 1. CONFIGURACIÓN DE LA PÁGINA Y ESTILO
-    # -----------------------------
+    # 1. Configuración de la página y estilo
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
     st.markdown(
         """
@@ -35,11 +33,9 @@ def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("**Fuente de Datos:** CoinGecko + Indicadores calculados localmente (pandas_ta)")
 
-    # -----------------------------
-    # 2. BARRA LATERAL: CONFIGURACIÓN PRINCIPAL
-    # -----------------------------
+    # 2. Configuración de la barra lateral
     st.sidebar.header("Configuración de la predicción")
-    # Diccionario de criptomonedas con IDs de CoinGecko
+    # Diccionario de IDs de CoinGecko
     coin_ids = {
         "Bitcoin (BTC)":      "bitcoin",
         "Ethereum (ETH)":     "ethereum",
@@ -61,8 +57,6 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30)
     window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30)
     use_multivariate = st.sidebar.checkbox("Usar datos multivariados (OHLCV)", value=False)
-
-    # Opción para incluir indicadores técnicos (RSI, MACD, BBANDS)
     use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True)
 
     st.sidebar.subheader("Escenario del Modelo")
@@ -75,14 +69,12 @@ def main_app():
         epochs_val = 30
         batch_size_val = 32
         learning_rate_val = 0.0008
-    else:  # Optimista
+    else:
         epochs_val = 50
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # -----------------------------
-    # 3. DESCARGA DE DATOS HISTÓRICOS DESDE COINGECKO
-    # -----------------------------
+    # 3. Descarga de datos históricos desde CoinGecko
     @st.cache_data
     def load_data_coingecko(coin_id, vs_currency="usd", days="max"):
         """
@@ -103,28 +95,24 @@ def main_app():
         df.reset_index(drop=True, inplace=True)
         return df
 
-    # -----------------------------
-    # 4. CÁLCULO DE INDICADORES TÉCNICOS CON PANDAS_TA
-    # -----------------------------
+    # 4. Cálculo de indicadores técnicos con pandas_ta
     def add_indicators(df):
         """
-        Calcula RSI, MACD y Bollinger Bands a partir de los datos de precios.
-        Devuelve el DataFrame con nuevas columnas:
+        Calcula RSI, MACD y Bollinger Bands y los fusiona al DataFrame.
+        Se crean las columnas:
           - 'rsi'
-          - 'MACD', 'MACD_Signal', 'MACD_Hist'
-          - 'BBL', 'BBM', 'BBU' (Bollinger Bands Lower, Middle, Upper)
-        Se realiza ffill para alinear datos.
+          - 'MACD_12_26_9', 'MACDs_12_26_9', 'MACDh_12_26_9'
+          - 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0'
+        Se aplica forward fill para alinear datos.
         """
         df["rsi"] = ta.rsi(df["close_price"], length=14)
-        macd_df = ta.macd(df["close_price"])  # Por defecto: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
-        bbands_df = ta.bbands(df["close_price"], length=20, std=2)  # BBL_20_2.0, BBM_20_2.0, BBU_20_2.0
+        macd_df = ta.macd(df["close_price"])
+        bbands_df = ta.bbands(df["close_price"], length=20, std=2)
         df = pd.concat([df, macd_df, bbands_df], axis=1)
         df.ffill(inplace=True)
         return df
 
-    # -----------------------------
-    # 5. CREACIÓN DE SECUENCIAS PARA LA LSTM
-    # -----------------------------
+    # 5. Creación de secuencias para la LSTM
     def create_sequences(data, window_size=30):
         """
         Genera secuencias de datos de longitud 'window_size'.
@@ -139,19 +127,15 @@ def main_app():
             y.append(data[i, 0])
         return np.array(X), np.array(y)
 
-    # -----------------------------
-    # 6. CONSTRUCCIÓN DEL MODELO HÍBRIDO (Conv1D + LSTM)
-    # -----------------------------
+    # 6. Construcción del modelo híbrido (Conv1D + LSTM)
     def build_hybrid_model(input_shape, learning_rate=0.001):
         """
         Construye un modelo híbrido que combina una capa Conv1D para extraer
-        características locales seguida de capas Bidirectional LSTM para capturar
+        características locales y capas Bidirectional LSTM para capturar
         dependencias a largo plazo.
         """
         model = Sequential()
-        # Capa Conv1D para extraer patrones locales
         model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
-        # Capa LSTM bidireccional
         model.add(Bidirectional(LSTM(64, return_sequences=True)))
         model.add(Dropout(0.3))
         model.add(Bidirectional(LSTM(64, return_sequences=True)))
@@ -163,25 +147,22 @@ def main_app():
         model.compile(optimizer=optimizer, loss="mean_squared_error")
         return model
 
-    # -----------------------------
-    # 7. ENTRENAMIENTO Y PREDICCIÓN CON EL MODELO HÍBRIDO
-    # -----------------------------
+    # 7. Entrenamiento y predicción con el modelo híbrido
     def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
                           use_multivariate=False, use_indicators=False,
                           epochs=10, batch_size=32, learning_rate=0.001):
         """
-        Descarga datos desde CoinGecko, calcula indicadores técnicos (si se solicita),
+        Descarga datos desde CoinGecko, calcula indicadores (si se solicita),
         prepara las secuencias, entrena el modelo híbrido y genera predicciones.
         """
-        # Cargar datos históricos desde CoinGecko
+        # Descarga de precios
         df_prices = load_data_coingecko(coin_id, vs_currency="usd", days="max")
         if df_prices is None:
             return None
-        # Si se solicitan indicadores técnicos, se calculan y se añaden
+        # Calcular indicadores si se activó la opción
         if use_indicators:
             df_prices = add_indicators(df_prices)
-        # Si se usan datos multivariados o indicadores, se preparan múltiples features;
-        # en caso contrario, solo se usa 'close_price'
+        # Preparación del DataFrame para el modelado
         if use_multivariate or use_indicators:
             feature_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
             for col in ["rsi", "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9", "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0"]:
@@ -211,30 +192,27 @@ def main_app():
         if X_test is None:
             return None
 
-        # División de validación del entrenamiento (90%/10%)
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # Construcción del modelo híbrido
         input_shape = (X_train.shape[1], X_train.shape[2])
         model = build_hybrid_model(input_shape, learning_rate=learning_rate)
 
-        # Entrenamiento con callbacks
         early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
         lr_reducer = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3)
         model.fit(X_train, y_train, validation_data=(X_val, y_val),
                   epochs=epochs, batch_size=batch_size, verbose=1,
                   callbacks=[early_stop, lr_reducer])
 
-        # Predicción en test
         test_predictions = model.predict(X_test)
         test_predictions_descaled = scaler_target.inverse_transform(test_predictions)
         y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
+
         rmse = np.sqrt(np.mean((y_test_deserialized - test_predictions_descaled) ** 2))
         mape = np.mean(np.abs((y_test_deserialized - test_predictions_descaled) / y_test_deserialized)) * 100
 
-        # Predicción a futuro (iterativa)
+        # Predicción futura iterativa
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
         current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -248,9 +226,7 @@ def main_app():
 
         return df_model, test_predictions_descaled, y_test_deserialized, future_preds, rmse, mape
 
-    # ---------------------------------------------------------
-    # 8. VISUALIZACIÓN DEL HISTÓRICO DE PRECIOS (SIN HORAS)
-    # ---------------------------------------------------------
+    # 8. Visualización del histórico de precios (sin horas)
     df_prices = load_data_coingecko(coin_id, vs_currency="usd", days="max")
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
@@ -265,9 +241,7 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
-    # ---------------------------------------------------------
-    # 9. PESTAÑAS: ENTRENAMIENTO/TEST Y PREDICCIÓN
-    # ---------------------------------------------------------
+    # 9. Pestañas: Entrenamiento/Test y Predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_choice}"])
 
     with tabs[0]:
