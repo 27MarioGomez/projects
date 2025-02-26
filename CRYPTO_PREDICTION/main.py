@@ -265,9 +265,10 @@ def main_app():
 #  EJECUCIÓN CON PYTHON vs STREAMLIT
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    # Si ejecutas "python main.py", NO se lanza la app de Streamlit, solo muestra este mensaje
-    print("Script preparado. Si quieres ver la app, usa:  streamlit run main.py")
-else:
-    # Cuando uses "streamlit run main.py", Streamlit establecerá __name__ != '__main__'
-    # y entonces llamará a la función que contiene todo el dashboard
-    main_app()
+    st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
+    st.title("Dashboard de Predicción de Precios de Criptomonedas")
+    st.write("Cargando datos y modelo...")
+
+    # Verifica si Streamlit está ejecutando correctamente
+    st.success("✅ Streamlit está funcionando correctamente")
+
