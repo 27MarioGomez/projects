@@ -113,7 +113,6 @@ def main_app():
         if response.status_code != 200:
             st.error("Error al obtener datos de Alpha Vantage.")
             return None
-
         data_io = StringIO(response.text)
         df = pd.read_csv(data_io)
         df.rename(columns={
@@ -155,7 +154,6 @@ def main_app():
             st.error("No se pudieron cargar los datos. Verifica la API Key o la disponibilidad del servicio.")
             return None
 
-        # Selección de columnas y escalado
         if use_multivariate:
             df_model = df[['ds', 'close_price', 'open_price', 'high_price', 'low_price', 'volume']].copy()
             features_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
@@ -170,7 +168,6 @@ def main_app():
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
-        # Dividir en train/test
         split_index = int(len(scaled_data) * (1 - test_size))
         train_data = scaled_data[:split_index]
         test_data = scaled_data[split_index:]
@@ -182,23 +179,18 @@ def main_app():
         if X_test is None:
             return None
 
-        # Dividir en train/val (90%/10%)
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # TRES CAPAS RECURRENTES (mejora)
+        # Modelo mejorado: tres capas Bidirectional LSTM
         model = Sequential()
-        # Primera capa Bidirectional LSTM
         model.add(Bidirectional(LSTM(64, return_sequences=True), input_shape=(X_train.shape[1], X_train.shape[2])))
         model.add(Dropout(0.3))
-        # Segunda capa Bidirectional LSTM (nueva capa intermedia)
         model.add(Bidirectional(LSTM(64, return_sequences=True)))
         model.add(Dropout(0.3))
-        # Tercera capa Bidirectional LSTM (sin return_sequences)
         model.add(Bidirectional(LSTM(64, return_sequences=False)))
         model.add(Dropout(0.3))
-        # Capa de salida
         model.add(Dense(1))
 
         optimizer = Adam(learning_rate=learning_rate)
@@ -210,16 +202,13 @@ def main_app():
                   epochs=epochs, batch_size=batch_size, verbose=1,
                   callbacks=[early_stop, lr_reducer])
 
-        # Predicciones en test
         test_predictions = model.predict(X_test)
         test_predictions_descaled = scaler_target.inverse_transform(test_predictions)
         y_test_descaled = scaler_target.inverse_transform(y_test.reshape(-1, 1))
 
-        # Métricas
         rmse = np.sqrt(np.mean((y_test_descaled - test_predictions_descaled)**2))
         mape = np.mean(np.abs((y_test_descaled - test_predictions_descaled) / y_test_descaled)) * 100
 
-        # Predicción futura (iterativa)
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
         current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -236,11 +225,27 @@ def main_app():
         return df_model, test_predictions_descaled, y_test_descaled, future_preds, rmse, mape
 
     # ---------------------------------------------------------------------
-    # SOLO DOS PESTAÑAS: "Entrenamiento y Test" y "Predicción de Precios"
+    # MOSTRAR GRÁFICO HISTÓRICO DE PRECIO
+    # ---------------------------------------------------------------------
+    df = load_and_clean_data(symbol)
+    if df is not None:
+        # Mostramos solo el gráfico histórico de precio (formateo de fecha DD-MM-YYYY para el gráfico)
+        df_chart = df.copy()
+        df_chart['ds'] = df_chart['ds'].dt.strftime('%d-%m-%Y')
+        fig_hist = px.line(
+            df_chart, x="ds", y="close_price",
+            title=f"Histórico de Precio de {crypto_choice}",
+            labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+    else:
+        st.error("No se pudieron cargar los datos históricos.")
+
+    # ---------------------------------------------------------------------
+    # DOS PESTAÑAS: "Entrenamiento y Test" y "Predicción de Precios"
     # ---------------------------------------------------------------------
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_choice}"])
 
-    # Pestaña 0: Entrenamiento y Test
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir", key="train_test"):
@@ -279,14 +284,12 @@ def main_app():
             else:
                 st.error("No se pudo entrenar el modelo debido a un error en la carga de datos.")
 
-    # Pestaña 1: Predicción de Precios - {crypto_choice}
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_choice}")
         if 'result' in locals() and result is not None:
             df_model, test_preds, y_test_real, future_preds, rmse, mape = result
             last_date = df_model['ds'].iloc[-1]
             future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=horizon)
-
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(x=future_dates, y=future_preds,
                                             mode='lines+markers', name='Predicción Futura'))
