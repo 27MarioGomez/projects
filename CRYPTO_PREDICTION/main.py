@@ -46,14 +46,21 @@ def main_app():
     # ---------------------------------------------------------------------
     st.sidebar.header("Configuración de la predicción")
 
-    # Diccionario de símbolos para Alpha Vantage
+    # Diccionario ampliado de símbolos para Alpha Vantage
+    # (Se incluyen algunas de las criptomonedas más populares soportadas)
     alpha_symbols = {
-        "Bitcoin":  "BTC",
-        "Ethereum": "ETH",
-        "XRP":      "XRP",
-        "Stellar":  "XLM",
-        "Solana":   "SOL",
-        "Cardano":  "ADA"
+        "Bitcoin (BTC)":  "BTC",
+        "Ethereum (ETH)": "ETH",
+        "XRP":            "XRP",
+        "Stellar (XLM)":  "XLM",
+        "Solana (SOL)":   "SOL",
+        "Cardano (ADA)":  "ADA",
+        "Dogecoin (DOGE)": "DOGE",
+        "Polkadot (DOT)":  "DOT",
+        "Polygon (MATIC)": "MATIC",
+        "Litecoin (LTC)":  "LTC",
+        "TRON (TRX)":      "TRX",
+        "Binance Coin (BNB)": "BNB"
     }
 
     # Selección de la cripto
@@ -113,12 +120,10 @@ def main_app():
         if response.status_code != 200:
             st.error("Error al obtener datos de Alpha Vantage.")
             return None
-
         data_io = StringIO(response.text)
         df = pd.read_csv(data_io)
 
         # Forzar la lectura con dayfirst=True para evitar fechas invertidas
-        # (p.ej. si viene 14-03-2024, interpretarlo como 14 de marzo, no 03/14/2024).
         df.rename(columns={
             "timestamp":   "ds",
             "open":        "open_price",
@@ -129,12 +134,8 @@ def main_app():
             "market cap":  "market_cap"
         }, inplace=True)
 
-        # Parseo de fecha con dayfirst
         df['ds'] = pd.to_datetime(df['ds'], dayfirst=True, errors='coerce')
-
-        # Eliminar fechas inválidas
         df.dropna(subset=['ds'], inplace=True)
-        # Ordenar ascendente
         df.sort_values(by='ds', ascending=True, inplace=True)
         df.reset_index(drop=True, inplace=True)
         return df
@@ -163,7 +164,6 @@ def main_app():
             st.error("No se pudieron cargar los datos. Verifica la API Key o la disponibilidad del servicio.")
             return None
 
-        # Selección de columnas y escalado
         if use_multivariate:
             df_model = df[['ds', 'close_price', 'open_price', 'high_price', 'low_price', 'volume']].copy()
             features_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
@@ -242,8 +242,8 @@ def main_app():
     # ---------------------------------------------------------------------
     df = load_and_clean_data(symbol)
     if df is not None and len(df) > 0:
-        # Formateamos fecha y mostramos el gráfico
         df_chart = df.copy()
+        # Formateamos fecha en DD-MM-YYYY para que sea más amigable
         df_chart['ds'] = df_chart['ds'].dt.strftime('%d-%m-%Y')
 
         fig_hist = px.line(
@@ -251,10 +251,10 @@ def main_app():
             title=f"Histórico de Precio de {crypto_choice}",
             labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
-        # Forzamos tipo fecha en el eje x (con ticks en %d-%m-%Y)
+        # Ajustes para la legibilidad del eje X
         fig_hist.update_layout(
             xaxis=dict(
-                type='category',  # Mantenemos category para que no salten huecos
+                type='category',
                 tickangle=45
             )
         )
