@@ -126,17 +126,17 @@ def main_app():
         data_io = StringIO(response.text)
         df = pd.read_csv(data_io)
 
-        # Alpha Vantage CSV: timestamp, open (USD), high (USD), low (USD),
-        # close (USD), volume, market cap (USD)
-        # Renombramos para ajustarnos a la lógica interna
+        # Alpha Vantage CSV (según tu error) parece devolver:
+        # ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'market cap']
+        # Ajustamos el renombrado a esas columnas:
         df.rename(columns={
-            "timestamp":     "ds",
-            "close (USD)":   "close_price",
-            "open (USD)":    "open_price",
-            "high (USD)":    "high_price",
-            "low (USD)":     "low_price",
-            "volume":        "volume",
-            "market cap (USD)": "market_cap"
+            "timestamp":   "ds",
+            "open":        "open_price",
+            "high":        "high_price",
+            "low":         "low_price",
+            "close":       "close_price",
+            "volume":      "volume",
+            "market cap":  "market_cap"
         }, inplace=True)
 
         # Convertir ds a datetime y ordenar
