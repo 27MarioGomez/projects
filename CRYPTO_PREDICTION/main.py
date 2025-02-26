@@ -43,14 +43,14 @@ def main_app():
     # ---------------------------------------------------------------------
     st.sidebar.header("Configuración del Proyecto")
 
-    # Diccionario con rutas de datos (actualizadas para usar URLs de GitHub)
+    # Diccionario con rutas de datos (con refs/heads/main)
     crypto_paths = {
-        "Bitcoin":  "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Bitcoin.csv",
-        "Ethereum": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Ethereum.csv",
-        "XRP": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_XRP.csv",
-        "Stellar": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Stellar.csv",
-        "Solana": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Solana.csv",
-        "Cardano": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Cardano.csv"
+        "Bitcoin":  "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Bitcoin.csv",
+        "Ethereum": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Ethereum.csv",
+        "XRP": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_XRP.csv",
+        "Stellar": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Stellar.csv",
+        "Solana": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Solana.csv",
+        "Cardano": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Cardano.csv"
     }
 
     crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(crypto_paths.keys()))
