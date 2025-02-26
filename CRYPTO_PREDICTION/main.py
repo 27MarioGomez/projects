@@ -8,8 +8,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
-from io import StringIO
-from datetime import datetime
+from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
 import pandas_ta as ta
 import tensorflow as tf
@@ -18,41 +17,60 @@ from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
 
-#########################
+###############################################################
 # 1. Funciones de apoyo y diccionarios
-#########################
+###############################################################
+
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """Calcula el MAPE evitando división por cero."""
+    """
+    Calcula el MAPE evitando divisiones por cero.
+    Se usa max(eps, abs(y_true)) para prevenir divisiones por cero.
+    """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario para CoinCap: se incluyen aquellas criptomonedas con histórico completo
+# Diccionario para CoinCap. Se han incluido varias criptomonedas populares.
+# Se ajusta 'ripple' para XRP, 'tether' para USDT, etc.
 coincap_ids = {
-    "Bitcoin (BTC)":      "bitcoin",
-    "Ethereum (ETH)":     "ethereum",
-    "XRP":                "ripple",       # XRP se encuentra como 'ripple'
-    "Stellar (XLM)":      "stellar",
-    "Solana (SOL)":       "solana",
-    "Cardano (ADA)":      "cardano",
-    "Dogecoin (DOGE)":    "dogecoin",
-    "Polkadot (DOT)":     "polkadot",
-    "Polygon (MATIC)":    "polygon",
-    "Litecoin (LTC)":     "litecoin",
-    "TRON (TRX)":         "tron",
-    "Binance Coin (BNB)": "binancecoin"
+    "Bitcoin (BTC)":         "bitcoin",
+    "Ethereum (ETH)":        "ethereum",
+    "Ripple (XRP)":          "ripple",
+    "Tether (USDT)":         "tether",
+    "USD Coin (USDC)":       "usd-coin",
+    "Binance Coin (BNB)":    "binance-coin",
+    "Cardano (ADA)":         "cardano",
+    "Solana (SOL)":          "solana",
+    "Dogecoin (DOGE)":       "dogecoin",
+    "Polkadot (DOT)":        "polkadot",
+    "Polygon (MATIC)":       "polygon",
+    "Litecoin (LTC)":        "litecoin",
+    "TRON (TRX)":            "tron",
+    "Stellar (XLM)":         "stellar",
+    "Shiba Inu (SHIB)":      "shiba-inu"
 }
 
-#########################
+# Lista de intervalos válidos según la documentación de CoinCap
+# (m1, m5, m15, m30, h1, h2, h6, h12, d1).
+coincap_intervals = ["m1", "m5", "m15", "m30", "h1", "h2", "h6", "h12", "d1"]
+
+###############################################################
 # 2. Función para descargar datos desde CoinCap con reintentos
-#########################
+###############################################################
 @st.cache_data
-def load_coincap_data(coin_id, days="max", max_retries=3):
+def load_coincap_data(coin_id, interval="d1", start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga el histórico de precios desde CoinCap usando el endpoint correcto.
-    Se utiliza 'interval=d1' y 'days=max' para obtener todo el histórico disponible.
-    Devuelve un DataFrame con columnas 'ds' y 'close_price'.
+    Descarga el histórico de precios desde CoinCap en el intervalo y rango de fechas indicado.
+    - interval: uno de [m1, m5, m15, m30, h1, h2, h6, h12, d1]
+    - start_ms, end_ms: timestamps en milisegundos para definir el rango de fechas.
     """
-    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1&days={days}"
+    # Construimos la URL base
+    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval={interval}"
+    # Si se ha seleccionado un rango de fechas, añadimos start y end
+    if start_ms is not None and end_ms is not None:
+        url += f"&start={start_ms}&end={end_ms}"
+
     headers = {"User-Agent": "Mozilla/5.0"}
+
+    # Reintentos en caso de error 429
     for attempt in range(max_retries):
         resp = requests.get(url, headers=headers)
         if resp.status_code == 200:
@@ -62,13 +80,15 @@ def load_coincap_data(coin_id, days="max", max_retries=3):
                 return None
             df = pd.DataFrame(data["data"])
             if df.empty:
-                st.error("CoinCap: CSV vacío.")
+                st.error("CoinCap: Datos vacíos para ese rango/intervalo.")
                 return None
-            # Se espera que CoinCap devuelva 'time' y 'priceUsd'
+            # CoinCap devuelve 'time' y 'priceUsd'
             if "time" not in df.columns or "priceUsd" not in df.columns:
-                st.error("CoinCap: Las columnas 'time' o 'priceUsd' no se encontraron.")
+                st.error("CoinCap: Columnas 'time' o 'priceUsd' no encontradas.")
                 st.write(df.head())
                 return None
+
+            # Convertimos time a datetime y priceUsd a float
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
             df = df[["ds", "close_price"]]
@@ -77,22 +97,24 @@ def load_coincap_data(coin_id, days="max", max_retries=3):
             df.reset_index(drop=True, inplace=True)
             df = df[df["close_price"] > 0].copy()
             return df
+
         elif resp.status_code == 429:
-            st.warning(f"CoinCap: Error 429 en intento {attempt+1}. Reintentando en {15*(attempt+1)} segundos...")
-            time.sleep(15 * (attempt+1))
+            st.warning(f"CoinCap: Error 429 en intento {attempt+1}. Esperando {15*(attempt+1)}s antes de reintentar...")
+            time.sleep(15*(attempt+1))
         else:
-            st.error(f"Error al obtener datos de CoinCap (status code {resp.status_code}).")
+            st.error(f"Error CoinCap (status code {resp.status_code}).")
             return None
+
     st.error("CoinCap: Se alcanzó el número máximo de reintentos sin éxito.")
     return None
 
-#########################
+###############################################################
 # 3. Funciones para indicadores técnicos (opcional)
-#########################
+###############################################################
 def add_indicators(df):
     """
     Calcula RSI, MACD y Bollinger Bands con pandas_ta.
-    Se aplica forward fill para alinear datos.
+    Aplica forward fill para alinear datos.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -104,10 +126,15 @@ def add_indicators(df):
 def add_all_indicators(df):
     return add_indicators(df)
 
-#########################
+###############################################################
 # 4. Creación de secuencias para LSTM
-#########################
+###############################################################
 def create_sequences(data, window_size=30):
+    """
+    Genera secuencias de longitud 'window_size'.
+    data: np.array con la serie de precios escalada.
+    Retorna X, y (arrays numpy).
+    """
     if len(data) <= window_size:
         st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
         return None, None
@@ -117,10 +144,16 @@ def create_sequences(data, window_size=30):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
-#########################
+###############################################################
 # 5. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
-#########################
+###############################################################
 def build_lstm_model(input_shape, learning_rate=0.001):
+    """
+    Construye un modelo secuencial con:
+    - 1D Conv
+    - 3 capas Bidirectional LSTM con Dropout
+    - Dense final para regresión.
+    """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
     model.add(Bidirectional(LSTM(64, return_sequences=True)))
@@ -134,31 +167,37 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
-#########################
+###############################################################
 # 6. Entrenamiento y predicción con LSTM
-#########################
-def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
-                      use_indicators=False, epochs=10, batch_size=32, learning_rate=0.001):
+###############################################################
+def train_and_predict(coin_id, start_ms, end_ms, interval, horizon_days=30,
+                      window_size=30, test_size=0.2, use_indicators=False,
+                      epochs=10, batch_size=32, learning_rate=0.001):
     """
-    Descarga datos desde CoinCap, añade indicadores (opcional),
-    entrena un modelo LSTM y realiza la predicción futura de forma iterativa.
+    - Descarga datos desde CoinCap usando un rango de fechas [start_ms, end_ms] e intervalo.
+    - Aplica indicadores técnicos si se solicita.
+    - Escala y genera secuencias para LSTM.
+    - Entrena el modelo y hace predicción futura iterativa.
     """
-    df_prices = load_coincap_data(coin_id)
+    # 1) Carga de datos con reintentos
+    df_prices = load_coincap_data(coin_id, interval=interval, start_ms=start_ms, end_ms=end_ms)
     if df_prices is None:
         return None
 
+    # 2) Indicadores técnicos (opcional)
     if use_indicators:
         df_prices = add_all_indicators(df_prices)
 
     if "close_price" not in df_prices.columns:
-        st.error("No se encontró 'close_price' en los datos de CoinCap.")
-        st.write(df_prices.head())
+        st.error("No se encontró la columna 'close_price' tras descargar datos.")
         return None
 
+    # 3) Escalado y preparación
     data_for_model = df_prices[["close_price"]].values
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_target.fit_transform(data_for_model)
 
+    # 4) División en train/test
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
         st.error("No hay suficientes datos para el conjunto de entrenamiento.")
@@ -173,10 +212,12 @@ def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
     if X_test is None:
         return None
 
+    # 5) División en train/val
     val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+    # 6) Construcción y entrenamiento del modelo
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
@@ -187,18 +228,19 @@ def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
         verbose=1
     )
 
-    lstm_preds_test = lstm_model.predict(X_test)
+    # 7) Predicción en test
+    test_preds_scaled = lstm_model.predict(X_test)
+    test_preds = scaler_target.inverse_transform(test_preds_scaled)
     y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
-    lstm_preds_descaled = scaler_target.inverse_transform(lstm_preds_test)
 
-    valid_mask = ~np.isnan(lstm_preds_descaled) & ~np.isnan(y_test_deserialized)
+    valid_mask = ~np.isnan(test_preds) & ~np.isnan(y_test_deserialized)
     if np.sum(valid_mask) == 0:
         rmse, mape = np.nan, np.nan
     else:
-        rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - lstm_preds_descaled[valid_mask]) ** 2))
-        mape = robust_mape(y_test_deserialized[valid_mask], lstm_preds_descaled[valid_mask])
+        rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
+        mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
-    # Predicción futura iterativa
+    # 8) Predicción futura iterativa
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -216,30 +258,79 @@ def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    return df_prices, lstm_preds_descaled, y_test_deserialized, future_preds, rmse, mape
+    return df_prices, test_preds, y_test_deserialized, future_preds, rmse, mape
 
-#########################
+###############################################################
 # 7. Lógica principal de la app (main_app)
-#########################
+###############################################################
 def main_app():
+    """
+    Interfaz principal de Streamlit:
+    - Selección de criptomoneda
+    - Selección de rango de fechas (date_input)
+    - Selección de intervalo (CoinCap intervals)
+    - Parámetros de LSTM
+    - Entrenamiento y Predicción
+    """
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
     st.title("Crypto Price Predictions 🔮 - Solo CoinCap")
-    st.markdown("**Fuente de Datos:** CoinCap (serie diaria, actualizada cada día)")
+    st.markdown("**Fuente de Datos:** CoinCap (histórico con rango e intervalos)")
 
+    # Barra lateral: configuración principal
     st.sidebar.header("Configuración de la predicción")
-    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()),
-                                         help="Elige la criptomoneda para la predicción.")
+
+    # Selección de criptomoneda
+    crypto_name = st.sidebar.selectbox(
+        "Selecciona una criptomoneda:",
+        list(coincap_ids.keys()),
+        help="Elige la criptomoneda para la predicción."
+    )
     coin_id = coincap_ids[crypto_name]
 
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
-                                 help="Número de días a futuro a predecir.")
+    # Selección de rango de fechas
+    st.sidebar.subheader("Rango de Fechas")
+    default_start = datetime(2021, 1, 1)
+    default_end = datetime.now()
+    start_date = st.sidebar.date_input("Fecha de inicio", default_start)
+    end_date = st.sidebar.date_input("Fecha de fin", default_end)
+
+    # Conversión de fechas a milisegundos
+    start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
+    end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
+
+    # Selección de intervalo
+    st.sidebar.subheader("Intervalo de Velas (CoinCap)")
+    interval_choice = st.sidebar.selectbox(
+        "Selecciona un intervalo:",
+        ["m1", "m5", "m15", "m30", "h1", "h2", "h6", "h12", "d1"],
+        help="Intervalo de velas para la API de CoinCap."
+    )
+
+    # Parámetros de Predicción
+    st.sidebar.subheader("Parámetros de Predicción")
+    horizon = st.sidebar.slider(
+        "Días a predecir:",
+        min_value=1, max_value=60, value=30,
+        help="Número de días a futuro a predecir."
+    )
+    # Cálculo automático del tamaño de ventana
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
-    use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True,
-                                          help="Calcula indicadores técnicos localmente para enriquecer los datos.")
 
-    scenario = st.sidebar.selectbox("Escenario del Modelo:", ["Pesimista", "Neutro", "Optimista"],
-                                    help="Ajusta automáticamente los hiperparámetros del modelo.")
+    # Indicadores técnicos
+    use_indicators = st.sidebar.checkbox(
+        "Incluir indicadores técnicos (RSI, MACD, BBANDS)",
+        value=True,
+        help="Calcula indicadores técnicos localmente para enriquecer los datos."
+    )
+
+    # Escenario del modelo (hiperparámetros)
+    st.sidebar.subheader("Escenario del Modelo")
+    scenario = st.sidebar.selectbox(
+        "Elige un escenario:",
+        ["Pesimista", "Neutro", "Optimista"],
+        help="Ajusta automáticamente los hiperparámetros del modelo."
+    )
     if scenario == "Pesimista":
         epochs_val = 20
         batch_size_val = 32
@@ -253,30 +344,35 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Visualización del histórico
-    df_prices = load_coincap_data(coin_id)
+    # Visualización del histórico (descarga previa para mostrar gráfico)
+    df_prices = load_coincap_data(coin_id, interval=interval_choice, start_ms=start_ms, end_ms=end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
-        df_chart["ds"] = df_chart["ds"].dt.strftime("%d-%m-%Y")
+        # Formato de fecha para el eje X
+        df_chart["ds_str"] = df_chart["ds"].dt.strftime("%Y-%m-%d %H:%M")
         fig_hist = px.line(
-            df_chart, x="ds", y="close_price",
-            title=f"Histórico de Precio de {crypto_name} (CoinCap)",
-            labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
+            df_chart, x="ds_str", y="close_price",
+            title=f"Histórico de Precio de {crypto_name} ({interval_choice} interval)",
+            labels={"ds_str": "Fecha", "close_price": "Precio de Cierre"}
         )
+        # Rotamos las etiquetas del eje X para mejor legibilidad
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45))
         st.plotly_chart(fig_hist, use_container_width=True)
     else:
-        st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
+        st.warning("No se encontraron datos históricos válidos para mostrar el gráfico con los parámetros seleccionados.")
 
-    # Pestañas para entrenamiento y predicción
+    # Pestañas: Entrenamiento/Test y Predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
-        if st.button("Entrenar Modelo y Predecir"):
+        if st.button("Entrenar Modelo y Predecir", key="train_test"):
             with st.spinner("Entrenando el modelo, por favor espera..."):
                 result = train_and_predict(
                     coin_id=coin_id,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    interval=interval_choice,
                     horizon_days=horizon,
                     window_size=auto_window,
                     test_size=0.2,
@@ -288,11 +384,13 @@ def main_app():
             if result is not None:
                 df_model, test_preds, y_test_real, future_preds, rmse, mape = result
                 st.success("Entrenamiento y predicción completados!")
+                # Métricas
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
 
                 st.subheader("Comparación en el Set de Test")
+                # Extraemos las fechas finales para el test
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
                 fig_test.add_trace(go.Scatter(
@@ -324,6 +422,7 @@ def main_app():
             current_price = df_model["close_price"].iloc[-1]
             future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
             pred_series = np.concatenate(([current_price], future_preds))
+
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(
                 x=future_dates,
@@ -337,6 +436,7 @@ def main_app():
                 yaxis_title="Precio"
             )
             st.plotly_chart(fig_future, use_container_width=True)
+
             st.subheader("Valores Numéricos de la Predicción Futura")
             future_df = pd.DataFrame({"Fecha": future_dates, "Predicción": pred_series})
             st.dataframe(future_df)
