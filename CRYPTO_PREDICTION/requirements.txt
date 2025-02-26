@@ -6,3 +6,4 @@ scikit-learn
 tensorflow==2.18.0
 absl-py==1.4.0
 requests
+pandas_ta
