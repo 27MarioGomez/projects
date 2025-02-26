@@ -29,11 +29,11 @@ def main_app():
 
     st.title("Crypto Price Predictions 🔮")
     st.markdown("Utiliza la barra lateral para elegir la criptomoneda y el escenario de predicción.")
-    st.markdown("**Fuente de Datos:** Alpha Vantage")
+    st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
 
-    # Configuración de la barra lateral
+    # Barra lateral: configuración
     st.sidebar.header("Configuración de la predicción")
-
+    
     # Diccionario ampliado de criptomonedas
     alpha_symbols = {
         "Bitcoin (BTC)":      "BTC",
@@ -53,12 +53,12 @@ def main_app():
     symbol = alpha_symbols[crypto_choice]
 
     # Parámetros básicos de predicción
-    st.sidebar.subheader("Ajustes de predicción")
+    st.sidebar.subheader("Parámetros de Predicción Básicos")
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30,
                                 help="Cantidad de días a futuro que deseas predecir.")
-    # Ajuste del rango del tamaño de ventana para el histórico disponible
+    # Se ajusta el rango del tamaño de ventana
     window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30,
-                                    help="Número de días pasados para calcular el futuro. Wow!")
+                                    help="Número de días usados como ventana para entrenar la LSTM.")
     use_multivariate = st.sidebar.checkbox("Usar datos multivariados (Open, High, Low, Volume)",
                                            value=False,
                                            help="Incluir datos adicionales además del precio de cierre.")
@@ -80,7 +80,7 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Función para descargar y limpiar datos de Alpha Vantage
+    # Función para descargar y limpiar datos desde Alpha Vantage
     @st.cache_data
     def load_and_clean_data(symbol):
         api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
@@ -114,7 +114,7 @@ def main_app():
         df.reset_index(drop=True, inplace=True)
         return df
 
-    # Función para crear secuencias para la LSTM
+    # Función para crear secuencias a partir de los datos
     def create_sequences(data, window_size=60):
         if len(data) <= window_size:
             st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
@@ -126,7 +126,8 @@ def main_app():
         X, y = np.array(X), np.array(y)
         return X, y
 
-    # Función para entrenar el modelo y generar predicciones
+    # Función para entrenar el modelo y generar predicciones,
+    # guardando y cargando automáticamente los pesos del modelo.
     def train_and_predict_lstm(symbol, horizon_days=30, window_size=60, test_size=0.2,
                                use_multivariate=False, epochs=10, batch_size=32, learning_rate=0.001):
         df = load_and_clean_data(symbol)
@@ -176,11 +177,18 @@ def main_app():
         optimizer = Adam(learning_rate=learning_rate)
         model.compile(optimizer=optimizer, loss='mean_squared_error')
 
+        # Cargar pesos si existen
+        if os.path.exists("model_weights.h5"):
+            model.load_weights("model_weights.h5")
+
         early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
         lr_reducer = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
         model.fit(X_train, y_train, validation_data=(X_val, y_val),
                   epochs=epochs, batch_size=batch_size, verbose=1,
                   callbacks=[early_stop, lr_reducer])
+
+        # Guardar los pesos del modelo para futuras ejecuciones
+        model.save_weights("model_weights.h5")
 
         test_predictions = model.predict(X_test)
         test_predictions_descaled = scaler_target.inverse_transform(test_predictions)
@@ -211,7 +219,7 @@ def main_app():
         fig_hist = px.line(
             df_chart, x="ds", y="close_price",
             title=f"Histórico de Precio de {crypto_choice}",
-            labels={"ds": "Fecha", "close_price": "Precio"}
+            labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
         fig_hist.update_layout(
             xaxis=dict(
@@ -270,20 +278,19 @@ def main_app():
             future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=horizon)
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(x=future_dates, y=future_preds,
-                                            mode='lines+markers', name='Predicción'))
+                                            mode='lines+markers', name='Predicción Futura'))
             fig_future.update_layout(
-                title=f"Predicción a {horizon} días - {crypto_choice}",
+                title=f"Predicción a Futuro ({horizon} días) - {crypto_choice}",
                 xaxis_title="Fecha",
                 yaxis_title="Precio"
             )
             st.plotly_chart(fig_future, use_container_width=True)
-            st.subheader("Valores Numéricos de la Predicción")
+            st.subheader("Valores Numéricos de la Predicción Futura")
             future_df = pd.DataFrame({'Fecha': future_dates, 'Predicción': future_preds})
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
 
 
-# EJECUCIÓN
 if __name__ == "__main__":
     main_app()
