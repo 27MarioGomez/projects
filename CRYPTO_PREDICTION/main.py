@@ -25,8 +25,8 @@ def robust_mape(y_true, y_pred, eps=1e-9):
     """Calcula el MAPE evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario para CoinGecko
-coingecko_ids = {
+# Diccionario para CoinCap (usamos los mismos nombres que en CoinGecko para conveniencia)
+coincap_ids = {
     "Bitcoin (BTC)":      "bitcoin",
     "Ethereum (ETH)":     "ethereum",
     "XRP":                "ripple",
@@ -38,67 +38,49 @@ coingecko_ids = {
     "Polygon (MATIC)":    "polygon",
     "Litecoin (LTC)":     "litecoin",
     "TRON (TRX)":         "tron",
-    "Binance Coin (BNB)": "binancecoin"
-}
-
-# Diccionario para Alpha Vantage (usamos el mismo símbolo)
-alpha_symbols = {
-    "Bitcoin (BTC)":      "BTC",
-    "Ethereum (ETH)":     "ETH",
-    "XRP":                "XRP",
-    "Stellar (XLM)":      "XLM",
-    "Solana (SOL)":       "SOL",
-    "Cardano (ADA)":      "ADA",
-    "Dogecoin (DOGE)":    "DOGE",
-    "Polkadot (DOT)":     "DOT",
-    "Polygon (MATIC)":    "MATIC",
-    "Litecoin (LTC)":     "LTC",
-    "TRON (TRX)":         "TRX",
-    "Binance Coin (BNB)": "BNB"
+    "Binance Coin (BNB)": "binance-coin"
 }
 
 #########################
-# 2. Función para descargar datos desde CoinGecko con reintentos
+# 2. Función para descargar datos desde CoinCap
 #########################
 @st.cache_data
-def load_coingecko_data(coin_id, vs_currency="usd", days="max", max_retries=3):
+def load_coincap_data(coin_id, interval="d1"):
     """
-    Descarga el histórico de precios desde CoinGecko con reintentos si se recibe error 429.
+    Descarga el histórico diario de precios desde CoinCap.
     Devuelve un DataFrame con columnas 'ds' y 'close_price'.
     """
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
-    for attempt in range(max_retries):
-        resp = requests.get(url, headers=headers)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "prices" not in data:
-                st.error("CoinGecko: Datos no disponibles (falta 'prices').")
-                return None
-            df = pd.DataFrame(data["prices"], columns=["timestamp", "close_price"])
-            df["ds"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df = df[["ds", "close_price"]]
-            df.sort_values(by="ds", ascending=True, inplace=True)
-            df.reset_index(drop=True, inplace=True)
-            df = df[df["close_price"] > 0].copy()
-            return df
-        elif resp.status_code == 429:
-            st.warning(f"CoinGecko: Error 429 en intento {attempt+1}. Reintentando en {15*(attempt+1)} segundos...")
-            time.sleep(15 * (attempt + 1))
-        else:
-            st.error(f"Error CoinGecko (status code {resp.status_code}).")
-            return None
-
-    st.error("CoinGecko: Se alcanzó el número máximo de reintentos sin éxito.")
-    return None
+    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval={interval}"
+    resp = requests.get(url)
+    if resp.status_code != 200:
+        st.error(f"Error al obtener datos de CoinCap (status code {resp.status_code}).")
+        return None
+    data = resp.json()
+    if "data" not in data:
+        st.error("CoinCap: Datos no disponibles (falta 'data').")
+        return None
+    # Cada registro tiene 'time' y 'priceUsd'
+    df = pd.DataFrame(data["data"])
+    if df.empty:
+        st.error("CoinCap: CSV vacío.")
+        return None
+    # Convertir la columna 'time' a datetime y 'priceUsd' a float
+    df["ds"] = pd.to_datetime(df["time"], unit="ms")
+    df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
+    df = df[["ds", "close_price"]]
+    df.dropna(subset=["ds", "close_price"], inplace=True)
+    df.sort_values(by="ds", ascending=True, inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    # Filtrar valores no válidos
+    df = df[df["close_price"] > 0].copy()
+    return df
 
 #########################
-# 3. Funciones para indicadores técnicos
+# 3. Funciones para indicadores técnicos (opcional)
 #########################
 def add_indicators(df):
     """
-    Calcula RSI, MACD y Bollinger Bands con pandas_ta y rellena huecos.
+    Calcula RSI, MACD y Bollinger Bands con pandas_ta.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -111,18 +93,7 @@ def add_all_indicators(df):
     return add_indicators(df)
 
 #########################
-# 4. Función para combinar datos de CoinGecko y Alpha Vantage (opcional)
-#########################
-def load_combined_data(symbol_alpha, coin_id):
-    """
-    Combina datos de Alpha Vantage y CoinGecko (outer join por 'ds').
-    Promedia los precios si ambos están disponibles y rellena huecos con forward fill.
-    """
-    # En este ejemplo, si se quiere mayor robustez se podrían combinar, pero aquí usamos CoinGecko únicamente.
-    return load_coingecko_data(coin_id)
-
-#########################
-# 5. Creación de secuencias para LSTM
+# 4. Creación de secuencias para LSTM
 #########################
 def create_sequences(data, window_size=30):
     if len(data) <= window_size:
@@ -135,7 +106,7 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 #########################
-# 6. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
+# 5. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
 #########################
 def build_lstm_model(input_shape, learning_rate=0.001):
     model = Sequential()
@@ -152,15 +123,15 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     return model
 
 #########################
-# 7. Entrenamiento y predicción con LSTM
+# 6. Entrenamiento y predicción con LSTM
 #########################
 def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
                       use_indicators=False, epochs=10, batch_size=32, learning_rate=0.001):
     """
-    Descarga datos desde CoinGecko, añade indicadores (opcional),
+    Descarga datos desde CoinCap, añade indicadores (opcional),
     entrena un modelo LSTM y realiza predicciones futuras de forma iterativa.
     """
-    df_prices = load_combined_data(None, coin_id)  # Usamos solo CoinGecko
+    df_prices = load_coincap_data(coin_id)
     if df_prices is None:
         return None
 
@@ -168,7 +139,7 @@ def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
         df_prices = add_all_indicators(df_prices)
 
     if "close_price" not in df_prices.columns:
-        st.error("No se encontró 'close_price' en los datos.")
+        st.error("No se encontró 'close_price' en los datos de CoinCap.")
         st.write(df_prices.head())
         return None
 
@@ -219,30 +190,33 @@ def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
+
     @tf.function
     def predict_model(x):
         return lstm_model(x)
+
     for _ in range(horizon_days):
         future_pred = predict_model(current_input)[0][0]
         future_preds_scaled.append(future_pred)
         new_feature = np.zeros((1, 1, X_train.shape[2]))
         new_feature[0, 0, 0] = future_pred
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
+
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
     return df_prices, lstm_preds_descaled, y_test_deserialized, future_preds, rmse, mape
 
 #########################
-# 8. main_app: Lógica principal de la app
+# 7. Lógica principal de la app (main_app)
 #########################
 def main_app():
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
-    st.title("Crypto Price Predictions 🔮 - Solo CoinGecko")
-    st.markdown("**Fuente de Datos:** CoinGecko (serie diaria, actualizada cada día)")
+    st.title("Crypto Price Predictions 🔮 - Solo CoinCap")
+    st.markdown("**Fuente de Datos:** CoinCap (serie diaria, actualizada cada día)")
 
     st.sidebar.header("Configuración de la predicción")
-    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coingecko_ids.keys()))
-    coin_id = coingecko_ids[crypto_name]
+    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()))
+    coin_id = coincap_ids[crypto_name]
 
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30)
     auto_window = min(60, max(5, horizon * 2))
@@ -263,14 +237,14 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Mostramos gráfico histórico
-    df_prices = load_coingecko_data(coin_id)
+    # Visualización del histórico
+    df_prices = load_coincap_data(coin_id)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds"] = df_chart["ds"].dt.strftime("%d-%m-%Y")
         fig_hist = px.line(
             df_chart, x="ds", y="close_price",
-            title=f"Histórico de Precio de {crypto_name} (CoinGecko)",
+            title=f"Histórico de Precio de {crypto_name} (CoinCap)",
             labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45))
@@ -278,7 +252,6 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
-    # Pestañas: Entrenamiento/Test y Predicción Futura
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
@@ -351,6 +324,7 @@ def main_app():
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
+
 
 if __name__ == "__main__":
     main_app()
