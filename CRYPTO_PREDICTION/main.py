@@ -18,7 +18,15 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 def main_app():
-    # 1. Configuración de la página y estilo
+    """
+    App que descarga datos OHLC y volumen de CoinGecko, los fusiona,
+    calcula indicadores técnicos localmente y entrena un modelo híbrido
+    (Conv1D + LSTM) para predecir precios de criptomonedas.
+    """
+
+    # ---------------------------------------------------------------------
+    # 1. CONFIGURACIÓN DE LA PÁGINA Y ESTILO
+    # ---------------------------------------------------------------------
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
     st.markdown(
         """
@@ -31,11 +39,12 @@ def main_app():
         unsafe_allow_html=True
     )
     st.title("Crypto Price Predictions 🔮")
-    st.markdown("**Fuente de Datos:** CoinGecko + Indicadores calculados localmente (pandas_ta)")
+    st.markdown("**Fuente de Datos:** CoinGecko (OHLC + volumen) + Indicadores locales (pandas_ta)")
 
-    # 2. Configuración de la barra lateral
+    # ---------------------------------------------------------------------
+    # 2. BARRA LATERAL: CONFIGURACIÓN
+    # ---------------------------------------------------------------------
     st.sidebar.header("Configuración de la predicción")
-    # Diccionario de IDs de CoinGecko
     coin_ids = {
         "Bitcoin (BTC)":      "bitcoin",
         "Ethereum (ETH)":     "ethereum",
@@ -56,7 +65,7 @@ def main_app():
     st.sidebar.subheader("Parámetros de Predicción Básicos")
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30)
     window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30)
-    use_multivariate = st.sidebar.checkbox("Usar datos multivariados (OHLCV)", value=False)
+    use_multivariate = st.sidebar.checkbox("Usar datos multivariados (OHLC + volumen)", value=False)
     use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True)
 
     st.sidebar.subheader("Escenario del Modelo")
@@ -74,36 +83,90 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # 3. Descarga de datos históricos desde CoinGecko
-    @st.cache_data
-    def load_data_coingecko(coin_id, vs_currency="usd", days="max"):
+    # ---------------------------------------------------------------------
+    # 3. DESCARGA DE DATOS OHLC DESDE /coins/{id}/ohlc
+    # ---------------------------------------------------------------------
+    def load_ohlc_data(coin_id, vs_currency="usd", days="max"):
         """
-        Descarga el histórico de precios desde CoinGecko.
-        Devuelve un DataFrame con columnas 'ds' y 'close_price'.
+        Descarga OHLC (open, high, low, close) de CoinGecko.
+        Devuelve un DataFrame con: ds, open_price, high_price, low_price, close_price.
         """
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}"
-        resp = requests.get(url)
+        ohlc_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc?vs_currency={vs_currency}&days={days}"
+        resp = requests.get(ohlc_url)
         if resp.status_code != 200:
-            st.error("Error al obtener datos de CoinGecko.")
+            st.error(f"Error al obtener OHLC de CoinGecko para {coin_id}.")
             return None
-        data = resp.json()
-        # 'prices' es una lista de [timestamp, price]
-        df = pd.DataFrame(data["prices"], columns=["timestamp", "close_price"])
-        df["ds"] = pd.to_datetime(df["timestamp"], unit="ms")
-        df = df[["ds", "close_price"]]
-        df.sort_values(by="ds", ascending=True, inplace=True)
-        df.reset_index(drop=True, inplace=True)
-        return df
+        data_ohlc = resp.json()
+        if not isinstance(data_ohlc, list) or len(data_ohlc) == 0:
+            st.error(f"El endpoint OHLC para {coin_id} devolvió datos vacíos.")
+            return None
+        # Cada elemento: [timestamp, open, high, low, close]
+        df_ohlc = pd.DataFrame(data_ohlc, columns=["timestamp", "open_price", "high_price", "low_price", "close_price"])
+        df_ohlc["ds"] = pd.to_datetime(df_ohlc["timestamp"], unit="ms")
+        df_ohlc.sort_values(by="ds", ascending=True, inplace=True)
+        df_ohlc.reset_index(drop=True, inplace=True)
+        return df_ohlc[["ds", "open_price", "high_price", "low_price", "close_price"]]
 
-    # 4. Cálculo de indicadores técnicos con pandas_ta
+    # ---------------------------------------------------------------------
+    # 4. DESCARGA DE VOLUMEN DESDE /coins/{id}/market_chart
+    # ---------------------------------------------------------------------
+    def load_volume_data(coin_id, vs_currency="usd", days="max"):
+        """
+        Descarga el histórico de volumen desde CoinGecko (/market_chart).
+        Devuelve un DataFrame con columnas: ds, volume
+        """
+        vol_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}"
+        resp = requests.get(vol_url)
+        if resp.status_code != 200:
+            st.error(f"Error al obtener volumen de CoinGecko para {coin_id}.")
+            return None
+        data_vol = resp.json()
+        # 'total_volumes' es una lista de [timestamp, volume]
+        if "total_volumes" not in data_vol or len(data_vol["total_volumes"]) == 0:
+            st.error(f"No hay volumen en /market_chart para {coin_id}.")
+            return None
+        df_vol = pd.DataFrame(data_vol["total_volumes"], columns=["timestamp", "volume"])
+        df_vol["ds"] = pd.to_datetime(df_vol["timestamp"], unit="ms")
+        df_vol.sort_values(by="ds", ascending=True, inplace=True)
+        df_vol.reset_index(drop=True, inplace=True)
+        return df_vol[["ds", "volume"]]
+
+    # ---------------------------------------------------------------------
+    # 5. FUSIONAR OHLC CON VOLUMEN
+    # ---------------------------------------------------------------------
+    def load_full_data(coin_id, vs_currency="usd", days="max"):
+        """
+        Carga OHLC y volumen, y los fusiona por timestamp.
+        Devuelve un DataFrame con: ds, open_price, high_price, low_price, close_price, volume
+        """
+        df_ohlc = load_ohlc_data(coin_id, vs_currency, days)
+        df_vol = load_volume_data(coin_id, vs_currency, days)
+        if df_ohlc is None or df_vol is None:
+            return None
+        # Hacemos un merge (outer) y luego interpolamos o forward fill
+        merged = pd.merge_asof(
+            df_ohlc.sort_values("ds"),
+            df_vol.sort_values("ds"),
+            on="ds",
+            direction="nearest",
+            tolerance=pd.Timedelta("1h")  # tolerancia de 1 hora para alinear
+        )
+        # Si hay filas sin volumen, forward fill
+        merged.ffill(inplace=True)
+        merged.dropna(subset=["ds", "close_price"], inplace=True)
+        if len(merged) == 0:
+            st.error("No se encontraron datos fusionados (OHLC + volumen).")
+            return None
+        return merged
+
+    # ---------------------------------------------------------------------
+    # 6. CÁLCULO DE INDICADORES TÉCNICOS
+    # ---------------------------------------------------------------------
     def add_indicators(df):
         """
-        Calcula RSI, MACD y Bollinger Bands y los fusiona al DataFrame.
-        Se crean las columnas:
-          - 'rsi'
-          - 'MACD_12_26_9', 'MACDs_12_26_9', 'MACDh_12_26_9'
-          - 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0'
-        Se aplica forward fill para alinear datos.
+        Calcula RSI, MACD y Bollinger Bands con pandas_ta.
+        Se añaden columnas rsi, MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9,
+        BBL_20_2.0, BBM_20_2.0, BBU_20_2.0, etc. Se aplica ffill.
         """
         df["rsi"] = ta.rsi(df["close_price"], length=14)
         macd_df = ta.macd(df["close_price"])
@@ -112,12 +175,10 @@ def main_app():
         df.ffill(inplace=True)
         return df
 
-    # 5. Creación de secuencias para la LSTM
+    # ---------------------------------------------------------------------
+    # 7. CREAR SECUENCIAS
+    # ---------------------------------------------------------------------
     def create_sequences(data, window_size=30):
-        """
-        Genera secuencias de datos de longitud 'window_size'.
-        La primera columna se asume que es el target (close_price).
-        """
         if len(data) <= window_size:
             st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
             return None, None
@@ -127,12 +188,13 @@ def main_app():
             y.append(data[i, 0])
         return np.array(X), np.array(y)
 
-    # 6. Construcción del modelo híbrido (Conv1D + LSTM)
+    # ---------------------------------------------------------------------
+    # 8. CONSTRUIR MODELO HÍBRIDO (Conv1D + LSTM)
+    # ---------------------------------------------------------------------
     def build_hybrid_model(input_shape, learning_rate=0.001):
         """
-        Construye un modelo híbrido que combina una capa Conv1D para extraer
-        características locales y capas Bidirectional LSTM para capturar
-        dependencias a largo plazo.
+        Combina una capa Conv1D para patrones locales y capas Bidirectional LSTM
+        para dependencias a largo plazo.
         """
         model = Sequential()
         model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -143,44 +205,49 @@ def main_app():
         model.add(Bidirectional(LSTM(64, return_sequences=False)))
         model.add(Dropout(0.3))
         model.add(Dense(1))
-        optimizer = Adam(learning_rate=learning_rate)
-        model.compile(optimizer=optimizer, loss="mean_squared_error")
+        opt = Adam(learning_rate=learning_rate)
+        model.compile(optimizer=opt, loss="mean_squared_error")
         return model
 
-    # 7. Entrenamiento y predicción con el modelo híbrido
+    # ---------------------------------------------------------------------
+    # 9. ENTRENAMIENTO Y PREDICCIÓN
+    # ---------------------------------------------------------------------
     def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
                           use_multivariate=False, use_indicators=False,
                           epochs=10, batch_size=32, learning_rate=0.001):
         """
-        Descarga datos desde CoinGecko, calcula indicadores (si se solicita),
-        prepara las secuencias, entrena el modelo híbrido y genera predicciones.
+        Descarga datos OHLC + volumen desde CoinGecko, calcula indicadores (opcional),
+        entrena un modelo híbrido y genera predicciones.
         """
-        # Descarga de precios
-        df_prices = load_data_coingecko(coin_id, vs_currency="usd", days="max")
-        if df_prices is None:
+        df_full = load_full_data(coin_id, vs_currency="usd", days="max")
+        if df_full is None:
             return None
-        # Calcular indicadores si se activó la opción
+        # Calculamos indicadores si se solicita
         if use_indicators:
-            df_prices = add_indicators(df_prices)
-        # Preparación del DataFrame para el modelado
+            df_full = add_indicators(df_full)
+
+        # Selección de columnas
         if use_multivariate or use_indicators:
+            # Empezamos con close_price, open_price, high_price, low_price, volume
             feature_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
+            # Sumamos indicadores si existen
             for col in ["rsi", "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9", "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0"]:
-                if col in df_prices.columns:
+                if col in df_full.columns:
                     feature_cols.append(col)
-            df_model = df_prices[["ds"] + feature_cols].copy()
+            df_model = df_full[["ds"] + feature_cols].copy()
             data_for_model = df_model[feature_cols].values
             scaler_features = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_features.fit_transform(data_for_model)
+            # El target es la primera columna (close_price)
             scaler_target = MinMaxScaler(feature_range=(0, 1))
-            scaler_target.fit(df_model[["close_price"]])
+            scaler_target.fit(df_full[["close_price"]])
         else:
-            df_model = df_prices[["ds", "close_price"]].copy()
+            df_model = df_full[["ds", "close_price"]].copy()
             data_for_model = df_model[["close_price"]].values
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
-        # División en datos de entrenamiento y test
+        # Dividir en train y test
         split_index = int(len(scaled_data) * (1 - test_size))
         train_data = scaled_data[:split_index]
         test_data = scaled_data[split_index:]
@@ -192,23 +259,28 @@ def main_app():
         if X_test is None:
             return None
 
+        # Train/val
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+        # Construir el modelo
         input_shape = (X_train.shape[1], X_train.shape[2])
         model = build_hybrid_model(input_shape, learning_rate=learning_rate)
 
+        # Callbacks
         early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
         lr_reducer = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3)
         model.fit(X_train, y_train, validation_data=(X_val, y_val),
                   epochs=epochs, batch_size=batch_size, verbose=1,
                   callbacks=[early_stop, lr_reducer])
 
+        # Predicción en test
         test_predictions = model.predict(X_test)
         test_predictions_descaled = scaler_target.inverse_transform(test_predictions)
         y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
 
+        # Métricas
         rmse = np.sqrt(np.mean((y_test_deserialized - test_predictions_descaled) ** 2))
         mape = np.mean(np.abs((y_test_deserialized - test_predictions_descaled) / y_test_deserialized)) * 100
 
@@ -226,14 +298,16 @@ def main_app():
 
         return df_model, test_predictions_descaled, y_test_deserialized, future_preds, rmse, mape
 
-    # 8. Visualización del histórico de precios (sin horas)
-    df_prices = load_data_coingecko(coin_id, vs_currency="usd", days="max")
+    # ---------------------------------------------------------------------
+    # 10. VISUALIZACIÓN DEL HISTÓRICO
+    # ---------------------------------------------------------------------
+    df_prices = load_full_data(coin_id, vs_currency="usd", days="max")
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds"] = df_chart["ds"].dt.strftime("%d-%m-%Y")
         fig_hist = px.line(
             df_chart, x="ds", y="close_price",
-            title=f"Histórico de Precio de {crypto_choice}",
+            title=f"Histórico OHLC + Volumen de {crypto_choice}",
             labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45))
@@ -241,7 +315,9 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
-    # 9. Pestañas: Entrenamiento/Test y Predicción
+    # ---------------------------------------------------------------------
+    # 11. PESTAÑAS: ENTRENAMIENTO/TEST Y PREDICCIÓN FUTURA
+    # ---------------------------------------------------------------------
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_choice}"])
 
     with tabs[0]:
@@ -260,17 +336,18 @@ def main_app():
                     learning_rate=learning_rate_val
                 )
             if result is not None:
-                df_model, test_preds, y_test_deserialized, future_preds, rmse, mape = result
+                df_model, test_preds, y_test_real, future_preds, rmse, mape = result
                 st.success("Entrenamiento y predicción completados!")
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
+
                 st.subheader("Comparación en el Set de Test")
-                test_dates = df_model["ds"].iloc[-len(y_test_deserialized):]
+                test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
                 fig_test.add_trace(go.Scatter(
                     x=test_dates,
-                    y=y_test_deserialized.flatten(),
+                    y=y_test_real.flatten(),
                     mode="lines",
                     name="Precio Real (Test)"
                 ))
@@ -292,7 +369,7 @@ def main_app():
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_choice}")
         if 'result' in locals() and result is not None:
-            df_model, test_preds, y_test_deserialized, future_preds, rmse, mape = result
+            df_model, test_preds, y_test_real, future_preds, rmse, mape = result
             last_date = df_model["ds"].iloc[-1]
             current_price = df_model["close_price"].iloc[-1]
             future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
@@ -316,5 +393,6 @@ def main_app():
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
 
+# EJECUCIÓN PRINCIPAL
 if __name__ == "__main__":
     main_app()
