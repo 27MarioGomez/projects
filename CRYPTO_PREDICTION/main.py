@@ -102,55 +102,54 @@ def main_app():
     # 1. FUNCIÓN PARA DESCARGAR, CARGAR Y LIMPIAR DATOS DE ALPHA VANTAGE
     # ---------------------------------------------------------------------
     @st.cache_data
-def load_and_clean_data(symbol):
-    # Obtenemos la API key desde st.secrets
-    api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
+    def load_and_clean_data(symbol):
+        # Obtenemos la API key desde st.secrets
+        api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
 
-    # Construimos la URL para descargar en CSV, incluyendo outputsize=full
-    url = (
-        "https://www.alphavantage.co/query"
-        "?function=DIGITAL_CURRENCY_DAILY"
-        f"&symbol={symbol}"
-        "&market=USD"
-        f"&apikey={api_key}"
-        "&datatype=csv"
-        "&outputsize=full"
-    )
+        # Construimos la URL para descargar en CSV, incluyendo outputsize=full
+        url = (
+            "https://www.alphavantage.co/query"
+            "?function=DIGITAL_CURRENCY_DAILY"
+            f"&symbol={symbol}"
+            "&market=USD"
+            f"&apikey={api_key}"
+            "&datatype=csv"
+            "&outputsize=full"
+        )
 
-    # Descarga del CSV
-    response = requests.get(url)
-    if response.status_code != 200:
-        st.error("Error al obtener datos de Alpha Vantage.")
-        return None
+        # Descarga del CSV
+        response = requests.get(url)
+        if response.status_code != 200:
+            st.error("Error al obtener datos de Alpha Vantage.")
+            return None
 
-    # Convertimos el contenido en un objeto StringIO para leerlo con pandas
-    data_io = StringIO(response.text)
-    df = pd.read_csv(data_io)
+        # Convertimos el contenido en un objeto StringIO para leerlo con pandas
+        data_io = StringIO(response.text)
+        df = pd.read_csv(data_io)
 
-    # Renombrar columnas (según los datos que Alpha Vantage esté devolviendo)
-    df.rename(columns={
-        "timestamp":   "ds",
-        "open":        "open_price",
-        "high":        "high_price",
-        "low":         "low_price",
-        "close":       "close_price",
-        "volume":      "volume",
-        "market cap":  "market_cap"
-    }, inplace=True)
+        # Renombrar columnas (según los datos que Alpha Vantage esté devolviendo)
+        df.rename(columns={
+            "timestamp":   "ds",
+            "open":        "open_price",
+            "high":        "high_price",
+            "low":         "low_price",
+            "close":       "close_price",
+            "volume":      "volume",
+            "market cap":  "market_cap"
+        }, inplace=True)
 
-    # Convertir ds a datetime y ordenar
-    df['ds'] = pd.to_datetime(df['ds'], errors='coerce')
-    df.dropna(subset=['ds'], inplace=True)
-    df.sort_values(by='ds', inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    return df
-
+        # Convertir ds a datetime y ordenar
+        df['ds'] = pd.to_datetime(df['ds'], errors='coerce')
+        df.dropna(subset=['ds'], inplace=True)
+        df.sort_values(by='ds', inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
 
     # ---------------------------------------------------------------------
     # 2. FUNCIÓN PARA CREAR SECUENCIAS (VENTANAS) PARA LA LSTM
     # ---------------------------------------------------------------------
     def create_sequences(data, window_size=60):
-        X, y = [], []
+        X, y = []
         for i in range(window_size, len(data)):
             X.append(data[i-window_size:i])
             y.append(data[i, 0])  # La primera columna es close_price
@@ -367,6 +366,7 @@ def load_and_clean_data(symbol):
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
+
 
 # ---------------------------------------------------------------------
 # EJECUCIÓN
