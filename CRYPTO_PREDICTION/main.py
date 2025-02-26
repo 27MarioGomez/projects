@@ -17,91 +17,69 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 def main_app():
-    # ---------------------------------------------------------------------
-    # CONFIGURACIÓN DE LA PÁGINA Y ESTILO (UX/UI PROFESIONAL)
-    # ---------------------------------------------------------------------
+    # Configuración de la página y estilo
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
     st.markdown("""
         <style>
-        .reportview-container {
-            background: #F5F5F5;
-        }
-        .sidebar .sidebar-content {
-            background-image: linear-gradient(#2E7BCF, #2E7BCF);
-            color: white;
-        }
-        .stButton>button {
-            background-color: #2E7BCF;
-            color: white;
-        }
+        .reportview-container { background: #F5F5F5; }
+        .sidebar .sidebar-content { background-image: linear-gradient(#2E7BCF, #2E7BCF); color: white; }
+        .stButton>button { background-color: #2E7BCF; color: white; }
         </style>
         """, unsafe_allow_html=True)
 
     st.title("Crypto Price Predictions 🔮")
-    st.markdown("Utiliza la barra lateral para elegir la criptomoneda, parámetros del modelo de predicción y otras opciones.")
+    st.markdown("Utiliza la barra lateral para elegir la criptomoneda y el escenario de predicción.")
     st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
 
-    # ---------------------------------------------------------------------
-    # BARRA LATERAL: CONFIGURACIÓN DEL PROYECTO Y PARÁMETROS AVANZADOS
-    # ---------------------------------------------------------------------
+    # Configuración de la barra lateral
     st.sidebar.header("Configuración de la predicción")
 
-    # Diccionario ampliado de símbolos para Alpha Vantage
+    # Diccionario ampliado de criptomonedas
     alpha_symbols = {
-        "Bitcoin (BTC)":  "BTC",
-        "Ethereum (ETH)": "ETH",
-        "XRP":            "XRP",
-        "Stellar (XLM)":  "XLM",
-        "Solana (SOL)":   "SOL",
-        "Cardano (ADA)":  "ADA",
-        "Dogecoin (DOGE)": "DOGE",
-        "Polkadot (DOT)":  "DOT",
-        "Polygon (MATIC)": "MATIC",
-        "Litecoin (LTC)":  "LTC",
-        "TRON (TRX)":      "TRX",
+        "Bitcoin (BTC)":      "BTC",
+        "Ethereum (ETH)":     "ETH",
+        "XRP":                "XRP",
+        "Stellar (XLM)":      "XLM",
+        "Solana (SOL)":       "SOL",
+        "Cardano (ADA)":      "ADA",
+        "Dogecoin (DOGE)":    "DOGE",
+        "Polkadot (DOT)":     "DOT",
+        "Polygon (MATIC)":    "MATIC",
+        "Litecoin (LTC)":     "LTC",
+        "TRON (TRX)":         "TRX",
         "Binance Coin (BNB)": "BNB"
     }
-
     crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(alpha_symbols.keys()))
     symbol = alpha_symbols[crypto_choice]
 
-    st.sidebar.subheader("Parámetros de Predicción")
-    horizon = st.sidebar.slider(
-        "Días a predecir:",
-        min_value=1, max_value=60, value=30,
-        help="Cantidad de días a futuro que deseas predecir."
-    )
-    window_size = st.sidebar.slider(
-        "Tamaño de ventana (días):",
-        min_value=10, max_value=120, value=60,
-        help="Número de días usados como ventana para entrenar la LSTM."
-    )
-    use_multivariate = st.sidebar.checkbox(
-        "Usar datos multivariados (Open, High, Low, Volume)",
-        value=False,
-        help="Incluir variables adicionales (Open, High, Low, Volume) además del precio de cierre."
-    )
+    # Parámetros básicos de predicción
+    st.sidebar.subheader("Parámetros de Predicción Básicos")
+    horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30,
+                                help="Cantidad de días a futuro que deseas predecir.")
+    window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=10, max_value=120, value=60,
+                                    help="Número de días usados como ventana para entrenar la LSTM.")
+    use_multivariate = st.sidebar.checkbox("Usar datos multivariados (Open, High, Low, Volume)",
+                                           value=False,
+                                           help="Incluir variables adicionales además del precio de cierre.")
 
-    st.sidebar.subheader("Ajustes Avanzados del Modelo")
-    epochs = st.sidebar.number_input(
-        "Número de épocas:",
-        min_value=5, max_value=100, value=10, step=1,
-        help="Número de iteraciones completas (epochs) de entrenamiento."
-    )
-    batch_size = st.sidebar.number_input(
-        "Batch size:",
-        min_value=16, max_value=256, value=32, step=16,
-        help="Tamaño de los lotes de entrenamiento en cada iteración."
-    )
-    learning_rate = st.sidebar.number_input(
-        "Learning rate:",
-        min_value=0.0001, max_value=0.01, value=0.001, step=0.0001, format="%.4f",
-        help="Tasa de aprendizaje para el optimizador Adam."
-    )
+    # Escenario del modelo (configuración automática)
+    st.sidebar.subheader("Escenario del Modelo")
+    scenario = st.sidebar.selectbox("Elige un escenario:", ["Pesimista", "Neutro", "Optimista"],
+                                    help="Configura automáticamente los parámetros avanzados.")
+    if scenario == "Pesimista":
+        epochs_val = 20
+        batch_size_val = 32
+        learning_rate_val = 0.001
+    elif scenario == "Neutro":
+        epochs_val = 30
+        batch_size_val = 32
+        learning_rate_val = 0.0008
+    else:  # Optimista
+        epochs_val = 50
+        batch_size_val = 16
+        learning_rate_val = 0.0005
 
-    # ---------------------------------------------------------------------
-    # 1. FUNCIÓN PARA DESCARGAR, CARGAR Y LIMPIAR DATOS DE ALPHA VANTAGE
-    # ---------------------------------------------------------------------
+    # Función para descargar y limpiar datos desde Alpha Vantage
     @st.cache_data
     def load_and_clean_data(symbol):
         api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
@@ -120,6 +98,7 @@ def main_app():
             return None
         data_io = StringIO(response.text)
         df = pd.read_csv(data_io)
+        # Renombramos columnas para homogeneizar el DataFrame
         df.rename(columns={
             "timestamp":   "ds",
             "open":        "open_price",
@@ -129,15 +108,14 @@ def main_app():
             "volume":      "volume",
             "market cap":  "market_cap"
         }, inplace=True)
+        # Parseamos la fecha con dayfirst=True
         df['ds'] = pd.to_datetime(df['ds'], dayfirst=True, errors='coerce')
         df.dropna(subset=['ds'], inplace=True)
         df.sort_values(by='ds', ascending=True, inplace=True)
         df.reset_index(drop=True, inplace=True)
         return df
 
-    # ---------------------------------------------------------------------
-    # 2. FUNCIÓN PARA CREAR SECUENCIAS (VENTANAS) PARA LA LSTM
-    # ---------------------------------------------------------------------
+    # Función para crear secuencias a partir de los datos
     def create_sequences(data, window_size=60):
         if len(data) <= window_size:
             st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
@@ -145,13 +123,11 @@ def main_app():
         X, y = [], []
         for i in range(window_size, len(data)):
             X.append(data[i-window_size:i])
-            y.append(data[i, 0])  # La primera columna es close_price
+            y.append(data[i, 0])  # Se usa el precio de cierre
         X, y = np.array(X), np.array(y)
         return X, y
 
-    # ---------------------------------------------------------------------
-    # 3. FUNCIÓN PARA ENTRENAR EL MODELO LSTM Y REALIZAR PREDICCIONES
-    # ---------------------------------------------------------------------
+    # Función para entrenar el modelo y generar predicciones
     def train_and_predict_lstm(symbol, horizon_days=30, window_size=60, test_size=0.2,
                                use_multivariate=False, epochs=10, batch_size=32, learning_rate=0.001):
         df = load_and_clean_data(symbol)
@@ -188,7 +164,7 @@ def main_app():
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # Modelo mejorado: tres capas Bidirectional LSTM
+        # Modelo con tres capas Bidirectional LSTM
         model = Sequential()
         model.add(Bidirectional(LSTM(64, return_sequences=True), input_shape=(X_train.shape[1], X_train.shape[2])))
         model.add(Dropout(0.3))
@@ -212,7 +188,9 @@ def main_app():
         y_test_descaled = scaler_target.inverse_transform(y_test.reshape(-1, 1))
 
         rmse = np.sqrt(np.mean((y_test_descaled - test_predictions_descaled)**2))
-        mape = np.mean(np.abs((y_test_descaled - test_predictions_descaled) / y_test_descaled)) * 100
+        mape = np.mean(np.abs((y_test_deserialized - test_predictions_descaled) / y_test_deserialized)) * 100 if np.all(y_test_deserialized) else 0
+        # Para evitar problemas de división, también se puede calcular mape con:
+        mape = np.mean(np.abs((y_test_deserialized - test_predictions_deserialized) / y_test_deserialized)) * 100
 
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
@@ -226,10 +204,10 @@ def main_app():
 
         future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-        return df_model, test_predictions_descaled, y_test_descaled, future_preds, rmse, mape
+        return df_model, test_predictions_descaled, y_test_deserialized, future_preds, rmse, mape
 
     # ---------------------------------------------------------------------
-    # MOSTRAR GRÁFICO HISTÓRICO DE PRECIO ENCIMA DE LAS PESTAÑAS
+    # MOSTRAR GRÁFICO HISTÓRICO DE PRECIO (encima de las pestañas)
     # ---------------------------------------------------------------------
     df = load_and_clean_data(symbol)
     if df is not None and len(df) > 0:
@@ -251,7 +229,7 @@ def main_app():
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
     # ---------------------------------------------------------------------
-    # DOS PESTAÑAS: "Entrenamiento y Test" y "Predicción de Precios"
+    # PESTAÑAS: "Entrenamiento y Test" y "Predicción de Precios"
     # ---------------------------------------------------------------------
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_choice}"])
 
@@ -265,20 +243,20 @@ def main_app():
                     window_size=window_size,
                     test_size=0.2,
                     use_multivariate=use_multivariate,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    learning_rate=learning_rate
+                    epochs=epochs_val,
+                    batch_size=batch_size_val,
+                    learning_rate=learning_rate_val
                 )
             if result is not None:
-                df_model, test_preds, y_test_real, future_preds, rmse, mape = result
+                df_model, test_preds, y_test_deserialized, future_preds, rmse, mape = result
                 st.success("Entrenamiento y predicción completados!")
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
                 st.subheader("Comparación en el Set de Test")
-                test_dates = df_model['ds'].iloc[-len(y_test_real):]
+                test_dates = df_model['ds'].iloc[-len(y_test_deserialized):]
                 fig_test = go.Figure()
-                fig_test.add_trace(go.Scatter(x=test_dates, y=y_test_real.flatten(),
+                fig_test.add_trace(go.Scatter(x=test_dates, y=y_test_deserialized.flatten(),
                                               mode='lines', name='Precio Real (Test)'))
                 fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(),
                                               mode='lines', name='Predicción (Test)'))
@@ -294,7 +272,7 @@ def main_app():
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_choice}")
         if 'result' in locals() and result is not None:
-            df_model, test_preds, y_test_real, future_preds, rmse, mape = result
+            df_model, test_preds, y_test_deserialized, future_preds, rmse, mape = result
             last_date = df_model['ds'].iloc[-1]
             future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=horizon)
             fig_future = go.Figure()
@@ -311,6 +289,7 @@ def main_app():
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
+
 
 # ---------------------------------------------------------------------
 # EJECUCIÓN
