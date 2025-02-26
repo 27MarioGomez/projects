@@ -52,15 +52,15 @@ def main_app():
     crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(alpha_symbols.keys()))
     symbol = alpha_symbols[crypto_choice]
 
-    # Parámetros básicos de predicción
+    # Parámetros básicos
     st.sidebar.subheader("Parámetros de Predicción Básicos")
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30,
                                 help="Cantidad de días a futuro que deseas predecir.")
     window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=10, max_value=120, value=60,
-                                    help="Número de días usados como ventana para entrenar la LSTM.")
+                                    help="Cantidad de días usados como ventana para entrenar la LSTM.")
     use_multivariate = st.sidebar.checkbox("Usar datos multivariados (Open, High, Low, Volume)",
                                            value=False,
-                                           help="Incluir variables adicionales además del precio de cierre.")
+                                           help="Incluir datos adicionales además del precio de cierre.")
 
     # Escenario del modelo (configuración automática)
     st.sidebar.subheader("Escenario del Modelo")
@@ -79,7 +79,7 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Función para descargar y limpiar datos desde Alpha Vantage
+    # Función para descargar y limpiar datos de Alpha Vantage
     @st.cache_data
     def load_and_clean_data(symbol):
         api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
@@ -98,7 +98,6 @@ def main_app():
             return None
         data_io = StringIO(response.text)
         df = pd.read_csv(data_io)
-        # Renombramos columnas para homogeneizar el DataFrame
         df.rename(columns={
             "timestamp":   "ds",
             "open":        "open_price",
@@ -108,14 +107,14 @@ def main_app():
             "volume":      "volume",
             "market cap":  "market_cap"
         }, inplace=True)
-        # Parseamos la fecha con dayfirst=True
+        # Parseo de fechas con dayfirst=True y orden ascendente
         df['ds'] = pd.to_datetime(df['ds'], dayfirst=True, errors='coerce')
         df.dropna(subset=['ds'], inplace=True)
         df.sort_values(by='ds', ascending=True, inplace=True)
         df.reset_index(drop=True, inplace=True)
         return df
 
-    # Función para crear secuencias a partir de los datos
+    # Función para crear secuencias para la LSTM
     def create_sequences(data, window_size=60):
         if len(data) <= window_size:
             st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
@@ -123,7 +122,7 @@ def main_app():
         X, y = [], []
         for i in range(window_size, len(data)):
             X.append(data[i-window_size:i])
-            y.append(data[i, 0])  # Se usa el precio de cierre
+            y.append(data[i, 0])
         X, y = np.array(X), np.array(y)
         return X, y
 
@@ -185,12 +184,10 @@ def main_app():
 
         test_predictions = model.predict(X_test)
         test_predictions_descaled = scaler_target.inverse_transform(test_predictions)
-        y_test_descaled = scaler_target.inverse_transform(y_test.reshape(-1, 1))
+        y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
 
-        rmse = np.sqrt(np.mean((y_test_descaled - test_predictions_descaled)**2))
-        mape = np.mean(np.abs((y_test_deserialized - test_predictions_descaled) / y_test_deserialized)) * 100 if np.all(y_test_deserialized) else 0
-        # Para evitar problemas de división, también se puede calcular mape con:
-        mape = np.mean(np.abs((y_test_deserialized - test_predictions_deserialized) / y_test_deserialized)) * 100
+        rmse = np.sqrt(np.mean((y_test_deserialized - test_predictions_descaled)**2))
+        mape = np.mean(np.abs((y_test_deserialized - test_predictions_descaled) / y_test_deserialized)) * 100
 
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
@@ -229,7 +226,7 @@ def main_app():
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
     # ---------------------------------------------------------------------
-    # PESTAÑAS: "Entrenamiento y Test" y "Predicción de Precios"
+    # DOS PESTAÑAS: "Entrenamiento y Test" y "Predicción de Precios"
     # ---------------------------------------------------------------------
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_choice}"])
 
@@ -291,8 +288,6 @@ def main_app():
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
 
 
-# ---------------------------------------------------------------------
 # EJECUCIÓN
-# ---------------------------------------------------------------------
 if __name__ == "__main__":
     main_app()
