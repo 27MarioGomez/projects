@@ -103,10 +103,7 @@ def main_app():
     # ---------------------------------------------------------------------
     @st.cache_data
     def load_and_clean_data(symbol):
-        # Obtenemos la API key desde st.secrets
         api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
-
-        # Construimos la URL para descargar en CSV, incluyendo outputsize=full
         url = (
             "https://www.alphavantage.co/query"
             "?function=DIGITAL_CURRENCY_DAILY"
@@ -116,7 +113,6 @@ def main_app():
             "&datatype=csv"
             "&outputsize=full"
         )
-
         response = requests.get(url)
         if response.status_code != 200:
             st.error("Error al obtener datos de Alpha Vantage.")
@@ -124,8 +120,6 @@ def main_app():
 
         data_io = StringIO(response.text)
         df = pd.read_csv(data_io)
-
-        # Renombrar columnas (según los datos que Alpha Vantage esté devolviendo)
         df.rename(columns={
             "timestamp":   "ds",
             "open":        "open_price",
@@ -135,7 +129,6 @@ def main_app():
             "volume":      "volume",
             "market cap":  "market_cap"
         }, inplace=True)
-
         df['ds'] = pd.to_datetime(df['ds'], errors='coerce')
         df.dropna(subset=['ds'], inplace=True)
         df.sort_values(by='ds', inplace=True)
@@ -146,11 +139,9 @@ def main_app():
     # 2. FUNCIÓN PARA CREAR SECUENCIAS (VENTANAS) PARA LA LSTM
     # ---------------------------------------------------------------------
     def create_sequences(data, window_size=60):
-        # Si la serie es más pequeña que window_size, retornamos None
         if len(data) <= window_size:
             st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
             return None, None
-
         X, y = [], []
         for i in range(window_size, len(data)):
             X.append(data[i-window_size:i])
@@ -168,46 +159,50 @@ def main_app():
             st.error("No se pudieron cargar los datos. Verifica la API Key o la disponibilidad del servicio.")
             return None
 
+        # Selección de columnas y escalado
         if use_multivariate:
             df_model = df[['ds', 'close_price', 'open_price', 'high_price', 'low_price', 'volume']].copy()
             features_cols = ["close_price", "open_price", "high_price", "low_price", "volume"]
             data_for_model = df_model[features_cols].values
             scaler_features = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_features.fit_transform(data_for_model)
-
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaler_target.fit(df_model[["close_price"]])
         else:
             df_model = df[['ds', 'close_price']].copy()
             data_for_model = df_model[['close_price']].values
-
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
-        # Dividir en train y test
+        # Split train/test
         split_index = int(len(scaled_data) * (1 - test_size))
         train_data = scaled_data[:split_index]
         test_data = scaled_data[split_index:]
 
         X_train, y_train = create_sequences(train_data, window_size=window_size)
-        if X_train is None or y_train is None:
+        if X_train is None:
             return None
-
         X_test, y_test = create_sequences(test_data, window_size=window_size)
-        if X_test is None or y_test is None:
+        if X_test is None:
             return None
 
-        # Dividir en train/validación (90%/10%)
+        # Split train/val (90%/10%)
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # Construir modelo Bidirectional LSTM
+        # MEJORA: TRES CAPAS RECURRENTES
         model = Sequential()
+        # Primera capa Bidirectional LSTM
         model.add(Bidirectional(LSTM(64, return_sequences=True), input_shape=(X_train.shape[1], X_train.shape[2])))
         model.add(Dropout(0.3))
+        # Segunda capa Bidirectional LSTM (nueva capa intermedia)
+        model.add(Bidirectional(LSTM(64, return_sequences=True)))
+        model.add(Dropout(0.3))
+        # Tercera capa Bidirectional LSTM (sin return_sequences)
         model.add(Bidirectional(LSTM(64, return_sequences=False)))
         model.add(Dropout(0.3))
+        # Capa de salida
         model.add(Dense(1))
 
         optimizer = Adam(learning_rate=learning_rate)
@@ -251,9 +246,7 @@ def main_app():
     if df is not None and show_raw_data:
         st.subheader("Datos Históricos")
         df_show = df.copy()
-        # Formatear la fecha en DD-MM-YYYY para el usuario
         df_show['ds'] = df_show['ds'].dt.strftime('%d-%m-%Y')
-
         df_show.rename(
             columns={
                 "ds":         "Fecha",
