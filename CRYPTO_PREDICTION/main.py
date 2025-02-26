@@ -13,15 +13,15 @@ from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 import pandas_ta as ta
 
+# Modelos: LSTM (Keras) y RandomForestRegressor de scikit-learn
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from sklearn.ensemble import RandomForestRegressor
 
-# Función robusta para calcular MAPE
+# Función robusta para calcular MAPE sin dividir por cero
 def robust_mape(y_true, y_pred, eps=1e-9):
-    # Evita división por cero usando max(eps, |y_true|)
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
 def main_app():
@@ -29,10 +29,9 @@ def main_app():
     App para predecir precios de criptomonedas usando un ensamble de:
       - Modelo híbrido (Conv1D + LSTM)
       - RandomForestRegressor
-    Se descargan datos de Alpha Vantage (outputsize=full) y se calculan indicadores técnicos (RSI, MACD, BBANDS).
-    Se utiliza un wrapper tf.function para evitar retracing excesivo durante la predicción iterativa.
+    Se descargan datos completos de Alpha Vantage, se calculan indicadores técnicos (RSI, MACD, BBANDS)
+    y se ensambla la predicción. Se implementan comprobaciones para evitar NaN en las métricas.
     """
-
     # -------------------------------------------------------------
     # 1. Configuración de la página y estilo
     # -------------------------------------------------------------
@@ -44,7 +43,8 @@ def main_app():
         .sidebar .sidebar-content { background-image: linear-gradient(#2E7BCF, #2E7BCF); color: white; }
         .stButton>button { background-color: #2E7BCF; color: white; }
         </style>
-        """, unsafe_allow_html=True
+        """,
+        unsafe_allow_html=True
     )
     st.title("Crypto Price Predictions 🔮")
     st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
@@ -94,7 +94,7 @@ def main_app():
 
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox(
-        "Elige un escenario:", 
+        "Elige un escenario:",
         ["Pesimista", "Neutro", "Optimista"],
         help="Ajusta automáticamente los hiperparámetros del modelo."
     )
@@ -112,7 +112,7 @@ def main_app():
         learning_rate_val = 0.0005
 
     # -------------------------------------------------------------
-    # 3. Descarga y limpieza de datos desde Alpha Vantage
+    # 3. Descarga y limpieza de datos desde Alpha Vantage (outputsize=full)
     # -------------------------------------------------------------
     @st.cache_data
     def load_and_clean_data(symbol):
@@ -148,7 +148,7 @@ def main_app():
         df.dropna(subset=["ds"], inplace=True)
         df.sort_values(by="ds", ascending=True, inplace=True)
         df.reset_index(drop=True, inplace=True)
-        # Filtramos filas con close_price <= 0
+        # Filtrar filas con close_price <= 0
         df = df[df["close_price"] > 0].copy()
         return df
 
@@ -164,7 +164,7 @@ def main_app():
         return df
 
     # -------------------------------------------------------------
-    # 5. Creación de secuencias
+    # 5. Creación de secuencias (ventanas)
     # -------------------------------------------------------------
     def create_sequences(data, window_size=30):
         if len(data) <= window_size:
@@ -177,7 +177,7 @@ def main_app():
         return np.array(X), np.array(y)
 
     # -------------------------------------------------------------
-    # 6. Modelo híbrido: Conv1D + LSTM
+    # 6. Construcción del modelo híbrido (Conv1D + LSTM)
     # -------------------------------------------------------------
     def build_hybrid_model(input_shape, learning_rate=0.001):
         model = Sequential()
@@ -194,7 +194,7 @@ def main_app():
         return model
 
     # -------------------------------------------------------------
-    # 7. Ensamblado: Entrenamiento y predicción
+    # 7. Entrenamiento y predicción (ensamblado LSTM + RF)
     # -------------------------------------------------------------
     def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
                           use_multivariate=False, use_indicators=False,
@@ -249,7 +249,7 @@ def main_app():
         # --- Modelo LSTM ---
         input_shape = (X_train.shape[1], X_train.shape[2])
         lstm_model = build_hybrid_model(input_shape, learning_rate=learning_rate)
-        # Para evitar retracing excesivo, definimos un wrapper de predicción
+        # Definimos un wrapper tf.function para la predicción futura
         @tf.function
         def predict_model(x):
             return lstm_model(x)
@@ -272,14 +272,17 @@ def main_app():
         rf_preds_test = rf_model.predict(X_test_flat).reshape(-1, 1)
         ensemble_test = (lstm_preds_test + rf_preds_test) / 2.0
 
+        # Desescalado; aplicamos una máscara para evitar NaN
         ensemble_test_descaled = scaler_target.inverse_transform(ensemble_test)
         y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
+        valid_mask = ~np.isnan(ensemble_test_descaled) & ~np.isnan(y_test_deserialized)
+        if np.sum(valid_mask) == 0:
+            rmse, mape = np.nan, np.nan
+        else:
+            rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - ensemble_test_descaled[valid_mask]) ** 2))
+            mape = robust_mape(y_test_deserialized[valid_mask], ensemble_test_descaled[valid_mask])
 
-        # Cálculo robusto de RMSE y MAPE (con eps para evitar división por cero)
-        rmse = np.sqrt(np.mean((y_test_deserialized - ensemble_test_descaled) ** 2))
-        mape = robust_mape(y_test_deserialized, ensemble_test_descaled)
-
-        # Predicción futura iterativa: solo se usa el ensamble LSTM/RF
+        # Predicción futura iterativa (ensamblado)
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
         current_input = last_window.reshape(1, window_size, X_train.shape[2])
