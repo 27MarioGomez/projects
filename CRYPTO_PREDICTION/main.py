@@ -93,10 +93,6 @@ def main_app():
         min_value=0.0001, max_value=0.01, value=0.001, step=0.0001, format="%.4f",
         help="Tasa de aprendizaje para el optimizador Adam."
     )
-    show_raw_data = st.sidebar.checkbox(
-        "Mostrar datos históricos", value=True,
-        help="Muestra la tabla y el gráfico histórico de la criptomoneda."
-    )
 
     # ---------------------------------------------------------------------
     # 1. FUNCIÓN PARA DESCARGAR, CARGAR Y LIMPIAR DATOS DE ALPHA VANTAGE
@@ -174,7 +170,7 @@ def main_app():
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
-        # Split train/test
+        # Dividir en train/test
         split_index = int(len(scaled_data) * (1 - test_size))
         train_data = scaled_data[:split_index]
         test_data = scaled_data[split_index:]
@@ -186,12 +182,12 @@ def main_app():
         if X_test is None:
             return None
 
-        # Split train/val (90%/10%)
+        # Dividir en train/val (90%/10%)
         val_split = int(len(X_train) * 0.9)
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # MEJORA: TRES CAPAS RECURRENTES
+        # TRES CAPAS RECURRENTES (mejora)
         model = Sequential()
         # Primera capa Bidirectional LSTM
         model.add(Bidirectional(LSTM(64, return_sequences=True), input_shape=(X_train.shape[1], X_train.shape[2])))
@@ -238,36 +234,6 @@ def main_app():
         future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
         return df_model, test_predictions_descaled, y_test_descaled, future_preds, rmse, mape
-
-    # ---------------------------------------------------------------------
-    # MOSTRAR DATOS HISTÓRICOS (SI SE HA SELECCIONADO)
-    # ---------------------------------------------------------------------
-    df = load_and_clean_data(symbol)
-    if df is not None and show_raw_data:
-        st.subheader("Datos Históricos")
-        df_show = df.copy()
-        df_show['ds'] = df_show['ds'].dt.strftime('%d-%m-%Y')
-        df_show.rename(
-            columns={
-                "ds":         "Fecha",
-                "close_price": "Precio Cierre",
-                "open_price":  "Precio Apertura",
-                "high_price":  "Precio Máximo",
-                "low_price":   "Precio Mínimo",
-                "volume":      "Volumen",
-                "market_cap":  "Cap. Mercado"
-            },
-            inplace=True,
-            errors="ignore"
-        )
-        st.dataframe(df_show.head(100))
-
-        fig_hist = px.line(
-            df, x="ds", y="close_price",
-            title=f"Histórico de Precio de {crypto_choice}",
-            labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
-        )
-        st.plotly_chart(fig_hist, use_container_width=True)
 
     # ---------------------------------------------------------------------
     # SOLO DOS PESTAÑAS: "Entrenamiento y Test" y "Predicción de Precios"
