@@ -31,9 +31,9 @@ def main_app():
     st.markdown("Utiliza la barra lateral para elegir la criptomoneda y el escenario de predicción.")
     st.markdown("**Fuente de Datos:** Alpha Vantage (serie diaria, actualizada cada día)")
 
-    # Barra lateral: configuración
+    # Configuración de la barra lateral
     st.sidebar.header("Configuración de la predicción")
-    
+
     # Diccionario ampliado de criptomonedas
     alpha_symbols = {
         "Bitcoin (BTC)":      "BTC",
@@ -56,8 +56,9 @@ def main_app():
     st.sidebar.subheader("Parámetros de Predicción Básicos")
     horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30,
                                 help="Cantidad de días a futuro que deseas predecir.")
-    window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=10, max_value=120, value=60,
-                                    help="Número de días usados como ventana para entrenar la LSTM. (Si se elige un valor muy alto, puede que no haya suficientes datos)")
+    # Ajuste del rango del tamaño de ventana para el histórico disponible
+    window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30,
+                                    help="Número de días usados como ventana para entrenar la LSTM.")
     use_multivariate = st.sidebar.checkbox("Usar datos multivariados (Open, High, Low, Volume)",
                                            value=False,
                                            help="Incluir datos adicionales además del precio de cierre.")
@@ -107,7 +108,6 @@ def main_app():
             "volume":      "volume",
             "market cap":  "market_cap"
         }, inplace=True)
-        # Se parsea la fecha sin dayfirst (ya que viene en formato ISO: %Y-%m-%d)
         df['ds'] = pd.to_datetime(df['ds'], errors='coerce')
         df.dropna(subset=['ds'], inplace=True)
         df.sort_values(by='ds', ascending=True, inplace=True)
@@ -117,7 +117,7 @@ def main_app():
     # Función para crear secuencias para la LSTM
     def create_sequences(data, window_size=60):
         if len(data) <= window_size:
-            st.error(f"No hay suficientes datos para una ventana de {window_size} días. Considera reducir el tamaño de ventana.")
+            st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
             return None, None
         X, y = [], []
         for i in range(window_size, len(data)):
@@ -126,7 +126,7 @@ def main_app():
         X, y = np.array(X), np.array(y)
         return X, y
 
-    # Función para entrenar el modelo y predecir
+    # Función para entrenar el modelo y generar predicciones
     def train_and_predict_lstm(symbol, horizon_days=30, window_size=60, test_size=0.2,
                                use_multivariate=False, epochs=10, batch_size=32, learning_rate=0.001):
         df = load_and_clean_data(symbol)
@@ -223,7 +223,7 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
-    # Pestañas: "Entrenamiento y Test" y "Predicción de Precios"
+    # Dos pestañas: Entrenamiento y Test / Predicción de Precios
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_choice}"])
 
     with tabs[0]:
