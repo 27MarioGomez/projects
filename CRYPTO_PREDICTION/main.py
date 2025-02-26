@@ -35,7 +35,7 @@ def main_app():
 
     # 2. Configuración de la barra lateral
     st.sidebar.header("Configuración de la predicción")
-    # Diccionario de criptomonedas (usamos Alpha Vantage para datos de criptos)
+    # Diccionario de criptomonedas (IDs de Alpha Vantage)
     alpha_symbols = {
         "Bitcoin (BTC)":      "BTC",
         "Ethereum (ETH)":     "ETH",
@@ -50,17 +50,24 @@ def main_app():
         "TRON (TRX)":         "TRX",
         "Binance Coin (BNB)": "BNB"
     }
-    crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(alpha_symbols.keys()))
-    symbol = alpha_symbols[crypto_choice]
+    crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(alpha_symbols.keys()),
+                                           help="Elige la criptomoneda para la cual se hará la predicción.")
+    # Usamos el valor correspondiente (por ejemplo, "BTC")
+    coin_id = alpha_symbols[crypto_choice]
 
     st.sidebar.subheader("Parámetros de Predicción Básicos")
-    horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30)
-    window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30)
-    use_multivariate = st.sidebar.checkbox("Usar datos multivariados (OHLCV)", value=False)
-    use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True)
+    horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30,
+                                  help="Número de días a futuro que se desea predecir.")
+    window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=5, max_value=60, value=30,
+                                    help="Cantidad de días usados como ventana histórica para entrenar el modelo.")
+    use_multivariate = st.sidebar.checkbox("Usar datos multivariados (OHLCV)", value=False,
+                                           help="Incluir datos de apertura, máximo, mínimo y volumen además del precio de cierre.")
+    use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True,
+                                          help="Calcula indicadores técnicos localmente para enriquecer los datos.")
 
     st.sidebar.subheader("Escenario del Modelo")
-    scenario = st.sidebar.selectbox("Elige un escenario:", ["Pesimista", "Neutro", "Optimista"])
+    scenario = st.sidebar.selectbox("Elige un escenario:", ["Pesimista", "Neutro", "Optimista"],
+                                    help="Ajusta automáticamente los hiperparámetros del modelo.")
     if scenario == "Pesimista":
         epochs_val = 20
         batch_size_val = 32
@@ -69,12 +76,12 @@ def main_app():
         epochs_val = 30
         batch_size_val = 32
         learning_rate_val = 0.0008
-    else:
+    else:  # Optimista
         epochs_val = 50
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # 3. Descarga de datos de precios desde Alpha Vantage
+    # 3. Descarga de datos históricos desde Alpha Vantage
     @st.cache_data
     def load_and_clean_data(symbol):
         """
@@ -118,9 +125,9 @@ def main_app():
     # 4. Cálculo de indicadores técnicos con pandas_ta
     def add_indicators(df):
         """
-        Calcula RSI, MACD y Bollinger Bands y los fusiona al DataFrame.
+        Calcula RSI, MACD y Bollinger Bands y los añade al DataFrame.
         Se crean las columnas: 'rsi', 'MACD_12_26_9', 'MACDs_12_26_9', 'MACDh_12_26_9',
-        'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0'. Se aplica forward fill.
+        'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0'. Se aplica ffill para alinear datos.
         """
         df["rsi"] = ta.rsi(df["close_price"], length=14)
         macd_df = ta.macd(df["close_price"])
@@ -132,8 +139,8 @@ def main_app():
     # 5. Creación de secuencias para la LSTM
     def create_sequences(data, window_size=30):
         """
-        Genera secuencias de datos de longitud 'window_size'.
-        La primera columna se asume que es el target (close_price).
+        Genera secuencias de datos de longitud 'window_size'. Se asume que la primera
+        columna es el target (close_price).
         """
         if len(data) <= window_size:
             st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
@@ -148,7 +155,7 @@ def main_app():
     def build_hybrid_model(input_shape, learning_rate=0.001):
         """
         Construye un modelo híbrido que combina una capa Conv1D para extraer
-        características locales y capas Bidirectional LSTM para capturar dependencias a largo plazo.
+        patrones locales y capas Bidirectional LSTM para capturar dependencias a largo plazo.
         """
         model = Sequential()
         model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -164,6 +171,7 @@ def main_app():
         return model
 
     # 7. Entrenamiento y predicción con el modelo híbrido
+    # Se cambia el nombre del parámetro a "symbol" para mantener consistencia
     def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
                           use_multivariate=False, use_indicators=False,
                           epochs=10, batch_size=32, learning_rate=0.001):
@@ -222,11 +230,9 @@ def main_app():
         test_predictions = model.predict(X_test)
         test_predictions_descaled = scaler_target.inverse_transform(test_predictions)
         y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
-
         rmse = np.sqrt(np.mean((y_test_deserialized - test_predictions_descaled) ** 2))
         mape = np.mean(np.abs((y_test_deserialized - test_predictions_descaled) / y_test_deserialized)) * 100
 
-        # Predicción futura iterativa
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
         current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -262,8 +268,9 @@ def main_app():
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir", key="train_test"):
             with st.spinner("Entrenando el modelo, por favor espera..."):
+                # Se pasa el parámetro 'symbol' con el valor de coin_id para mantener la consistencia
                 result = train_and_predict(
-                    coin_id=symbol,  # Se usa el símbolo de Alpha Vantage (por ejemplo, "BTC")
+                    symbol=coin_id,
                     horizon_days=horizon,
                     window_size=window_size,
                     test_size=0.2,
