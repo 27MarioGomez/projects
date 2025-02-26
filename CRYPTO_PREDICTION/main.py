@@ -19,17 +19,17 @@ from tensorflow.keras.optimizers import Adam
 import time
 
 #########################
-# 1. Función robusta y diccionarios
+# 1. Funciones de apoyo y diccionarios
 #########################
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """Calcula el MAPE evitando división por cero."""
+    """Calcula el MAPE evitando divisiones por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario para CoinCap (usamos los mismos nombres que en CoinGecko para conveniencia)
+# Diccionario para CoinCap (solo se incluyen criptos con histórico completo)
 coincap_ids = {
     "Bitcoin (BTC)":      "bitcoin",
     "Ethereum (ETH)":     "ethereum",
-    "XRP":                "ripple",
+    "XRP":                "xrp",       # Usamos "xrp" en lugar de "ripple"
     "Stellar (XLM)":      "stellar",
     "Solana (SOL)":       "solana",
     "Cardano (ADA)":      "cardano",
@@ -38,49 +38,56 @@ coincap_ids = {
     "Polygon (MATIC)":    "polygon",
     "Litecoin (LTC)":     "litecoin",
     "TRON (TRX)":         "tron",
-    "Binance Coin (BNB)": "binance-coin"
+    "Binance Coin (BNB)": "binancecoin"
 }
 
 #########################
-# 2. Función para descargar datos desde CoinCap
+# 2. Función para descargar datos desde CoinCap con reintentos
 #########################
 @st.cache_data
-def load_coincap_data(coin_id, interval="d1"):
+def load_coincap_data(coin_id, vs_currency="usd", days="max", max_retries=3):
     """
-    Descarga el histórico diario de precios desde CoinCap.
+    Descarga el histórico de precios desde CoinCap con reintentos en caso de error 429.
     Devuelve un DataFrame con columnas 'ds' y 'close_price'.
     """
-    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval={interval}"
-    resp = requests.get(url)
-    if resp.status_code != 200:
-        st.error(f"Error al obtener datos de CoinCap (status code {resp.status_code}).")
-        return None
-    data = resp.json()
-    if "data" not in data:
-        st.error("CoinCap: Datos no disponibles (falta 'data').")
-        return None
-    # Cada registro tiene 'time' y 'priceUsd'
-    df = pd.DataFrame(data["data"])
-    if df.empty:
-        st.error("CoinCap: CSV vacío.")
-        return None
-    # Convertir la columna 'time' a datetime y 'priceUsd' a float
-    df["ds"] = pd.to_datetime(df["time"], unit="ms")
-    df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-    df = df[["ds", "close_price"]]
-    df.dropna(subset=["ds", "close_price"], inplace=True)
-    df.sort_values(by="ds", ascending=True, inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    # Filtrar valores no válidos
-    df = df[df["close_price"] > 0].copy()
-    return df
+    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?vs_currency={vs_currency}&days={days}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for attempt in range(max_retries):
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            data = resp.json()
+            if "data" not in data:
+                st.error("CoinCap: Datos no disponibles (falta 'data').")
+                return None
+            df = pd.DataFrame(data["data"])
+            # Se asume que la API devuelve 'time' y 'priceUsd'
+            if "time" not in df.columns or "priceUsd" not in df.columns:
+                st.error("CoinCap: Las columnas 'time' o 'priceUsd' no se encontraron.")
+                st.write(df.head())
+                return None
+            df["ds"] = pd.to_datetime(df["time"], unit="ms")
+            df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
+            df = df[["ds", "close_price"]]
+            df.dropna(subset=["ds", "close_price"], inplace=True)
+            df.sort_values(by="ds", ascending=True, inplace=True)
+            df.reset_index(drop=True, inplace=True)
+            df = df[df["close_price"] > 0].copy()
+            return df
+        elif resp.status_code == 429:
+            st.warning(f"CoinCap: Error 429 en intento {attempt+1}. Reintentando en {15*(attempt+1)} segundos...")
+            time.sleep(15 * (attempt+1))
+        else:
+            st.error(f"Error al obtener datos de CoinCap (status code {resp.status_code}).")
+            return None
+    st.error("CoinCap: Se alcanzó el número máximo de reintentos sin éxito.")
+    return None
 
 #########################
 # 3. Funciones para indicadores técnicos (opcional)
 #########################
 def add_indicators(df):
     """
-    Calcula RSI, MACD y Bollinger Bands con pandas_ta.
+    Calcula RSI, MACD y Bollinger Bands con pandas_ta y aplica forward fill.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -129,7 +136,7 @@ def train_and_predict(coin_id, horizon_days=30, window_size=30, test_size=0.2,
                       use_indicators=False, epochs=10, batch_size=32, learning_rate=0.001):
     """
     Descarga datos desde CoinCap, añade indicadores (opcional),
-    entrena un modelo LSTM y realiza predicciones futuras de forma iterativa.
+    entrena un modelo LSTM y realiza la predicción futura de forma iterativa.
     """
     df_prices = load_coincap_data(coin_id)
     if df_prices is None:
@@ -215,15 +222,20 @@ def main_app():
     st.markdown("**Fuente de Datos:** CoinCap (serie diaria, actualizada cada día)")
 
     st.sidebar.header("Configuración de la predicción")
-    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()))
+    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()),
+                                         help="Elige la criptomoneda para la predicción.")
     coin_id = coincap_ids[crypto_name]
 
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30)
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
+                                 help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
-    use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True)
 
-    scenario = st.sidebar.selectbox("Escenario del Modelo:", ["Pesimista", "Neutro", "Optimista"])
+    use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True,
+                                          help="Calcula indicadores técnicos localmente para enriquecer los datos.")
+
+    scenario = st.sidebar.selectbox("Escenario del Modelo:", ["Pesimista", "Neutro", "Optimista"],
+                                    help="Ajusta automáticamente los hiperparámetros del modelo.")
     if scenario == "Pesimista":
         epochs_val = 20
         batch_size_val = 32
@@ -252,6 +264,7 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
+    # Pestañas
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
@@ -274,6 +287,7 @@ def main_app():
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
+
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
