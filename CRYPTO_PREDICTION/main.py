@@ -13,8 +13,6 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 
-
-
 def main_app():
     # ---------------------------------------------------------------------
     # CONFIGURACIÓN DE LA PÁGINA Y ESTILO (UX/UI PROFESIONAL)
@@ -45,15 +43,15 @@ def main_app():
     # ---------------------------------------------------------------------
     st.sidebar.header("Configuración del Proyecto")
 
-    # Diccionario con rutas de datos
+    # Diccionario con rutas de datos (actualizadas para usar URLs de GitHub)
     crypto_paths = {
-    "Bitcoin":  "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Bitcoin.csv",
-    "Ethereum": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Ethereum.csv",
-    "XRP": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_XRP.csv",
-    "Stellar": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Stellar.csv",
-    "Solana": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Solana.csv",
-    "Cardano": "https://raw.githubusercontent.com/27MarioGomez/projects/refs/heads/main/CRYPTO_PREDICTION/data/coin_Cardano.csv"
-}
+        "Bitcoin":  "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Bitcoin.csv",
+        "Ethereum": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Ethereum.csv",
+        "XRP": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_XRP.csv",
+        "Stellar": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Stellar.csv",
+        "Solana": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Solana.csv",
+        "Cardano": "https://raw.githubusercontent.com/27MarioGomez/projects/main/CRYPTO_PREDICTION/data/coin_Cardano.csv"
+    }
 
     crypto_choice = st.sidebar.selectbox("Selecciona una criptomoneda:", list(crypto_paths.keys()))
     data_path = crypto_paths[crypto_choice]
@@ -69,11 +67,10 @@ def main_app():
     learning_rate = st.sidebar.number_input("Learning rate:", min_value=0.0001, max_value=0.01, value=0.001, step=0.0001, format="%.4f")
     show_raw_data = st.sidebar.checkbox("Mostrar datos históricos", value=True)
 
-
-
     # ---------------------------------------------------------------------
     # 1. FUNCIÓN PARA CARGAR Y LIMPIAR LOS DATOS
     # ---------------------------------------------------------------------
+    @st.cache_data
     def load_and_clean_data(csv_path):
         df = pd.read_csv(csv_path)
         # Renombramos columnas relevantes: "Date" -> "ds", "Close" -> "close_price"
@@ -259,7 +256,6 @@ def main_app():
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
-
 
 # ---------------------------------------------------------------------
 #  EJECUCIÓN CON PYTHON vs STREAMLIT
