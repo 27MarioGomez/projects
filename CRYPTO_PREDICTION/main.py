@@ -211,7 +211,7 @@ def main_app():
         fig_hist = px.line(
             df_chart, x="ds", y="close_price",
             title=f"Histórico de Precio de {crypto_choice}",
-            labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
+            labels={"ds": "Fecha", "close_price": "Precio"}
         )
         fig_hist.update_layout(
             xaxis=dict(
