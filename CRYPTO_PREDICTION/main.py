@@ -23,6 +23,7 @@ def robust_mape(y_true, y_pred, eps=1e-9):
     """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
+# Diccionarios
 alpha_symbols = {
     "Bitcoin (BTC)":      "BTC",
     "Ethereum (ETH)":     "ETH",
@@ -55,7 +56,9 @@ coingecko_ids = {
 
 @st.cache_data
 def load_alpha_data(symbol_alpha):
-    """Descarga y limpia datos desde Alpha Vantage y verifica columnas reales."""
+    """
+    Descarga datos desde Alpha Vantage y detecta automáticamente la columna de fecha y las columnas de precio.
+    """
     api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
     url = (
         "https://www.alphavantage.co/query"
@@ -70,72 +73,76 @@ def load_alpha_data(symbol_alpha):
     if resp.status_code != 200:
         st.error(f"Error Alpha Vantage (status code {resp.status_code}).")
         return None
+
     data_io = StringIO(resp.text)
     df = pd.read_csv(data_io)
     if df.empty:
         st.error("Alpha Vantage: CSV vacío.")
         return None
 
+    # Muestra columnas originales para debug
     st.write("## Columnas devueltas por Alpha Vantage:", df.columns.tolist())
 
-    # Comprobamos si existe la columna "timestamp"
-    if "timestamp" in df.columns:
-        df.rename(columns={"timestamp": "ds"}, inplace=True)
-    else:
-        # No existe "timestamp"; mostramos las primeras filas para debug
-        st.error("La columna 'timestamp' no se encuentra en el CSV de Alpha Vantage.")
+    # Detectar la columna de fecha
+    possible_timestamp_cols = ["timestamp", "time", "Date", "date", "Timestamp"]
+    date_col = None
+    for c in possible_timestamp_cols:
+        if c in df.columns:
+            date_col = c
+            break
+    if not date_col:
+        st.error("No se encontró ninguna columna de fecha en los datos de Alpha Vantage.")
         st.write(df.head())
         return None
 
-    # Renombrar otras columnas si existen
-    if "open" in df.columns:
-        df.rename(columns={"open": "open_price"}, inplace=True)
-    elif "open (USD)" in df.columns:
-        df.rename(columns={"open (USD)": "open_price"}, inplace=True)
+    # Renombramos la columna de fecha a 'ds'
+    df.rename(columns={date_col: "ds"}, inplace=True)
 
-    if "high" in df.columns:
-        df.rename(columns={"high": "high_price"}, inplace=True)
-    elif "high (USD)" in df.columns:
-        df.rename(columns={"high (USD)": "high_price"}, inplace=True)
+    # Detectar columna de 'close' (puede ser 'close', 'close (USD)', etc.)
+    # Haremos algo parecido con 'open', 'high', 'low', 'volume', etc.
+    # Nota: la API 'DIGITAL_CURRENCY_DAILY' suele devolver 'open (USD)', 'close (USD)', etc.
+    for col in df.columns:
+        lower_col = col.lower()
+        if "open" in lower_col:
+            df.rename(columns={col: "open_price"}, inplace=True)
+        elif "high" in lower_col:
+            df.rename(columns={col: "high_price"}, inplace=True)
+        elif "low" in lower_col:
+            df.rename(columns={col: "low_price"}, inplace=True)
+        elif "close" in lower_col and "market" not in lower_col:  # para evitar 'market cap'
+            df.rename(columns={col: "close_price"}, inplace=True)
+        elif "volume" in lower_col:
+            df.rename(columns={col: "volume"}, inplace=True)
+        elif "market" in lower_col and "cap" in lower_col:
+            df.rename(columns={col: "market_cap"}, inplace=True)
 
-    if "low" in df.columns:
-        df.rename(columns={"low": "low_price"}, inplace=True)
-    elif "low (USD)" in df.columns:
-        df.rename(columns={"low (USD)": "low_price"}, inplace=True)
-
-    if "close" in df.columns:
-        df.rename(columns={"close": "close_price"}, inplace=True)
-    elif "close (USD)" in df.columns:
-        df.rename(columns={"close (USD)": "close_price"}, inplace=True)
-
-    if "volume" in df.columns:
-        df.rename(columns={"volume": "volume"}, inplace=True)
-    elif "volume (USD)" in df.columns:
-        df.rename(columns={"volume (USD)": "volume"}, inplace=True)
-
-    if "market cap" in df.columns:
-        df.rename(columns={"market cap": "market_cap"}, inplace=True)
-    elif "market cap (USD)" in df.columns:
-        df.rename(columns={"market cap (USD)": "market_cap"}, inplace=True)
+    if "ds" not in df.columns:
+        st.error("No se logró establecer la columna 'ds' tras el rename.")
+        st.write(df.head())
+        return None
 
     # Convertir ds a datetime
     df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
     df.dropna(subset=["ds"], inplace=True)
     df.sort_values(by="ds", ascending=True, inplace=True)
     df.reset_index(drop=True, inplace=True)
-    # Filtrar filas con precios <= 0
+
+    # Si existe 'close_price', filtramos filas <= 0
     if "close_price" in df.columns:
         df = df[df["close_price"] > 0].copy()
     else:
         st.error("No se encontró la columna 'close_price' tras renombrar.")
         st.write("Columnas finales:", df.columns.tolist())
+        st.write(df.head())
         return None
 
     return df
 
 @st.cache_data
 def load_coingecko_data(coin_id, vs_currency="usd", days="max"):
-    """Descarga datos desde CoinGecko y verifica el contenido."""
+    """
+    Descarga datos desde CoinGecko.
+    """
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}"
     headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(url, headers=headers)
@@ -146,6 +153,7 @@ def load_coingecko_data(coin_id, vs_currency="usd", days="max"):
     if "prices" not in data:
         st.error("CoinGecko: Datos no disponibles (falta 'prices').")
         return None
+
     df = pd.DataFrame(data["prices"], columns=["timestamp", "close_price"])
     df["ds"] = pd.to_datetime(df["timestamp"], unit="ms")
     df = df[["ds", "close_price"]]
@@ -161,6 +169,7 @@ def load_combined_data(symbol_alpha, symbol_cg):
     """
     df_alpha = load_alpha_data(symbol_alpha)
     df_cg = load_coingecko_data(symbol_cg)
+
     if df_alpha is None and df_cg is None:
         st.error("No se pudieron descargar datos de ninguna fuente.")
         return None
@@ -169,16 +178,18 @@ def load_combined_data(symbol_alpha, symbol_cg):
     if df_cg is None:
         return df_alpha
 
-    # Merge
     df_merge = pd.merge(df_alpha, df_cg, on="ds", how="outer", suffixes=("_alpha", "_cg"))
     df_merge.sort_values(by="ds", inplace=True)
-    # Promediar close_price_alpha y close_price_cg
-    if "close_price_alpha" not in df_merge.columns and "close_price_cg" not in df_merge.columns:
+
+    # Si no existen las columnas esperadas, se notifica
+    close_alpha = "close_price_alpha"
+    close_cg = "close_price_cg"
+    if close_alpha not in df_merge.columns and close_cg not in df_merge.columns:
         st.error("No se encontraron columnas 'close_price_alpha' ni 'close_price_cg' tras el merge.")
         st.write(df_merge.head())
         return None
 
-    df_merge["close_price"] = df_merge[["close_price_alpha", "close_price_cg"]].mean(axis=1, skipna=True)
+    df_merge["close_price"] = df_merge[[close_alpha, close_cg]].mean(axis=1, skipna=True)
     df_result = df_merge[["ds", "close_price"]].copy()
     df_result.ffill(inplace=True)
     df_result.dropna(subset=["close_price"], inplace=True)
@@ -302,7 +313,6 @@ def train_and_predict(symbol_alpha, symbol_cg, horizon_days=30, window_size=30, 
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Retornamos df_prices para graficar (con ds y close_price)
     return df_prices, lstm_preds_descaled, y_test_deserialized, future_preds, rmse, mape
 
 def main_app():
@@ -315,17 +325,15 @@ def main_app():
     # Selección de la cripto
     cryptos_list = list(alpha_symbols.keys())
     crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", cryptos_list)
-    symbol_alpha = alpha_symbols[crypto_name]
-    symbol_cg = coingecko_ids[crypto_name]
+    symbol_alpha = alpha_symbols[crypto_name]   # Símbolo para Alpha Vantage
+    symbol_cg = coingecko_ids[crypto_name]      # ID para CoinGecko
 
-    # Parámetros de predicción
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30)
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
 
     use_indicators = st.sidebar.checkbox("Incluir indicadores técnicos (RSI, MACD, BBANDS)", value=True)
 
-    # Escenario del modelo
     scenario = st.sidebar.selectbox("Escenario del Modelo:", ["Pesimista", "Neutro", "Optimista"])
     if scenario == "Pesimista":
         epochs_val = 20
@@ -367,7 +375,7 @@ def main_app():
                     horizon_days=horizon,
                     window_size=auto_window,
                     test_size=0.2,
-                    use_multivariate=False,   # se podría extender
+                    use_multivariate=False,
                     use_indicators=use_indicators,
                     epochs=epochs_val,
                     batch_size=batch_size_val,
