@@ -17,28 +17,17 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 
+#########################
+# 1. Funciones y diccionarios de apoyo
+#########################
+
 def robust_mape(y_true, y_pred, eps=1e-9):
     """
     Evita divisiones por cero usando max(eps, |y_true|).
     """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionarios
-alpha_symbols = {
-    "Bitcoin (BTC)":      "BTC",
-    "Ethereum (ETH)":     "ETH",
-    "XRP":                "XRP",
-    "Stellar (XLM)":      "XLM",
-    "Solana (SOL)":       "SOL",
-    "Cardano (ADA)":      "ADA",
-    "Dogecoin (DOGE)":    "DOGE",
-    "Polkadot (DOT)":     "DOT",
-    "Polygon (MATIC)":    "MATIC",
-    "Litecoin (LTC)":     "LTC",
-    "TRON (TRX)":         "TRX",
-    "Binance Coin (BNB)": "BNB"
-}
-
+# Diccionario para CoinGecko
 coingecko_ids = {
     "Bitcoin (BTC)":      "bitcoin",
     "Ethereum (ETH)":     "ethereum",
@@ -54,100 +43,21 @@ coingecko_ids = {
     "Binance Coin (BNB)": "binancecoin"
 }
 
-@st.cache_data
-def load_alpha_data(symbol_alpha):
-    """
-    Descarga datos desde Alpha Vantage y detecta automáticamente la columna de fecha y las columnas de precio.
-    """
-    api_key = st.secrets["ALPHA_VANTAGE_API_KEY"]
-    url = (
-        "https://www.alphavantage.co/query"
-        "?function=DIGITAL_CURRENCY_DAILY"
-        f"&symbol={symbol_alpha}"
-        "&market=USD"
-        f"&apikey={api_key}"
-        "&datatype=csv"
-        "&outputsize=full"
-    )
-    resp = requests.get(url)
-    if resp.status_code != 200:
-        st.error(f"Error Alpha Vantage (status code {resp.status_code}).")
-        return None
-
-    data_io = StringIO(resp.text)
-    df = pd.read_csv(data_io)
-    if df.empty:
-        st.error("Alpha Vantage: CSV vacío.")
-        return None
-
-    # Muestra columnas originales para debug
-    st.write("## Columnas devueltas por Alpha Vantage:", df.columns.tolist())
-
-    # Detectar la columna de fecha
-    possible_timestamp_cols = ["timestamp", "time", "Date", "date", "Timestamp"]
-    date_col = None
-    for c in possible_timestamp_cols:
-        if c in df.columns:
-            date_col = c
-            break
-    if not date_col:
-        st.error("No se encontró ninguna columna de fecha en los datos de Alpha Vantage.")
-        st.write(df.head())
-        return None
-
-    # Renombramos la columna de fecha a 'ds'
-    df.rename(columns={date_col: "ds"}, inplace=True)
-
-    # Detectar columna de 'close' (puede ser 'close', 'close (USD)', etc.)
-    # Haremos algo parecido con 'open', 'high', 'low', 'volume', etc.
-    # Nota: la API 'DIGITAL_CURRENCY_DAILY' suele devolver 'open (USD)', 'close (USD)', etc.
-    for col in df.columns:
-        lower_col = col.lower()
-        if "open" in lower_col:
-            df.rename(columns={col: "open_price"}, inplace=True)
-        elif "high" in lower_col:
-            df.rename(columns={col: "high_price"}, inplace=True)
-        elif "low" in lower_col:
-            df.rename(columns={col: "low_price"}, inplace=True)
-        elif "close" in lower_col and "market" not in lower_col:  # para evitar 'market cap'
-            df.rename(columns={col: "close_price"}, inplace=True)
-        elif "volume" in lower_col:
-            df.rename(columns={col: "volume"}, inplace=True)
-        elif "market" in lower_col and "cap" in lower_col:
-            df.rename(columns={col: "market_cap"}, inplace=True)
-
-    if "ds" not in df.columns:
-        st.error("No se logró establecer la columna 'ds' tras el rename.")
-        st.write(df.head())
-        return None
-
-    # Convertir ds a datetime
-    df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
-    df.dropna(subset=["ds"], inplace=True)
-    df.sort_values(by="ds", ascending=True, inplace=True)
-    df.reset_index(drop=True, inplace=True)
-
-    # Si existe 'close_price', filtramos filas <= 0
-    if "close_price" in df.columns:
-        df = df[df["close_price"] > 0].copy()
-    else:
-        st.error("No se encontró la columna 'close_price' tras renombrar.")
-        st.write("Columnas finales:", df.columns.tolist())
-        st.write(df.head())
-        return None
-
-    return df
-
+#########################
+# 2. Función para descargar datos desde CoinGecko
+#########################
 @st.cache_data
 def load_coingecko_data(coin_id, vs_currency="usd", days="max"):
     """
-    Descarga datos desde CoinGecko.
+    Descarga el histórico de precios desde CoinGecko.
+    Devuelve un DataFrame con columnas 'ds' y 'close_price'.
+    'days="max"' descarga todo el histórico disponible.
     """
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}"
     headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(url, headers=headers)
     if resp.status_code != 200:
-        st.error(f"Error CoinGecko (status code {resp.status_code}).")
+        st.error(f"Error al obtener datos de CoinGecko (status code {resp.status_code}).")
         return None
     data = resp.json()
     if "prices" not in data:
@@ -159,42 +69,13 @@ def load_coingecko_data(coin_id, vs_currency="usd", days="max"):
     df = df[["ds", "close_price"]]
     df.sort_values(by="ds", ascending=True, inplace=True)
     df.reset_index(drop=True, inplace=True)
+    # Filtramos valores no válidos
     df = df[df["close_price"] > 0].copy()
     return df
 
-def load_combined_data(symbol_alpha, symbol_cg):
-    """
-    Combina datos de Alpha Vantage y CoinGecko (outer join por 'ds').
-    Promedia los precios si ambos están disponibles, rellena huecos con ffill.
-    """
-    df_alpha = load_alpha_data(symbol_alpha)
-    df_cg = load_coingecko_data(symbol_cg)
-
-    if df_alpha is None and df_cg is None:
-        st.error("No se pudieron descargar datos de ninguna fuente.")
-        return None
-    if df_alpha is None:
-        return df_cg
-    if df_cg is None:
-        return df_alpha
-
-    df_merge = pd.merge(df_alpha, df_cg, on="ds", how="outer", suffixes=("_alpha", "_cg"))
-    df_merge.sort_values(by="ds", inplace=True)
-
-    # Si no existen las columnas esperadas, se notifica
-    close_alpha = "close_price_alpha"
-    close_cg = "close_price_cg"
-    if close_alpha not in df_merge.columns and close_cg not in df_merge.columns:
-        st.error("No se encontraron columnas 'close_price_alpha' ni 'close_price_cg' tras el merge.")
-        st.write(df_merge.head())
-        return None
-
-    df_merge["close_price"] = df_merge[[close_alpha, close_cg]].mean(axis=1, skipna=True)
-    df_result = df_merge[["ds", "close_price"]].copy()
-    df_result.ffill(inplace=True)
-    df_result.dropna(subset=["close_price"], inplace=True)
-    return df_result
-
+#########################
+# 3. Funciones para indicadores técnicos (opcional)
+#########################
 def add_indicators(df):
     """
     Calcula RSI, MACD y Bollinger Bands con pandas_ta.
@@ -203,12 +84,15 @@ def add_indicators(df):
     macd_df = ta.macd(df["close_price"])
     bbands_df = ta.bbands(df["close_price"], length=20, std=2)
     df = pd.concat([df, macd_df, bbands_df], axis=1)
-    df.ffill(inplace=True)
+    df.ffill(inplace=True)  # Rellenamos huecos con forward fill
     return df
 
 def add_all_indicators(df):
     return add_indicators(df)
 
+#########################
+# 4. Creación de secuencias (ventanas) para la LSTM
+#########################
 def create_sequences(data, window_size=30):
     if len(data) <= window_size:
         st.error(f"No hay suficientes datos para una ventana de {window_size} días.")
@@ -219,6 +103,9 @@ def create_sequences(data, window_size=30):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
+#########################
+# 5. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
+#########################
 def build_lstm_model(input_shape, learning_rate=0.001):
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -233,14 +120,16 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
-def train_and_predict(symbol_alpha, symbol_cg, horizon_days=30, window_size=30, test_size=0.2,
-                      use_multivariate=False, use_indicators=False,
-                      epochs=10, batch_size=32, learning_rate=0.001):
+#########################
+# 6. Entrenamiento y predicción con LSTM
+#########################
+def train_and_predict_coingecko(coin_id, horizon_days=30, window_size=30, test_size=0.2,
+                                use_indicators=False, epochs=10, batch_size=32, learning_rate=0.001):
     """
-    Descarga datos combinados (Alpha + CoinGecko), enriquece con indicadores (opcional),
+    Descarga datos desde CoinGecko, enriquece con indicadores (opcional),
     entrena un modelo LSTM y realiza la predicción futura de forma iterativa.
     """
-    df_prices = load_combined_data(symbol_alpha, symbol_cg)
+    df_prices = load_coingecko_data(coin_id)
     if df_prices is None:
         return None
 
@@ -248,14 +137,16 @@ def train_and_predict(symbol_alpha, symbol_cg, horizon_days=30, window_size=30, 
         df_prices = add_all_indicators(df_prices)
 
     if "close_price" not in df_prices.columns:
-        st.error("No se encontró 'close_price' en el DataFrame final.")
+        st.error("No se encontró 'close_price' en los datos finales.")
         st.write(df_prices.head())
         return None
 
+    # Convertimos la serie de precios en un array
     data_for_model = df_prices[["close_price"]].values
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_target.fit_transform(data_for_model)
 
+    # Dividimos en train y test
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
         st.error("No hay suficientes datos para el conjunto de entrenamiento.")
@@ -270,10 +161,12 @@ def train_and_predict(symbol_alpha, symbol_cg, horizon_days=30, window_size=30, 
     if X_test is None:
         return None
 
+    # Train/val
     val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+    # Construimos y entrenamos el modelo LSTM
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
@@ -284,6 +177,7 @@ def train_and_predict(symbol_alpha, symbol_cg, horizon_days=30, window_size=30, 
         verbose=1
     )
 
+    # Predicción en test
     lstm_preds_test = lstm_model.predict(X_test)
     y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
     lstm_preds_descaled = scaler_target.inverse_transform(lstm_preds_test)
@@ -313,21 +207,24 @@ def train_and_predict(symbol_alpha, symbol_cg, horizon_days=30, window_size=30, 
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
+    # Retornamos df_prices para graficar
     return df_prices, lstm_preds_descaled, y_test_deserialized, future_preds, rmse, mape
 
+#########################
+# 7. main_app
+#########################
 def main_app():
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
-    st.title("Crypto Price Predictions 🔮")
-    st.markdown("**Fuentes de Datos:** Alpha Vantage y CoinGecko")
+    st.title("Crypto Price Predictions 🔮 - Solo CoinGecko")
+    st.markdown("**Fuente de Datos:** CoinGecko (serie diaria, actualizada cada día)")
 
     st.sidebar.header("Configuración de la predicción")
 
     # Selección de la cripto
-    cryptos_list = list(alpha_symbols.keys())
-    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", cryptos_list)
-    symbol_alpha = alpha_symbols[crypto_name]   # Símbolo para Alpha Vantage
-    symbol_cg = coingecko_ids[crypto_name]      # ID para CoinGecko
+    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coingecko_ids.keys()))
+    coin_id = coingecko_ids[crypto_name]
 
+    # Parámetros de predicción
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30)
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
@@ -348,14 +245,14 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Mostramos gráfico histórico
-    df_prices = load_combined_data(symbol_alpha, symbol_cg)
+    # Descargamos y mostramos el histórico
+    df_prices = load_coingecko_data(coin_id)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds"] = df_chart["ds"].dt.strftime("%d-%m-%Y")
         fig_hist = px.line(
             df_chart, x="ds", y="close_price",
-            title=f"Histórico de Precio de {crypto_name}",
+            title=f"Histórico de Precio de {crypto_name} (CoinGecko)",
             labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45))
@@ -363,19 +260,18 @@ def main_app():
     else:
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
+    # Pestañas
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
             with st.spinner("Entrenando el modelo, por favor espera..."):
-                result = train_and_predict(
-                    symbol_alpha=symbol_alpha,
-                    symbol_cg=symbol_cg,
+                result = train_and_predict_coingecko(
+                    coin_id=coin_id,
                     horizon_days=horizon,
                     window_size=auto_window,
                     test_size=0.2,
-                    use_multivariate=False,
                     use_indicators=use_indicators,
                     epochs=epochs_val,
                     batch_size=batch_size_val,
@@ -440,6 +336,7 @@ def main_app():
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
+
 
 if __name__ == "__main__":
     main_app()
