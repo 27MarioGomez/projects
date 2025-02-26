@@ -34,14 +34,13 @@ def main_app():
         </style>
         """, unsafe_allow_html=True)
 
-    st.title("Dashboard de Predicción de Precios de Criptomonedas")
-    st.markdown("### Interfaz limpia, profesional y funcional para análisis y predicción usando LSTM")
-    st.markdown("Utiliza la barra lateral para configurar la criptomoneda, parámetros del modelo y otras opciones.")
+    st.title("Crypto Price Predictions 🔮")
+    st.markdown("Utiliza la barra lateral para elegir la criptomoneda, parámetros del modelo de predicción y otras opciones.")
 
     # ---------------------------------------------------------------------
     # BARRA LATERAL: CONFIGURACIÓN DEL PROYECTO Y PARÁMETROS AVANZADOS
     # ---------------------------------------------------------------------
-    st.sidebar.header("Configuración del Proyecto")
+    st.sidebar.header("Configuración de la predicción")
 
     # Diccionario con rutas de datos (con refs/heads/main)
     crypto_paths = {
@@ -57,15 +56,42 @@ def main_app():
     data_path = crypto_paths[crypto_choice]
 
     st.sidebar.subheader("Parámetros de Predicción")
-    horizon = st.sidebar.slider("Días a predecir:", min_value=1, max_value=60, value=30)
-    window_size = st.sidebar.slider("Tamaño de ventana (días):", min_value=10, max_value=120, value=60)
-    use_multivariate = st.sidebar.checkbox("Usar datos multivariados (Open, High, Low, Volume)", value=False)
+    horizon = st.sidebar.slider(
+        "Días a predecir:",
+        min_value=1, max_value=60, value=30,
+        help="Cantidad de días a futuro que deseas predecir."
+    )
+    window_size = st.sidebar.slider(
+        "Tamaño de ventana (días):",
+        min_value=10, max_value=120, value=60,
+        help="Número de días usados como ventana para entrenar la LSTM."
+    )
+    use_multivariate = st.sidebar.checkbox(
+        "Usar datos multivariados (Open, High, Low, Volume)",
+        value=False,
+        help="Incluir variables adicionales (Open, High, Low, Volume) además del precio de cierre."
+    )
 
     st.sidebar.subheader("Ajustes Avanzados del Modelo")
-    epochs = st.sidebar.number_input("Número de épocas:", min_value=5, max_value=100, value=10, step=1)
-    batch_size = st.sidebar.number_input("Batch size:", min_value=16, max_value=256, value=32, step=16)
-    learning_rate = st.sidebar.number_input("Learning rate:", min_value=0.0001, max_value=0.01, value=0.001, step=0.0001, format="%.4f")
-    show_raw_data = st.sidebar.checkbox("Mostrar datos históricos", value=True)
+    epochs = st.sidebar.number_input(
+        "Número de épocas:",
+        min_value=5, max_value=100, value=10, step=1,
+        help="Número de iteraciones completas (epochs) de entrenamiento."
+    )
+    batch_size = st.sidebar.number_input(
+        "Batch size:",
+        min_value=16, max_value=256, value=32, step=16,
+        help="Tamaño de los lotes de entrenamiento en cada iteración."
+    )
+    learning_rate = st.sidebar.number_input(
+        "Learning rate:",
+        min_value=0.0001, max_value=0.01, value=0.001, step=0.0001, format="%.4f",
+        help="Tasa de aprendizaje para el optimizador Adam."
+    )
+    show_raw_data = st.sidebar.checkbox(
+        "Mostrar datos históricos", value=True,
+        help="Muestra la tabla y el gráfico histórico de la criptomoneda."
+    )
 
     # ---------------------------------------------------------------------
     # 1. FUNCIÓN PARA CARGAR Y LIMPIAR LOS DATOS
@@ -175,10 +201,24 @@ def main_app():
     df = load_and_clean_data(data_path)
     if show_raw_data:
         st.subheader("Datos Históricos")
-        # Convertir la columna 'ds' a string para evitar problemas de serialización en st.dataframe()
+        # Copia para mostrar con nombres amigables
         df_show = df.copy()
         df_show['ds'] = df_show['ds'].astype(str)
+        df_show.rename(
+            columns={
+                "ds": "Fecha",
+                "close_price": "Precio Cierre",
+                "Open": "Precio Apertura",
+                "High": "Precio Máximo",
+                "Low": "Precio Mínimo",
+                "Volume": "Volumen",
+                "SNo": "ID"
+            },
+            inplace=True,
+            errors="ignore"
+        )
         st.dataframe(df_show.head(100))
+
         fig_hist = px.line(
             df, x="ds", y="close_price",
             title=f"Histórico de Precio de {crypto_choice}",
@@ -194,14 +234,36 @@ def main_app():
     with tabs[0]:
         st.header("Overview de Datos")
         st.markdown("Visualización general de los datos históricos y estadísticas descriptivas.")
+
+        # Gráfico con las columnas originales (ds, close_price),
+        # pero con etiquetas más amigables en "labels"
         fig_overview = px.line(
             df, x="ds", y="close_price",
             title=f"Histórico de {crypto_choice}",
             labels={"ds": "Fecha", "close_price": "Precio de Cierre"}
         )
         st.plotly_chart(fig_overview, use_container_width=True)
+
         st.markdown("**Estadísticas Descriptivas:**")
-        st.write(df.describe())
+        # Descriptivas solo de las columnas relevantes
+        desc_df = df.copy()
+        # Renombramos para que se vea amigable
+        desc_df.rename(
+            columns={
+                "close_price": "Precio Cierre",
+                "Open": "Precio Apertura",
+                "High": "Precio Máximo",
+                "Low": "Precio Mínimo",
+                "Volume": "Volumen"
+            },
+            inplace=True,
+            errors="ignore"
+        )
+        # Mostramos describe de las columnas numéricas
+        numeric_cols = ["Precio Cierre", "Precio Apertura", "Precio Máximo", "Precio Mínimo", "Volumen"]
+        # Filtramos solo si existen en el df
+        numeric_cols = [col for col in numeric_cols if col in desc_df.columns]
+        st.dataframe(desc_df[numeric_cols].describe())
 
     with tabs[1]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
@@ -227,8 +289,10 @@ def main_app():
             st.subheader("Comparación en el Set de Test")
             test_dates = df_model['ds'].iloc[-len(y_test_real):]
             fig_test = go.Figure()
-            fig_test.add_trace(go.Scatter(x=test_dates, y=y_test_real.flatten(), mode='lines', name='Precio Real (Test)'))
-            fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(), mode='lines', name='Predicción (Test)'))
+            fig_test.add_trace(go.Scatter(x=test_dates, y=y_test_real.flatten(),
+                                          mode='lines', name='Precio Real (Test)'))
+            fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(),
+                                          mode='lines', name='Predicción (Test)'))
             fig_test.update_layout(
                 title=f"Comparación en Test: {crypto_choice}",
                 xaxis_title="Fecha",
@@ -243,7 +307,8 @@ def main_app():
             last_date = df_model['ds'].iloc[-1]
             future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=horizon)
             fig_future = go.Figure()
-            fig_future.add_trace(go.Scatter(x=future_dates, y=future_preds, mode='lines+markers', name='Predicción Futura'))
+            fig_future.add_trace(go.Scatter(x=future_dates, y=future_preds,
+                                            mode='lines+markers', name='Predicción Futura'))
             fig_future.update_layout(
                 title=f"Predicción a Futuro ({horizon} días) - {crypto_choice}",
                 xaxis_title="Fecha",
@@ -262,4 +327,3 @@ def main_app():
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     main_app()
-
