@@ -1,6 +1,6 @@
 streamlit
 pandas
-numpy
+numpy<1.24
 plotly
 scikit-learn
 tensorflow==2.18.0
