@@ -272,7 +272,7 @@ def main_app():
             fig_future.add_trace(go.Scatter(x=future_dates, y=future_preds,
                                             mode='lines+markers', name='Predicción Futura'))
             fig_future.update_layout(
-                title=f"Predicción a Futuro ({horizon} días) - {crypto_choice}",
+                title=f"Predicción a {horizon} días - {crypto_choice}",
                 xaxis_title="Fecha",
                 yaxis_title="Precio"
             )
