@@ -13,14 +13,12 @@ from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 import pandas_ta as ta
 
-# Modelos: LSTM (Keras) y RandomForestRegressor de scikit-learn
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
+from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout, Input, MultiHeadAttention, GlobalAveragePooling1D
 from tensorflow.keras.optimizers import Adam
-from sklearn.ensemble import RandomForestRegressor
 
-# Función robusta para calcular MAPE sin dividir por cero
+# Función robusta para calcular MAPE sin división por cero
 def robust_mape(y_true, y_pred, eps=1e-9):
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
@@ -28,10 +26,12 @@ def main_app():
     """
     App para predecir precios de criptomonedas usando un ensamble de:
       - Modelo híbrido (Conv1D + LSTM)
-      - RandomForestRegressor
-    Se descargan datos completos de Alpha Vantage, se calculan indicadores técnicos (RSI, MACD, BBANDS)
-    y se ensambla la predicción. Se implementan comprobaciones para evitar NaN en las métricas.
+      - Modelo basado en atención (una versión simplificada de TFT)
+    Se descargan datos completos de Alpha Vantage, se calculan indicadores técnicos 
+    (RSI, MACD, BBANDS) y se ensambla la predicción promediando la salida de ambos modelos.
+    Se implementan comprobaciones para evitar NaN en las métricas.
     """
+
     # -------------------------------------------------------------
     # 1. Configuración de la página y estilo
     # -------------------------------------------------------------
@@ -112,7 +112,7 @@ def main_app():
         learning_rate_val = 0.0005
 
     # -------------------------------------------------------------
-    # 3. Descarga y limpieza de datos desde Alpha Vantage (outputsize=full)
+    # 3. Descarga y limpieza de datos desde Alpha Vantage
     # -------------------------------------------------------------
     @st.cache_data
     def load_and_clean_data(symbol):
@@ -148,12 +148,11 @@ def main_app():
         df.dropna(subset=["ds"], inplace=True)
         df.sort_values(by="ds", ascending=True, inplace=True)
         df.reset_index(drop=True, inplace=True)
-        # Filtrar filas con close_price <= 0
         df = df[df["close_price"] > 0].copy()
         return df
 
     # -------------------------------------------------------------
-    # 4. Añadir indicadores técnicos
+    # 4. Añadir indicadores técnicos con pandas_ta
     # -------------------------------------------------------------
     def add_indicators(df):
         df["rsi"] = ta.rsi(df["close_price"], length=14)
@@ -177,9 +176,9 @@ def main_app():
         return np.array(X), np.array(y)
 
     # -------------------------------------------------------------
-    # 6. Construcción del modelo híbrido (Conv1D + LSTM)
+    # 6. Modelo híbrido LSTM (Conv1D + LSTM)
     # -------------------------------------------------------------
-    def build_hybrid_model(input_shape, learning_rate=0.001):
+    def build_lstm_model(input_shape, learning_rate=0.001):
         model = Sequential()
         model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
         model.add(Bidirectional(LSTM(64, return_sequences=True)))
@@ -194,7 +193,24 @@ def main_app():
         return model
 
     # -------------------------------------------------------------
-    # 7. Entrenamiento y predicción (ensamblado LSTM + RF)
+    # 7. Modelo basado en atención (TFT-like simplificado)
+    # -------------------------------------------------------------
+    def build_tft_model(input_shape, learning_rate=0.001):
+        """
+        Construye un modelo simplificado inspirado en el Temporal Fusion Transformer.
+        Utiliza una capa de atención multi-cabeza seguida de pooling global y capas densas.
+        """
+        model = Sequential()
+        model.add(Input(shape=input_shape))
+        model.add(MultiHeadAttention(num_heads=2, key_dim=input_shape[-1]))
+        model.add(GlobalAveragePooling1D())
+        model.add(Dense(64, activation="relu"))
+        model.add(Dense(1))
+        model.compile(optimizer=Adam(learning_rate=learning_rate), loss="mean_squared_error")
+        return model
+
+    # -------------------------------------------------------------
+    # 8. Ensamblado: Entrenamiento y predicción
     # -------------------------------------------------------------
     def train_and_predict(symbol, horizon_days=30, window_size=30, test_size=0.2,
                           use_multivariate=False, use_indicators=False,
@@ -226,7 +242,7 @@ def main_app():
             scaler_target = MinMaxScaler(feature_range=(0, 1))
             scaled_data = scaler_target.fit_transform(data_for_model)
 
-        # Verificar que el conjunto de entrenamiento es suficiente
+        # Verificar que hay suficientes datos
         split_index = int(len(scaled_data) * (1 - test_size))
         if split_index <= window_size:
             st.error("No hay suficientes datos para el conjunto de entrenamiento.")
@@ -246,13 +262,9 @@ def main_app():
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # --- Modelo LSTM ---
         input_shape = (X_train.shape[1], X_train.shape[2])
-        lstm_model = build_hybrid_model(input_shape, learning_rate=learning_rate)
-        # Definimos un wrapper tf.function para la predicción futura
-        @tf.function
-        def predict_model(x):
-            return lstm_model(x)
+        # Entrenamos el modelo LSTM
+        lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
         lstm_model.fit(
             X_train, y_train,
             validation_data=(X_val, y_val),
@@ -261,36 +273,42 @@ def main_app():
             verbose=1
         )
 
-        # --- Modelo RandomForest ---
-        X_train_flat = X_train.reshape(X_train.shape[0], -1)
-        X_test_flat = X_test.reshape(X_test.shape[0], -1)
-        rf_model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42, n_jobs=-1)
-        rf_model.fit(X_train_flat, y_train)
+        # Entrenamos el modelo TFT (simplificado)
+        tft_model = build_tft_model(input_shape, learning_rate=learning_rate)
+        tft_model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            verbose=1
+        )
 
-        # Predicción en test: LSTM y RF
+        # Predicción en test con ambos modelos
         lstm_preds_test = lstm_model.predict(X_test)
-        rf_preds_test = rf_model.predict(X_test_flat).reshape(-1, 1)
-        ensemble_test = (lstm_preds_test + rf_preds_test) / 2.0
+        tft_preds_test = tft_model.predict(X_test)
+        ensemble_test = (lstm_preds_test + tft_preds_test) / 2.0
 
-        # Desescalado; aplicamos una máscara para evitar NaN
         ensemble_test_descaled = scaler_target.inverse_transform(ensemble_test)
         y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
-        valid_mask = ~np.isnan(ensemble_test_descaled) & ~np.isnan(y_test_deserialized)
-        if np.sum(valid_mask) == 0:
-            rmse, mape = np.nan, np.nan
-        else:
-            rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - ensemble_test_descaled[valid_mask]) ** 2))
-            mape = robust_mape(y_test_deserialized[valid_mask], ensemble_test_descaled[valid_mask])
 
-        # Predicción futura iterativa (ensamblado)
+        rmse = np.sqrt(np.mean((y_test_deserialized - ensemble_test_descaled) ** 2))
+        mape = robust_mape(y_test_deserialized, ensemble_test_descaled)
+
+        # Predicción futura iterativa (ensamblado LSTM + TFT)
         last_window = scaled_data[-window_size:]
         future_preds_scaled = []
         current_input = last_window.reshape(1, window_size, X_train.shape[2])
+        # Definimos wrappers para evitar retracing excesivo
+        @tf.function
+        def predict_lstm(x):
+            return lstm_model(x)
+        @tf.function
+        def predict_tft(x):
+            return tft_model(x)
         for _ in range(horizon_days):
-            lstm_future_pred = predict_model(current_input)[0][0]
-            rf_input = current_input.reshape(1, -1)
-            rf_future_pred = rf_model.predict(rf_input)[0]
-            ensemble_future = (lstm_future_pred + rf_future_pred) / 2.0
+            lstm_future_pred = predict_lstm(current_input)[0][0]
+            tft_future_pred = predict_tft(current_input)[0][0]
+            ensemble_future = (lstm_future_pred + tft_future_pred) / 2.0
             future_preds_scaled.append(ensemble_future)
             new_feature = np.zeros((1, 1, X_train.shape[2]))
             new_feature[0, 0, 0] = ensemble_future
@@ -300,7 +318,7 @@ def main_app():
         return df_model, ensemble_test_descaled, y_test_deserialized, future_preds, rmse, mape
 
     # -------------------------------------------------------------
-    # 8. Visualización del histórico (formato DD-MM-YYYY)
+    # 9. Visualización del histórico (formato DD-MM-YYYY)
     # -------------------------------------------------------------
     df_prices = load_and_clean_data(symbol)
     if df_prices is not None and len(df_prices) > 0:
@@ -317,7 +335,7 @@ def main_app():
         st.warning("No se encontraron datos históricos válidos para mostrar el gráfico.")
 
     # -------------------------------------------------------------
-    # 9. Pestañas: Entrenamiento/Test y Predicción Futura
+    # 10. Pestañas: Entrenamiento/Test y Predicción Futura
     # -------------------------------------------------------------
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
