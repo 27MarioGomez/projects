@@ -24,7 +24,7 @@ import time
 def robust_mape(y_true, y_pred, eps=1e-9):
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario para CoinCap
+# Diccionario con IDs de criptomonedas para CoinCap
 coincap_ids = {
     "Bitcoin (BTC)":       "bitcoin",
     "Ethereum (ETH)":      "ethereum",
@@ -148,14 +148,11 @@ def train_and_predict(
         df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     else:
         df_prices = load_coincap_data(coin_id, start_ms=None, end_ms=None)
-
     if df_prices is None or len(df_prices) == 0:
-        st.warning("No se pudo descargar datos suficientes para entrenar. Reajusta el rango de fechas.")
+        st.warning("No se pudo descargar datos suficientes. Reajusta el rango de fechas.")
         return None
-
     if use_indicators:
         df_prices = add_all_indicators(df_prices)
-
     if "close_price" not in df_prices.columns:
         st.warning("No se encontró la columna 'close_price'.")
         return None
@@ -222,7 +219,7 @@ def train_and_predict(
     return df_prices, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ###############################################################
-# Lógica principal de la app
+# Función principal de la app
 ###############################################################
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
@@ -231,7 +228,6 @@ def main_app():
 
     st.sidebar.header("Configuración de la predicción")
 
-    # Selección de criptomoneda
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
@@ -239,7 +235,6 @@ def main_app():
     )
     coin_id = coincap_ids[crypto_name]
 
-    # Opción para habilitar rango de fechas personalizado
     st.sidebar.subheader("Rango de Fechas (Diario)")
     use_custom_range = st.sidebar.checkbox(
         "Habilitar rango de fechas",
@@ -257,7 +252,6 @@ def main_app():
         start_ms = None
         end_ms = None
 
-    # Parámetros de predicción
     st.sidebar.subheader("Parámetros de Predicción")
     horizon = st.sidebar.slider(
         "Días a predecir:",
@@ -274,16 +268,14 @@ def main_app():
     show_stats = st.sidebar.checkbox(
         "Ver estadísticas descriptivas",
         value=False,
-        help="Muestra un resumen estadístico del histórico de precios."
+        help="Muestra un resumen estadístico del precio."
     )
 
-    # Escenario del modelo con breve descripción
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox(
         "Elige un escenario:",
         ["Pesimista", "Neutro", "Optimista"],
-        help=("Pesimista: Predicciones conservadoras, ajustadas a riesgos altos. "
-              "Neutro: Balance entre riesgo y retorno. "
+        help=("Pesimista: Predicciones conservadoras. Neutro: Balance entre riesgo y retorno. "
               "Optimista: Predicciones agresivas con mayor potencial de retorno.")
     )
     if scenario == "Pesimista":
@@ -299,7 +291,6 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Descarga y visualización del gráfico histórico
     df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
@@ -312,16 +303,22 @@ def main_app():
         fig_hist.update_yaxes(tickformat=",.2f")
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45, nticks=10))
         st.plotly_chart(fig_hist, use_container_width=True)
-
         if show_stats:
             st.subheader("Estadísticas Descriptivas")
-            df_stats = df_prices.copy()
-            df_stats.rename(columns={"ds": "Fecha", "close_price": "Precio en USD"}, inplace=True)
-            st.write(df_stats.describe())
+            # Mostramos estadísticas únicamente de la columna de precios
+            st.write(df_prices["close_price"].describe().rename({
+                "count": "Cuenta",
+                "mean": "Media",
+                "std": "Desviación",
+                "min": "Mínimo",
+                "25%": "25%",
+                "50%": "Mediana",
+                "75%": "75%",
+                "max": "Máximo"
+            }))
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
-    # Pestañas para Entrenamiento/Test y Predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
@@ -347,7 +344,6 @@ def main_app():
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
-
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
