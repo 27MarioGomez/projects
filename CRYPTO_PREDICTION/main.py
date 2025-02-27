@@ -17,10 +17,8 @@ from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
 
+# Cálculo robusto del MAPE evitando divisiones por cero
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """
-    Cálculo de MAPE evitando divisiones por cero.
-    """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
 # Diccionario con IDs de criptomonedas para CoinCap
@@ -42,8 +40,9 @@ coincap_ids = {
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap con intervalo diario (d1).
-    start_ms y end_ms definen el rango de fechas en milisegundos, si se usan.
+    Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
+    se descarga el rango correspondiente; de lo contrario, se descarga todo el histórico.
+    Devuelve un DataFrame con las columnas 'ds' y 'close_price'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -86,7 +85,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
 
 def add_indicators(df):
     """
-    Añade RSI, MACD y Bollinger Bands a partir de la columna 'close_price'.
+    Añade indicadores técnicos (RSI, MACD, Bollinger Bands) a partir de 'close_price'.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -113,7 +112,7 @@ def create_sequences(data, window_size=30):
 
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Modelo con Conv1D + LSTM bidireccional en varias capas.
+    Construye un modelo secuencial que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -142,20 +141,19 @@ def train_and_predict(
     learning_rate=0.001
 ):
     """
-    Descarga, entrena y predice usando LSTM. 
+    Descarga datos de CoinCap, entrena un modelo LSTM y realiza predicciones (en test y a futuro).
     """
+    # Descarga datos usando rango o histórico completo
     if use_custom_range:
         df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     else:
         df_prices = load_coincap_data(coin_id, start_ms=None, end_ms=None)
-
     if df_prices is None or len(df_prices) == 0:
-        st.warning("No se pudo descargar datos. Reajusta parámetros.")
+        st.warning("No se pudo descargar datos suficientes. Reajusta el rango de fechas.")
         return None
 
     if use_indicators:
         df_prices = add_all_indicators(df_prices)
-
     if "close_price" not in df_prices.columns:
         st.warning("No se encontró 'close_price'.")
         return None
@@ -181,6 +179,9 @@ def train_and_predict(
     val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
+
+    # Limpiar la sesión para evitar errores internos de TF
+    tf.keras.backend.clear_session()
 
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
@@ -236,7 +237,6 @@ def main_app():
     )
     coin_id = coincap_ids[crypto_name]
 
-    # Rango de Fechas
     st.sidebar.subheader("Rango de Fechas")
     use_custom_range = st.sidebar.checkbox(
         "Habilitar rango de fechas",
@@ -254,7 +254,6 @@ def main_app():
         start_ms = None
         end_ms = None
 
-    # Parámetros de Predicción
     st.sidebar.subheader("Parámetros de Predicción")
     horizon = st.sidebar.slider(
         "Días a predecir:",
@@ -263,7 +262,6 @@ def main_app():
     )
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
-
     use_indicators = st.sidebar.checkbox(
         "Incluir indicadores técnicos (RSI, MACD, BBANDS)",
         value=True,
@@ -275,12 +273,11 @@ def main_app():
         help="Muestra un resumen estadístico del precio."
     )
 
-    # Escenario del modelo
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox(
         "Elige un escenario:",
         ["Pesimista", "Neutro", "Optimista"],
-        index=0,  # Por defecto "Pesimista"
+        index=0,
         help=("Pesimista: Predicciones conservadoras. Neutro: Balance. "
               "Optimista: Predicciones agresivas con mayor potencial.")
     )
@@ -297,11 +294,9 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Descarga y visualización del gráfico histórico
     df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
-        # Fechas en formato DD/MM/YYYY
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
         fig_hist = px.line(
             df_chart, x="ds_str", y="close_price",
@@ -311,10 +306,8 @@ def main_app():
         fig_hist.update_yaxes(tickformat=",.2f")
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45, nticks=10))
         st.plotly_chart(fig_hist, use_container_width=True)
-
         if show_stats:
             st.subheader("Estadísticas Descriptivas")
-            # Solo estadísticas de la columna de precios
             st.write(df_prices["close_price"].describe().rename({
                 "count": "Cuenta",
                 "mean": "Media",
@@ -328,7 +321,6 @@ def main_app():
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
-    # Pestañas: Entrenamiento/Test y Predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
@@ -354,7 +346,6 @@ def main_app():
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
-
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
@@ -379,7 +370,6 @@ def main_app():
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
                 st.info("No se pudo entrenar el modelo con los parámetros seleccionados.")
-
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_name}")
         if 'result' in locals() and result is not None:
