@@ -10,7 +10,6 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
-import pandas_ta as ta
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
@@ -49,7 +48,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
     Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
     se descarga el rango correspondiente; de lo contrario, se descarga todo el histórico.
-    Retorna un DataFrame con las columnas 'ds', 'close_price' y 'volume'.
+    Retorna un DataFrame con 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -71,6 +70,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                 return None
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
+            # Si la API trae volumen, se usa; de lo contrario, se asigna 0
             if "volumeUsd" in df.columns:
                 df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce").fillna(0)
             else:
@@ -145,7 +145,7 @@ def train_and_predict(
 ):
     """
     Descarga datos de CoinCap, entrena un modelo LSTM y realiza predicciones en test y a futuro.
-    Se utiliza solo la variable 'close_price' como feature.
+    Se utiliza únicamente 'close_price' como feature.
     """
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
@@ -153,9 +153,8 @@ def train_and_predict(
         return None
     df = temp_df.copy()
 
-    # Se usa solo 'close_price' como feature
+    # Usar solo el precio de cierre como feature
     features = ["close_price"]
-
     if "close_price" not in features:
         st.warning("No se encontró 'close_price' para el entrenamiento.")
         return None
@@ -163,7 +162,7 @@ def train_and_predict(
     df_model = df[["ds"] + features].copy()
     data_for_model = df_model[features].values
 
-    # Escalado de datos
+    # Escalado
     scaler_features = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_features.fit_transform(data_for_model)
     scaler_target = MinMaxScaler(feature_range=(0, 1))
@@ -226,7 +225,7 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Análisis de sentimiento en Twitter (X)
+# Módulo de análisis de sentimiento en X
 ##############################################
 def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     """
@@ -286,16 +285,9 @@ def main_app():
         end_ms = None
 
     st.sidebar.subheader("Parámetros de Predicción")
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
-                                help="Número de días a futuro a predecir.")
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
-
-    use_multivariable = st.sidebar.checkbox(
-        "Usar multivariable (volumen)",
-        value=False,
-        help="Incluye volumen para el modelo (además del precio de cierre)."
-    )
 
     show_stats = st.sidebar.checkbox(
         "Ver estadísticas descriptivas",
