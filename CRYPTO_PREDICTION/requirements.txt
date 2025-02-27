@@ -7,6 +7,6 @@ tensorflow==2.15.0
 absl-py==1.4.0
 requests
 git+https://github.com/twopirllc/pandas-ta@development
-snscrape
+tweepy>=4.10.0
 vaderSentiment
 certifi
