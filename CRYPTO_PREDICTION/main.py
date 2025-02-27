@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
+import pandas_ta as ta
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
@@ -70,7 +71,6 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                 return None
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-            # Si la API trae volumen, se usa; si no, se asigna 0
             if "volumeUsd" in df.columns:
                 df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce").fillna(0)
             else:
@@ -113,7 +113,7 @@ def create_sequences(data, window_size=30):
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Construye un modelo secuencial que combina Conv1D y tres capas Bidirectional LSTM con Dropout.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -141,12 +141,11 @@ def train_and_predict(
     test_size=0.2,
     epochs=10,
     batch_size=32,
-    learning_rate=0.001,
-    use_multivariable=False
+    learning_rate=0.001
 ):
     """
     Descarga datos de CoinCap, entrena un modelo LSTM y realiza predicciones en test y a futuro.
-    Si 'use_multivariable' es True, se incluyen el volumen y se consideran como features (sin indicadores adicionales).
+    Se utiliza solo la variable 'close_price' como feature.
     """
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
@@ -154,13 +153,8 @@ def train_and_predict(
         return None
     df = temp_df.copy()
 
-    # Definir features: si se usa multivariable, se incluye volumen si varía; en caso contrario, solo se usa 'close_price'
-    if use_multivariable:
-        features = ["close_price"]
-        if "volume" in df.columns and df["volume"].var() > 0:
-            features.append("volume")
-    else:
-        features = ["close_price"]
+    # Se usa solo 'close_price' como feature
+    features = ["close_price"]
 
     if "close_price" not in features:
         st.warning("No se encontró 'close_price' para el entrenamiento.")
@@ -169,7 +163,7 @@ def train_and_predict(
     df_model = df[["ds"] + features].copy()
     data_for_model = df_model[features].values
 
-    # Escalado
+    # Escalado de datos
     scaler_features = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_features.fit_transform(data_for_model)
     scaler_target = MinMaxScaler(feature_range=(0, 1))
@@ -232,11 +226,11 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Análisis de sentimiento en X
+# Análisis de sentimiento en Twitter (X)
 ##############################################
 def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     """
-    Extrae hasta max_tweets tweets relacionados con la criptomoneda (por su primera palabra)
+    Extrae hasta max_tweets tweets relacionados con la criptomoneda (usando la primera palabra)
     y calcula el sentimiento promedio utilizando VaderSentiment.
     """
     import snscrape.modules.twitter as sntwitter
@@ -292,7 +286,8 @@ def main_app():
         end_ms = None
 
     st.sidebar.subheader("Parámetros de Predicción")
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
+                                help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
 
@@ -372,11 +367,9 @@ def main_app():
                     horizon_days=horizon,
                     window_size=auto_window,
                     test_size=0.2,
-                    use_indicators=False,
                     epochs=epochs_val,
                     batch_size=batch_size_val,
-                    learning_rate=learning_rate_val,
-                    use_multivariable=use_multivariable
+                    learning_rate=learning_rate_val
                 )
             if result is not None:
                 df_model, test_preds, y_test_real, future_preds, rmse, mape = result
