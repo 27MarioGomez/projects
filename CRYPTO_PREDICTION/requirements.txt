@@ -9,3 +9,4 @@ requests
 git+https://github.com/twopirllc/pandas-ta@development
 snscrape
 vaderSentiment
+certifi
