@@ -22,10 +22,10 @@ import time
 ##############################################
 
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """Calcula el MAPE evitando división por cero."""
+    """Calcula el MAPE evitando divisiones por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario combinado con IDs para ambas fuentes
+# Diccionario con IDs de criptomonedas para CoinCap y CoinGecko
 crypto_ids = {
     "Bitcoin (BTC)": {
         "coincap": "bitcoin",
@@ -78,12 +78,14 @@ crypto_ids = {
 }
 
 ##############################################
-# Descarga desde CoinCap
+# Descarga de datos desde CoinCap
 ##############################################
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap (intervalo diario) y retorna un DataFrame con 'ds', 'close_price' y 'volume'.
+    Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
+    se descarga el rango correspondiente; de lo contrario, se descarga todo el histórico.
+    Retorna un DataFrame con 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -127,16 +129,19 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     return None
 
 ##############################################
-# Descarga desde CoinGecko (para volumen y market cap)
+# Descarga de datos desde CoinGecko
 ##############################################
 @st.cache_data
 def load_coingecko_data(coin_id, days="max"):
     """
-    Descarga datos desde CoinGecko usando el endpoint market_chart.
+    Descarga el histórico de precios desde CoinGecko usando el endpoint market_chart.
     Retorna un DataFrame con 'ds', 'close_price', 'volume' y 'market_cap'.
     """
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days={days}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+    }
     resp = requests.get(url, headers=headers)
     if resp.status_code != 200:
         st.error(f"Error al obtener datos de CoinGecko (status code {resp.status_code}).")
@@ -167,23 +172,20 @@ def load_coingecko_data(coin_id, days="max"):
 def load_combined_data(coin_id_cap, coin_id_cg, start_ms=None, end_ms=None):
     """
     Descarga datos de CoinCap y CoinGecko y los combina por fecha ('ds').
-    Para cada campo numérico, se toma el promedio de ambas fuentes (si ambas están disponibles).
+    Para cada campo numérico se promedia el valor si ambos están disponibles.
     """
     df_cap = load_coincap_data(coin_id_cap, start_ms, end_ms)
     df_cg = load_coingecko_data(coin_id_cg, days="max")
-    if df_cap is None and df_cg is None:
+    if (df_cap is None or df_cap.empty) and (df_cg is None or df_cg.empty):
         st.error("No se pudieron descargar datos de ninguna fuente.")
         return None
-    # Si una de las fuentes está vacía, usar la otra
     if df_cap is None or df_cap.empty:
         return df_cg
     if df_cg is None or df_cg.empty:
         return df_cap
-    # Merge outer por 'ds'
     df_comb = pd.merge(df_cap, df_cg, on="ds", how="outer", suffixes=("_cap", "_cg"))
     df_comb.sort_values(by="ds", inplace=True)
     df_comb.reset_index(drop=True, inplace=True)
-    # Para cada campo, tomar el promedio si ambos existen; de lo contrario, el que no sea NaN
     def avg_field(row, field):
         val1 = row.get(f"{field}_cap")
         val2 = row.get(f"{field}_cg")
@@ -195,16 +197,15 @@ def load_combined_data(coin_id_cap, coin_id_cg, start_ms=None, end_ms=None):
             return val2
     for field in ["close_price", "volume", "market_cap"]:
         df_comb[field] = df_comb.apply(lambda row: avg_field(row, field), axis=1)
-    # Seleccionar columnas finales
     df_final = df_comb[["ds", "close_price", "volume", "market_cap"]].copy()
     return df_final
 
 ##############################################
-# Indicadores técnicos (sobre la serie combinada)
+# Indicadores técnicos
 ##############################################
 def add_indicators(df):
     """
-    Calcula RSI, MACD y Bollinger Bands a partir de 'close_price'.
+    Calcula indicadores técnicos (RSI, MACD, Bollinger Bands) a partir de 'close_price'.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -272,7 +273,7 @@ def train_and_predict(
 ):
     """
     Descarga datos de CoinCap y CoinGecko, los combina y añade indicadores si se desea.
-    Luego entrena un modelo LSTM (univariado o multivariable) y realiza predicciones.
+    Luego entrena un modelo LSTM (univariado o multivariable) y realiza predicciones en test y a futuro.
     """
     df_combined = load_combined_data(coin_id, coin_id_cg, start_ms, end_ms)
     if df_combined is None or df_combined.empty:
@@ -283,12 +284,11 @@ def train_and_predict(
     if use_indicators:
         df = add_all_indicators(df)
 
-    # Seleccionar features
+    # Selección de features
     if use_multivariable:
         features = ["close_price"]
         if "volume" in df.columns and not df["volume"].isna().all() and df["volume"].var() > 0:
             features.append("volume")
-        # Agregar indicadores si existen
         for col in ["rsi", "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9",
                     "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0"]:
             if col in df.columns:
@@ -304,7 +304,6 @@ def train_and_predict(
     df_model = df[["ds"] + features].copy()
     data_for_model = df_model[features].values
 
-    # Escalado de features y target
     scaler_features = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_features.fit_transform(data_for_model)
     scaler_target = MinMaxScaler(feature_range=(0, 1))
@@ -367,16 +366,15 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Módulo de Sentimiento en X (Twitter)
+# Módulo de análisis de sentimiento en X (Twitter)
 ##############################################
 def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     """
     Extrae hasta max_tweets tweets relacionados con la criptomoneda (usando la primera palabra)
-    y calcula el sentimiento promedio utilizando VaderSentiment.
+    y calcula el sentimiento promedio usando VaderSentiment.
     """
     import snscrape.modules.twitter as sntwitter
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
     keyword = crypto_name.split(" ")[0]
     tweets = []
     for i, tweet in enumerate(sntwitter.TwitterSearchScraper(keyword).get_items()):
@@ -431,13 +429,11 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
-
     use_multivariable = st.sidebar.checkbox(
         "Usar multivariable (volumen + indicadores)",
         value=False,
         help="Incluye volumen e indicadores (RSI, MACD, BBANDS) para el modelo."
     )
-
     show_stats = st.sidebar.checkbox(
         "Ver estadísticas descriptivas",
         value=False,
@@ -465,7 +461,7 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Cargar datos combinados
+    # Cargar datos combinados de ambas fuentes
     df_prices = load_combined_data(coin_id_cap, coin_id_cg, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
@@ -544,7 +540,6 @@ def main_app():
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
                 st.info("No se pudo entrenar el modelo con los parámetros seleccionados.")
-
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_name}")
         if 'result' in locals() and result is not None:
@@ -572,7 +567,6 @@ def main_app():
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
-
     with tabs[2]:
         st.header("Sentimiento en X")
         st.markdown("Analizando tweets recientes sobre la criptomoneda seleccionada...")
