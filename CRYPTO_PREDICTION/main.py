@@ -184,18 +184,19 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Limpiar la sesión y deshabilitar eager execution para evitar errores de TensorArray
+    # Limpiar la sesión y entrenar dentro de un contexto explícito
     tf.keras.backend.clear_session()
-    tf.config.run_functions_eagerly(False)  # Desactivar eager execution
     input_shape = (X_train.shape[1], X_train.shape[2])
-    lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
-    lstm_model.fit(
-        X_train, y_train,
-        validation_data=(X_val, y_val),
-        epochs=epochs,
-        batch_size=batch_size,
-        verbose=1
-    )
+    
+    with tf.name_scope("LSTM_Training"):
+        lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
+        lstm_model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            verbose=1
+        )
 
     test_preds_scaled = lstm_model.predict(X_test)
     test_preds = scaler_target.inverse_transform(test_preds_scaled)
@@ -235,9 +236,6 @@ def analyze_twitter_sentiment(crypto_name, max_tweets=50):
         import snscrape.modules.twitter as sntwitter
         from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
         sntwitter.TWITTER_BASE_URL = "https://x.com"
-        # Desactivar verificación SSL como workaround (no recomendado en producción)
-        import ssl
-        ssl._create_default_https_context = ssl._create_unverified_context
     except Exception as e:
         st.error(f"Error importando snscrape o vaderSentiment: {e}")
         return None, []
