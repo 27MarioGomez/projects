@@ -10,7 +10,6 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
-import pandas_ta as ta
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
@@ -48,7 +47,7 @@ coincap_ids = {
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap en intervalo diario (d1). Si se definen start_ms y end_ms,
+    Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
     se descarga el rango indicado; de lo contrario, se descarga todo el histórico.
     Retorna un DataFrame con las columnas 'ds', 'close_price' y 'volume'.
     """
@@ -110,11 +109,11 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 ##############################################
-# Construcción del modelo LSTM
+# Modelo LSTM: Conv1D + Bidirectional LSTM
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Construye un modelo secuencial que combina Conv1D y tres capas Bidirectional LSTM con Dropout.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -147,16 +146,19 @@ def train_and_predict(
 ):
     """
     Descarga datos de CoinCap, entrena un modelo LSTM usando 'close_price'
-    y realiza predicciones en el conjunto de test y a futuro.
-    Ajusta las predicciones en función del sentimiento extraído de X.
+    y realiza predicciones en test y a futuro.
+    Ajusta la predicción en función del sentimiento extraído de X.
     """
+    # Limpiar la sesión al inicio para evitar problemas de name scopes
+    tf.keras.backend.clear_session()
+    
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
         st.warning("No se pudieron descargar datos suficientes. Reajusta el rango de fechas.")
         return None
     df = temp_df.copy()
 
-    # Usamos únicamente 'close_price'
+    # Se usa únicamente 'close_price'
     features = ["close_price"]
     if "close_price" not in features:
         st.warning("No se encontró 'close_price' para el entrenamiento.")
@@ -188,9 +190,6 @@ def train_and_predict(
     val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
-
-    # Para evitar el error "pop from empty list", forzamos la ejecución en modo eager
-    tf.config.run_functions_eagerly(True)
 
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
@@ -228,7 +227,7 @@ def train_and_predict(
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Análisis de sentimiento: se extraen tweets para la criptomoneda y para "crypto"
+    # Análisis de sentimiento: se obtienen tweets para la criptomoneda y para "crypto"
     coin_sentiment, _ = analyze_twitter_sentiment(crypto_name, max_tweets=50)
     industry_sentiment, _ = analyze_twitter_sentiment("crypto", max_tweets=50)
     if coin_sentiment is not None and industry_sentiment is not None:
@@ -247,7 +246,8 @@ def analyze_twitter_sentiment(keyword, max_tweets=50):
     el sentimiento promedio utilizando VaderSentiment. Se configura snscrape para usar "x.com".
     Solo se consideran tweets con al menos 5 likes.
     """
-    sntwitter.TWITTER_BASE_URL = "https://x.com"  # Forzar el uso de x.com
+    # Forzar el uso de x.com
+    sntwitter.TWITTER_BASE_URL = "https://x.com"
     tweets = []
     threshold = 5
     search_url = f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query"
@@ -304,8 +304,7 @@ def main_app():
         end_ms = None
 
     st.sidebar.subheader("Parámetros de Predicción")
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
-                                help="Número de días a futuro a predecir.")
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
 
