@@ -157,7 +157,7 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     """
     Entrena el modelo LSTM mejorado de forma aislada para evitar conflictos con el contexto global.
     """
-    # No manipulamos name_scope_stack manualmente, confiamos en TensorFlow predeterminado
+    # Usar un enfoque minimalista: construir y entrenar el modelo directamente sin manipular el contexto
     model = build_improved_lstm_model(input_shape, learning_rate=learning_rate)
     model.fit(
         X_train, y_train,
