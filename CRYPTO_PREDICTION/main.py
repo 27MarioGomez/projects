@@ -22,9 +22,7 @@ import time
 ##############################################
 
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """
-    Calcula el MAPE evitando divisiones por cero.
-    """
+    """Calcula el MAPE evitando divisiones por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
 # Diccionario con IDs de criptomonedas para CoinCap
@@ -51,7 +49,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
     Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
     se descarga el rango correspondiente; de lo contrario, se descarga todo el histórico.
-    Retorna un DataFrame con las columnas 'ds', 'close_price' y 'volume'.
+    Retorna un DataFrame con 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -73,6 +71,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                 return None
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
+            # Extraer volumen si está disponible; de lo contrario, fijarlo a 0
             if "volumeUsd" in df.columns:
                 df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce").fillna(0)
             else:
@@ -99,7 +98,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
 ##############################################
 def add_indicators(df):
     """
-    Calcula RSI, MACD y Bollinger Bands a partir de 'close_price'.
+    Calcula indicadores técnicos (RSI, MACD, Bollinger Bands) a partir de 'close_price'.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -132,7 +131,7 @@ def create_sequences(data, window_size=30):
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Construye un modelo secuencial que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -177,10 +176,11 @@ def train_and_predict(
     if use_indicators:
         df = add_all_indicators(df)
 
-    # Definir las features
+    # Definir las features a usar
     if use_multivariable:
         features = ["close_price"]
-        if "volume" in df.columns and df["volume"].var() > 0:
+        # Incluir volumen solo si no es todo NaN y tiene variación
+        if "volume" in df.columns and (not df["volume"].isna().all()) and (df["volume"].var() > 0):
             features.append("volume")
         for col in ["rsi", "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9",
                     "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0"]:
@@ -197,7 +197,7 @@ def train_and_predict(
     df_model = df[["ds"] + features].copy()
     data_for_model = df_model[features].values
 
-    # Escalado
+    # Escalado de features y target
     scaler_features = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_features.fit_transform(data_for_model)
     scaler_target = MinMaxScaler(feature_range=(0, 1))
@@ -243,11 +243,10 @@ def train_and_predict(
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
+    # Predicción futura iterativa
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
-
-    # Predicción futura iterativa (sin tf.function para evitar errores de retracing)
     for _ in range(horizon_days):
         future_pred = lstm_model.predict(current_input)[0][0]
         future_preds_scaled.append(future_pred)
@@ -262,12 +261,12 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Módulo de análisis de sentimiento en Twitter
+# Análisis de Sentimiento en X (Twitter)
 ##############################################
 def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     """
     Extrae hasta max_tweets tweets relacionados con la criptomoneda (usando la primera palabra)
-    y calcula el sentimiento promedio usando VaderSentiment.
+    y calcula el sentimiento promedio utilizando VaderSentiment.
     """
     import snscrape.modules.twitter as sntwitter
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -323,8 +322,7 @@ def main_app():
         end_ms = None
 
     st.sidebar.subheader("Parámetros de Predicción")
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
-                                help="Número de días a futuro a predecir.")
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
 
@@ -389,8 +387,7 @@ def main_app():
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
-    # Pestañas: Entrenamiento/Test, Predicción y Sentimiento en Twitter
-    tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}", "💬 Sentimiento en Twitter"])
+    tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}", "💬 Sentimiento en X"])
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
@@ -470,12 +467,13 @@ def main_app():
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
 
     with tabs[2]:
-        st.header("Sentimiento en Twitter")
+        st.header("Sentimiento en X")
         st.markdown("Analizando tweets recientes sobre la criptomoneda seleccionada...")
         try:
             import snscrape.modules.twitter as sntwitter
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+            # Usamos "X" (antes Twitter) para obtener tweets
             keyword = crypto_name.split(" ")[0]
             tweets = []
             max_tweets = 50
