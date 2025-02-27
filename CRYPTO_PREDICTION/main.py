@@ -17,14 +17,12 @@ from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
 
-###############################################################
-# Funciones de apoyo y diccionarios
-###############################################################
-
 def robust_mape(y_true, y_pred, eps=1e-9):
+    """
+    Cálculo de MAPE evitando divisiones por cero.
+    """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario con IDs de criptomonedas para CoinCap
 coincap_ids = {
     "Bitcoin (BTC)":       "bitcoin",
     "Ethereum (ETH)":      "ethereum",
@@ -40,11 +38,11 @@ coincap_ids = {
     "Stellar (XLM)":       "stellar"
 }
 
-###############################################################
-# Función para descargar datos desde CoinCap (diario)
-###############################################################
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
+    """
+    Descarga datos de CoinCap en intervalo diario (d1).
+    """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
         url += f"&start={start_ms}&end={end_ms}"
@@ -54,7 +52,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
         if resp.status_code == 200:
             data = resp.json()
             if "data" not in data:
-                st.warning("CoinCap: Datos no disponibles (falta 'data').")
+                st.warning("CoinCap: 'data' faltante.")
                 return None
             df = pd.DataFrame(data["data"])
             if df.empty:
@@ -76,18 +74,18 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
             st.warning(f"CoinCap: Error 429 en intento {attempt+1}. Esperando {15*(attempt+1)}s...")
             time.sleep(15*(attempt+1))
         elif resp.status_code == 400:
-            st.info("CoinCap: (400) Parámetros inválidos o rango excesivo. Reajusta el rango de fechas.")
+            st.info("CoinCap: (400) Parámetros inválidos o rango excesivo.")
             return None
         else:
-            st.info(f"CoinCap: status code {resp.status_code}. Revisa los parámetros o prueba otro rango.")
+            st.info(f"CoinCap: status code {resp.status_code}. Revisa parámetros.")
             return None
-    st.info("CoinCap: Se alcanzó el número máximo de reintentos sin éxito.")
+    st.info("CoinCap: Máx reintentos alcanzado.")
     return None
 
-###############################################################
-# Funciones para indicadores técnicos
-###############################################################
 def add_indicators(df):
+    """
+    Añade RSI, MACD y Bollinger Bands.
+    """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
     bbands_df = ta.bbands(df["close_price"], length=20, std=2)
@@ -98,12 +96,12 @@ def add_indicators(df):
 def add_all_indicators(df):
     return add_indicators(df)
 
-###############################################################
-# Creación de secuencias para LSTM
-###############################################################
 def create_sequences(data, window_size=30):
+    """
+    Crea secuencias de longitud 'window_size'.
+    """
     if len(data) <= window_size:
-        st.warning(f"No hay suficientes datos para una ventana de {window_size} días. Prueba otro rango.")
+        st.warning(f"No hay datos suficientes para ventana de {window_size} días.")
         return None, None
     X, y = [], []
     for i in range(window_size, len(data)):
@@ -111,10 +109,10 @@ def create_sequences(data, window_size=30):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
-###############################################################
-# Construcción del modelo LSTM
-###############################################################
 def build_lstm_model(input_shape, learning_rate=0.001):
+    """
+    Modelo LSTM + Conv1D + Bidirectional LSTM.
+    """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
     model.add(Bidirectional(LSTM(64, return_sequences=True)))
@@ -128,9 +126,6 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
-###############################################################
-# Entrenamiento y predicción con LSTM
-###############################################################
 def train_and_predict(
     coin_id,
     use_custom_range,
@@ -144,17 +139,23 @@ def train_and_predict(
     batch_size=32,
     learning_rate=0.001
 ):
+    """
+    Entrena y predice con LSTM. 
+    """
     if use_custom_range:
         df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     else:
         df_prices = load_coincap_data(coin_id, start_ms=None, end_ms=None)
+
     if df_prices is None or len(df_prices) == 0:
-        st.warning("No se pudo descargar datos suficientes. Reajusta el rango de fechas.")
+        st.warning("No se pudo descargar datos. Reajusta parámetros.")
         return None
+
     if use_indicators:
         df_prices = add_all_indicators(df_prices)
+
     if "close_price" not in df_prices.columns:
-        st.warning("No se encontró la columna 'close_price'.")
+        st.warning("No se encontró 'close_price'.")
         return None
 
     data_for_model = df_prices[["close_price"]].values
@@ -163,8 +164,9 @@ def train_and_predict(
 
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
-        st.warning("No hay suficientes datos para entrenar. Reajusta parámetros.")
+        st.warning("Datos insuficientes para entrenar. Reajusta parámetros.")
         return None
+
     train_data = scaled_data[:split_index]
     test_data = scaled_data[split_index:]
     X_train, y_train = create_sequences(train_data, window_size=window_size)
@@ -218,16 +220,12 @@ def train_and_predict(
 
     return df_prices, test_preds, y_test_deserialized, future_preds, rmse, mape
 
-###############################################################
-# Función principal de la app
-###############################################################
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
     st.markdown("**Fuente de Datos:** CoinCap")
 
     st.sidebar.header("Configuración de la predicción")
-
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
@@ -275,8 +273,9 @@ def main_app():
     scenario = st.sidebar.selectbox(
         "Elige un escenario:",
         ["Pesimista", "Neutro", "Optimista"],
-        help=("Pesimista: Predicciones conservadoras. Neutro: Balance entre riesgo y retorno. "
-              "Optimista: Predicciones agresivas con mayor potencial de retorno.")
+        index=0,  # Por defecto selecciona "Pesimista"
+        help=("Pesimista: Predicciones conservadoras. Neutro: Balance. "
+              "Optimista: Predicciones agresivas con mayor potencial.")
     )
     if scenario == "Pesimista":
         epochs_val = 20
@@ -303,17 +302,18 @@ def main_app():
         fig_hist.update_yaxes(tickformat=",.2f")
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45, nticks=10))
         st.plotly_chart(fig_hist, use_container_width=True)
+
         if show_stats:
             st.subheader("Estadísticas Descriptivas")
-            # Mostramos estadísticas únicamente de la columna de precios
+            # Solo la columna de precios
             st.write(df_prices["close_price"].describe().rename({
                 "count": "Cuenta",
                 "mean": "Media",
-                "std": "Desviación",
+                "std": "Desv.",
                 "min": "Mínimo",
-                "25%": "25%",
+                "25%": "Percentil 25",
                 "50%": "Mediana",
-                "75%": "75%",
+                "75%": "Percentil 75",
                 "max": "Máximo"
             }))
     else:
@@ -367,7 +367,8 @@ def main_app():
                 fig_test.update_yaxes(tickformat=",.2f")
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
-                st.info("No se pudo entrenar el modelo con los parámetros seleccionados. Revisa los avisos.")
+                st.info("No se pudo entrenar el modelo con los parámetros seleccionados.")
+
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_name}")
         if 'result' in locals() and result is not None:
