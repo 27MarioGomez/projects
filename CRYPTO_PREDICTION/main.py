@@ -20,7 +20,7 @@ import os
 import tweepy
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-# Configurar certificados SSL para requests y tweepy, asegurando seguridad en conexiones
+# Configurar certificados SSL para requests y tweepy, asegurando conexiones seguras
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 os.environ["SSL_CERT_FILE"] = certifi.where()
 
@@ -208,11 +208,11 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     Entrena el modelo LSTM de forma aislada, limpiando el estado global para evitar conflictos en Streamlit.
     
     Args:
-        X_train (np.ndarray): Datos de entrenamiento ajustados (precio + sentimiento).
-        y_train (np.ndarray): Valores objetivo de entrenamiento (solo precio).
+        X_train (np.ndarray): Datos de entrenamiento ajustados (precio + sentimiento, shape: (None, window_size, 2)).
+        y_train (np.ndarray): Valores objetivo de entrenamiento (solo precio, shape: (None, 1)).
         X_val (np.ndarray): Datos de validación ajustados.
         y_val (np.ndarray): Valores objetivo de validación.
-        input_shape (tuple): Forma de entrada esperada por el modelo.
+        input_shape (tuple): Forma de entrada esperada por el modelo (window_size, 2).
         epochs (int): Número de épocas de entrenamiento.
         batch_size (int): Tamaño del batch.
         learning_rate (float): Tasa de aprendizaje.
@@ -277,6 +277,9 @@ def train_and_predict_with_sentiment(
     
     Returns:
         tuple: (df, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor) o None si falla.
+    
+    Notes:
+        Asegura que los datos de entrada al modelo tengan 2 características (precio + sentimiento).
     """
     # Cargar datos de precios desde CoinCap
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
@@ -334,9 +337,14 @@ def train_and_predict_with_sentiment(
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
     # Ajustar los datos de entrenamiento con el factor de sentimiento (precio + sentimiento, 2 características)
+    # Verificar dimensiones para depuración
+    st.write(f"Dimensión de X_train antes de ajuste: {X_train.shape}")  # (None, window_size, 1)
     X_train_adjusted = np.concatenate([X_train, np.full((X_train.shape[0], X_train.shape[1], 1), sentiment_factor)], axis=-1)
     X_test_adjusted = np.concatenate([X_test, np.full((X_test.shape[0], X_test.shape[1], 1), sentiment_factor)], axis=-1)
     input_shape = (X_train_adjusted.shape[1], X_train_adjusted.shape[2])  # (window_size, 2)
+
+    # Verificar dimensiones después del ajuste para depuración
+    st.write(f"Dimensión de X_train_adjusted después de ajuste: {X_train_adjusted.shape}")  # Debería ser (None, window_size, 2)
 
     # Entrenar el modelo ajustado para manejar precio + sentimiento
     lstm_model = train_model(X_train_adjusted, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate)
@@ -375,26 +383,37 @@ def train_and_predict_with_sentiment(
 def setup_x_api():
     """
     Configura la API de X usando los Secrets de Streamlit, manejando errores de autenticación.
+    Usa solo bearer_token para el plan gratuito, ignorando otras claves si no son necesarias.
     
     Returns:
         tweepy.Client: Cliente de Tweepy configurado, o None si falla.
+    
+    Notes:
+        Depura los valores de los Secrets para identificar problemas de configuración.
     """
     try:
         secrets = st.secrets["x_api"]
-        # Usar solo bearer_token para el plan gratuito, ignorando otras claves si no son necesarias
-        client = tweepy.Client(
-            bearer_token=secrets.get("bearer_token", ""),
-            # Opcional, descomenta si necesitas autenticación completa:
-            # consumer_key=secrets.get("api_key", ""),
-            # consumer_secret=secrets.get("api_secret", ""),
-            # access_token=secrets.get("access_token", ""),
-            # access_token_secret=secrets.get("access_token_secret", "")
-        )
+        # Depuración para verificar valores en los Secrets
+        st.write("Valores de Secrets para X API:", {
+            "bearer_token": secrets.get("bearer_token", "None"),
+            "api_key": secrets.get("api_key", "None"),
+            "api_secret": secrets.get("api_secret", "None")
+        })
+        
+        # Usar solo bearer_token para el plan gratuito
+        bearer_token = secrets.get("bearer_token", "")
+        if not bearer_token or bearer_token == "None":
+            raise ValueError("Bearer Token no configurado o es None en los Secrets de Streamlit")
+        
+        client = tweepy.Client(bearer_token=bearer_token)
         # Verificar si el cliente funciona con una solicitud mínima
         client.get_me()  # Prueba rápida para validar autenticación
         return client
     except tweepy.TweepyException as e:
         st.error(f"Error de autenticación en la API de X: {e} (Código {e.response.status_code if e.response else 'N/A'})")
+        return None
+    except ValueError as e:
+        st.error(f"Error de configuración en los Secrets de Streamlit: {e}")
         return None
     except Exception as e:
         st.error(f"Error inesperado configurando la API de X: {e}")
