@@ -43,7 +43,6 @@ coincap_ids = {
     "TRON (TRX)":          "tron",
     "Stellar (XLM)":       "stellar"
 }
-# Si alguna cripto da problemas (status 400 o sin datos), puedes retirarla o revisar su ID en la API de CoinCap.
 
 ###############################################################
 # 2. Función para descargar datos desde CoinCap (intervalo diario fijo)
@@ -52,12 +51,12 @@ coincap_ids = {
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
     Descarga el histórico de precios desde CoinCap a intervalo diario (d1).
-    Se usan start_ms y end_ms (en milisegundos) para definir el rango de fechas.
+    Si no se proporcionan start_ms y end_ms, se descargará todo el histórico.
     Devuelve un DataFrame con 'ds' y 'close_price' o None si hay error.
     """
-    # Intervalo diario fijo
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
-    # Añadimos start y end si están definidos
+
+    # Si se ha habilitado el rango de fechas, añadimos start y end
     if start_ms is not None and end_ms is not None:
         url += f"&start={start_ms}&end={end_ms}"
 
@@ -167,6 +166,7 @@ def build_lstm_model(input_shape, learning_rate=0.001):
 ###############################################################
 def train_and_predict(
     coin_id,
+    use_custom_range,     # True/False según se habilite o no el rango de fechas
     start_ms,
     end_ms,
     horizon_days=30,
@@ -178,14 +178,20 @@ def train_and_predict(
     learning_rate=0.001
 ):
     """
-    - Descarga datos de CoinCap (intervalo diario) con (start_ms, end_ms).
+    - Descarga datos de CoinCap (intervalo diario).
+    - Si use_custom_range es False, se ignoran start_ms y end_ms y se descarga todo el histórico.
     - Aplica indicadores si se desea.
     - Prepara secuencias para LSTM, entrena y hace predicción futura iterativa.
     """
-    # 1) Carga de datos (intervalo diario fijo)
-    df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
+    # 1) Carga de datos
+    if use_custom_range:
+        df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
+    else:
+        # Si no se habilita rango de fechas, se pasa None para start/end y se descarga todo
+        df_prices = load_coincap_data(coin_id, start_ms=None, end_ms=None)
+
     if df_prices is None or len(df_prices) == 0:
-        st.warning("No se pudo descargar datos suficientes para entrenar. Reajusta el rango de fechas.")
+        st.warning("No se pudo descargar datos suficientes para entrenar. Reajusta parámetros.")
         return None
 
     # 2) Indicadores técnicos (opcional)
@@ -271,13 +277,13 @@ def main_app():
     Interfaz principal de Streamlit para predecir precios de criptomonedas
     usando datos de CoinCap a intervalo diario fijo, con:
     - Selección de criptomoneda
-    - Rango de fechas (start/end)
+    - Opción de rango de fechas (check para habilitarlo)
     - Parámetros de LSTM
     - Indicadores técnicos
     """
     st.set_page_config(page_title="Crypto Price Prediction Dashboard", layout="wide")
-    st.title("Crypto Price Predictions 🔮 - Solo CoinCap (Diario)")
-    st.markdown("**Fuente de Datos:** CoinCap (histórico diario con rango).")
+    st.title("Crypto Price Predictions 🔮 - CoinCap (Diario)")
+    st.markdown("**Fuente de Datos:** CoinCap (histórico diario).")
 
     # Barra lateral: configuración principal
     st.sidebar.header("Configuración de la predicción")
@@ -290,14 +296,26 @@ def main_app():
     )
     coin_id = coincap_ids[crypto_name]
 
-    # 2) Rango de fechas
+    # 2) Check para habilitar el rango de fechas
     st.sidebar.subheader("Rango de Fechas (Diario)")
+    use_custom_range = st.sidebar.checkbox(
+        "Habilitar rango de fechas",
+        value=True,
+        help="Si está desactivado, se mostrará todo el histórico disponible."
+    )
+
     default_start = datetime(2021, 1, 1)
     default_end = datetime.now()
-    start_date = st.sidebar.date_input("Fecha de inicio", default_start)
-    end_date = st.sidebar.date_input("Fecha de fin", default_end)
-    start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
-    end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
+    if use_custom_range:
+        # Mostrar los date_input
+        start_date = st.sidebar.date_input("Fecha de inicio", default_start)
+        end_date = st.sidebar.date_input("Fecha de fin", default_end)
+        start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
+        end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
+    else:
+        # No se usa rango de fechas (None => todo el histórico)
+        start_ms = None
+        end_ms = None
 
     # 3) Parámetros de Predicción
     st.sidebar.subheader("Parámetros de Predicción")
@@ -336,10 +354,14 @@ def main_app():
         learning_rate_val = 0.0005
 
     # Descargamos datos para mostrar el histórico (gráfico diario)
-    df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
+    if use_custom_range:
+        df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
+    else:
+        df_prices = load_coincap_data(coin_id, start_ms=None, end_ms=None)
+
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
-        # Usamos formato '%Y-%m-%d' para no mostrar horas
+        # Formato de fecha sin horas
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%Y-%m-%d")
 
         # Creamos el gráfico con Plotly Express
@@ -355,7 +377,7 @@ def main_app():
 
         st.plotly_chart(fig_hist, use_container_width=True)
     else:
-        st.info("No se encontraron datos históricos válidos con los parámetros seleccionados. Reajusta fechas.")
+        st.info("No se encontraron datos históricos válidos con los parámetros seleccionados.")
 
     # Pestañas para separar Entrenamiento/Test y Predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
@@ -366,6 +388,7 @@ def main_app():
             with st.spinner("Entrenando el modelo, por favor espera..."):
                 result = train_and_predict(
                     coin_id=coin_id,
+                    use_custom_range=use_custom_range,
                     start_ms=start_ms,
                     end_ms=end_ms,
                     horizon_days=horizon,
@@ -405,7 +428,7 @@ def main_app():
                     xaxis_title="Fecha",
                     yaxis_title="Precio en USD"
                 )
-                fig_test.update_yaxes(tickformat=",.2f")  # Eje Y sin notación científica
+                fig_test.update_yaxes(tickformat=",.2f")
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
                 st.info("No se pudo entrenar el modelo con los parámetros seleccionados. Revisa los avisos arriba.")
@@ -433,7 +456,7 @@ def main_app():
                 xaxis_title="Fecha",
                 yaxis_title="Precio en USD"
             )
-            fig_future.update_yaxes(tickformat=",.2f")  # Formato decimal
+            fig_future.update_yaxes(tickformat=",.2f")
             st.plotly_chart(fig_future, use_container_width=True)
 
             st.subheader("Valores Numéricos de la Predicción Futura")
