@@ -10,14 +10,11 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
-import pandas_ta as ta
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
-import snscrape.modules.twitter as sntwitter
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 ##############################################
 # Funciones de apoyo
@@ -146,8 +143,8 @@ def train_and_predict(
     learning_rate=0.001
 ):
     """
-    Descarga datos de CoinCap, entrena un modelo LSTM usando únicamente 'close_price'
-    y realiza predicciones en el conjunto de test y a futuro. Además, ajusta la predicción
+    Descarga datos de CoinCap, entrena un modelo LSTM usando 'close_price'
+    y realiza predicciones en test y a futuro. Además, ajusta la predicción
     según el sentimiento extraído de X.
     """
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
@@ -156,6 +153,7 @@ def train_and_predict(
         return None
     df = temp_df.copy()
 
+    # Usamos únicamente 'close_price'
     features = ["close_price"]
     if "close_price" not in features:
         st.warning("No se encontró 'close_price' para el entrenamiento.")
@@ -188,7 +186,6 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Se elimina clear_session para evitar el error "pop from empty list"
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
@@ -225,7 +222,7 @@ def train_and_predict(
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Análisis de sentimiento: se extraen tweets para la criptomoneda y para "crypto"
+    # Análisis de sentimiento: extrae tweets para la criptomoneda y para "crypto"
     coin_sentiment, _ = analyze_twitter_sentiment(crypto_name, max_tweets=50)
     industry_sentiment, _ = analyze_twitter_sentiment("crypto", max_tweets=50)
     if coin_sentiment is not None and industry_sentiment is not None:
@@ -240,16 +237,22 @@ def train_and_predict(
 ##############################################
 def analyze_twitter_sentiment(keyword, max_tweets=50):
     """
-    Extrae hasta max_tweets tweets relacionados con la keyword y calcula
-    el sentimiento promedio utilizando VaderSentiment. Se usa el dominio "x.com"
-    para la búsqueda y se filtran tweets con al menos 5 likes.
+    Extrae hasta max_tweets tweets relacionados con la keyword y calcula el sentimiento
+    promedio utilizando VaderSentiment. Se configura snscrape para usar "x.com" como base.
+    Solo se consideran tweets con al menos 5 likes.
     """
+    import snscrape.modules.twitter as sntwitter
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+    # Forzamos el uso del dominio "x.com" para la búsqueda
+    sntwitter.TWITTER_BASE_URL = "https://x.com"
+    
     tweets = []
     threshold = 5
     search_url = f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query"
     for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url).get_items()):
         try:
-            if tweet.likeCount is not None and tweet.likeCount >= threshold:
+            if hasattr(tweet, 'likeCount') and tweet.likeCount is not None and tweet.likeCount >= threshold:
                 tweets.append(tweet.content)
         except Exception:
             tweets.append(tweet.content)
@@ -446,8 +449,11 @@ def main_app():
             tweets_coin = []
             max_tweets = 50
             threshold = 5
-            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(
-                    f"https://x.com/search?f=live&lang=en&q={coin_keyword}&src=typed_query").get_items()):
+            search_url_coin = f"https://x.com/search?f=live&lang=en&q={coin_keyword}&src=typed_query"
+            # Forzamos el uso de x.com en snscrape
+            import snscrape.modules.twitter as sntwitter
+            sntwitter.TWITTER_BASE_URL = "https://x.com"
+            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url_coin).get_items()):
                 try:
                     if tweet.likeCount is not None and tweet.likeCount >= threshold:
                         tweets_coin.append(tweet.content)
@@ -456,8 +462,8 @@ def main_app():
                 if i >= max_tweets:
                     break
             tweets_industry = []
-            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(
-                    "https://x.com/search?f=live&lang=en&q=crypto&src=typed_query").get_items()):
+            search_url_industry = "https://x.com/search?f=live&lang=en&q=crypto&src=typed_query"
+            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url_industry).get_items()):
                 try:
                     if tweet.likeCount is not None and tweet.likeCount >= threshold:
                         tweets_industry.append(tweet.content)
@@ -465,6 +471,7 @@ def main_app():
                     tweets_industry.append(tweet.content)
                 if i >= max_tweets:
                     break
+            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
             analyzer = SentimentIntensityAnalyzer()
             coin_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_coin if t]
             industry_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_industry if t]
