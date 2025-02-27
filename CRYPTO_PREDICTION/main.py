@@ -169,97 +169,69 @@ def get_dynamic_params(df, horizon_days):
 ##############################################
 def get_crypto_sentiment_lunarcrush(symbol):
     """
-    Solicita métricas extra para exprimir la llamada:
-    galaxy_score, alt_rank, average_sentiment, bullish_sentiment, bearish_sentiment
-    (algunas pueden estar limitadas en free).
+    Intenta obtener el sentimiento de la criptomoneda 'symbol' de LunarCrush.
+    Si hay un error, devuelve 50.0 y muestra un mensaje amigable.
     """
-    api_key = st.secrets["lunarcrush_api_key"]
-    base = "https://api.lunarcrush.com/v2"
-    # Se añade &metrics para pedir más campos. Ajusta según tu plan.
-    url = (f"{base}?data=assets&symbol={symbol}&key={api_key}"
-           "&metrics=galaxy_score,alt_rank,average_sentiment,bullish_sentiment,bearish_sentiment")
-
     try:
+        api_key = st.secrets["lunarcrush_api_key"]
+        base = "https://api.lunarcrush.com/v2"
+        url = f"{base}?data=assets&symbol={symbol}&key={api_key}"
         resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
-            st.warning(f"LunarCrush (assets): Error {resp.status_code} para {symbol}.")
-            return 50.0
+            raise Exception(f"Error de respuesta: {resp.status_code}")
         assets = resp.json().get("data", [])
         if not assets:
-            return 50.0
-        
+            raise Exception("No se encontraron datos para la criptomoneda.")
         asset = assets[0]
-        # Priorizar galaxy_score (0-100).
-        galaxy = asset.get("galaxy_score", 50)
-        # Otras métricas:
-        alt_rank = asset.get("alt_rank")
-        avg_sent = asset.get("average_sentiment", 0.5) * 100
-        bull = asset.get("bullish_sentiment", 0)
-        bear = asset.get("bearish_sentiment", 0)
-
-        # Combina en una fórmula simple (ajusta pesos):
-        # Ej: 40% galaxy, 10% (invertir alt_rank?), 20% avg_sent, 15% bull, -15% bear
-        # alt_rank: 1 es mejor, 2000 peor => invertimos.
-        if alt_rank is None:
-            alt_score = 50
-        else:
-            alt_score = max(0, min(100, (2000 - alt_rank)/2000*100))
-
-        raw = (0.4*galaxy + 0.1*alt_score + 0.2*avg_sent + 0.15*bull - 0.15*bear)
-        final = max(0, min(100, raw))
-        return final
-    except Exception as e:
-        st.error(f"Error LunarCrush (assets) para {symbol}: {e}")
+        sentiment = asset.get("sentiment", 50.0)
+        return sentiment
+    except Exception:
+        st.warning(f"No se pudo obtener el sentimiento de {symbol} debido a un problema de conexión. Usando valor neutral (50.0).")
         return 50.0
 
 def get_market_crypto_sentiment_lunarcrush():
     """
-    Para el mercado global, pedimos 'market'. Ajustamos un factor
-    a partir de 'btc_dominance' (y si quieres, 'market_cap_global', etc.).
+    Intenta obtener el sentimiento del mercado cripto de LunarCrush.
+    Si hay un error, devuelve 50.0 y muestra un mensaje amigable.
     """
-    api_key = st.secrets["lunarcrush_api_key"]
-    url = f"https://api.lunarcrush.com/v2?data=market&key={api_key}"
     try:
+        api_key = st.secrets["lunarcrush_api_key"]
+        base = "https://api.lunarcrush.com/v2"
+        url = f"{base}?data=market&key={api_key}"
         resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json().get("data", [])
-            if data:
-                item = data[0]
-                btc_dom = item.get("btc_dominance", 45)
-                # Ejemplo: normalizar 30 => 0, 60 => 100
-                dom_sent = (btc_dom - 30)/(60-30)*100
-                return max(0, min(100, dom_sent))
-            return 50.0
-        else:
-            st.warning(f"LunarCrush (market): Error {resp.status_code}.")
-            return 50.0
-    except Exception as e:
-        st.error(f"Error LunarCrush (market): {e}")
+        if resp.status_code != 200:
+            raise Exception(f"Error de respuesta: {resp.status_code}")
+        market_data = resp.json().get("data", {})
+        sentiment = market_data.get("overall_sentiment", 50.0)
+        return sentiment
+    except Exception:
+        st.warning("No se pudo obtener el sentimiento del mercado debido a un problema de conexión. Usando valor neutral (50.0).")
         return 50.0
 
 def get_lunarcrush_news(symbol, limit=5):
     """
-    Pide 'data=news' con el 'symbol'. En free, puede no estar todo habilitado.
+    Intenta obtener noticias de LunarCrush para 'symbol'.
+    Si hay un error, devuelve una lista vacía y muestra un mensaje.
     """
-    api_key = st.secrets["lunarcrush_api_key"]
-    url = (f"https://api.lunarcrush.com/v2?data=news&symbol={symbol}"
-           f"&limit={limit}&key={api_key}")
     try:
+        api_key = st.secrets["lunarcrush_api_key"]
+        base = "https://api.lunarcrush.com/v2"
+        url = f"{base}?data=news&symbol={symbol}&limit={limit}&key={api_key}"
         resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
-            return []
-        items = resp.json().get("data", [])
+            raise Exception(f"Error de respuesta: {resp.status_code}")
+        news_data = resp.json().get("data", [])
         news_list = []
-        for it in items:
+        for item in news_data:
             news_list.append({
-                "title": it.get("title"),
-                "url": it.get("url"),
-                "description": it.get("description"),
-                "published_at": it.get("published_at")
+                "title": item.get("title", "Sin título"),
+                "url": item.get("url", "#"),
+                "description": item.get("description", "Sin descripción"),
+                "published_at": item.get("published_at", "Sin fecha")
             })
         return news_list
-    except Exception as e:
-        st.error(f"Error obteniendo noticias de {symbol}: {e}")
+    except Exception:
+        st.warning(f"No se pudieron obtener noticias para {symbol} debido a un problema de conexión.")
         return []
 
 ##############################################
@@ -280,11 +252,15 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     # Sentimientos
     crypto_sent = get_crypto_sentiment_lunarcrush(symbol)
     market_sent = get_market_crypto_sentiment_lunarcrush()
-    sentiment_factor = (crypto_sent + market_sent)/200.0
+    sentiment_factor = (crypto_sent + market_sent) / 200.0
 
-    st.write(f"Sentimiento de {symbol}: {crypto_sent:.2f} (0-100)")
-    st.write(f"Sentimiento del mercado: {market_sent:.2f} (0-100)")
-    st.write(f"Factor (0-1): {sentiment_factor:.2f}")
+    # Mostrar sentimientos solo si no hubo errores (no son 50.0)
+    if crypto_sent != 50.0 and market_sent != 50.0:
+        st.write(f"Sentimiento de {symbol}: {crypto_sent:.2f} (0-100)")
+        st.write(f"Sentimiento del mercado: {market_sent:.2f} (0-100)")
+        st.write(f"Factor (0-1): {sentiment_factor:.2f}")
+    else:
+        st.warning("No se pudieron obtener los datos de sentimiento debido a un problema de conexión. Se usará un valor neutral para la predicción.")
 
     # Hiperparámetros
     window_size, epochs, batch_size, learning_rate = get_dynamic_params(df_raw, horizon_days)
@@ -296,7 +272,7 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_target.fit_transform(data_for_model)
 
-    split_index = int(len(scaled_data)*(1 - test_size))
+    split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
         st.warning("Datos insuficientes para entrenar. Reajusta parámetros.")
         return None
@@ -310,7 +286,7 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     if X_test is None:
         return None
 
-    val_split = int(len(X_train)*0.9)
+    val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
@@ -336,7 +312,7 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     if np.sum(valid_mask) == 0:
         rmse, mape = np.nan, np.nan
     else:
-        rmse = np.sqrt(np.mean((y_test_real[valid_mask] - test_preds[valid_mask])**2))
+        rmse = np.sqrt(np.mean((y_test_real[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_real[valid_mask], test_preds[valid_mask])
 
     # Predicción futura
@@ -364,8 +340,8 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
 # Función principal
 ##############################################
 def main_app():
-    st.set_page_config(page_title="Crypto Price Predictions (LunarCrush) 🔮", layout="wide")
-    st.title("Crypto Price Predictions (LunarCrush) 🔮")
+    st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
+    st.title("Crypto Price Predictions 🔮")
     st.markdown("**Fuente de Datos:** CoinCap y LunarCrush")
 
     st.session_state["crypto_name"] = st.sidebar.selectbox(
@@ -381,8 +357,8 @@ def main_app():
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start)
         end_date = st.sidebar.date_input("Fecha de fin", default_end)
-        start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp()*1000)
-        end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp()*1000)
+        start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
+        end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
     else:
         start_ms, end_ms = None, None
 
@@ -391,13 +367,13 @@ def main_app():
     st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos.**")
 
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
-    if df_prices is not None and len(df_prices)>0:
+    if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
         fig_hist = px.line(
             df_chart, x="ds_str", y="close_price",
             title=f"Histórico de {st.session_state['crypto_name']}",
-            labels={"ds_str":"Fecha","close_price":"Precio en USD"}
+            labels={"ds_str": "Fecha", "close_price": "Precio en USD"}
         )
         fig_hist.update_yaxes(tickformat=",.2f")
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45, nticks=10))
@@ -406,9 +382,9 @@ def main_app():
         if st.sidebar.checkbox("Ver estadísticas descriptivas", value=False):
             st.subheader("Estadísticas Descriptivas")
             st.write(df_prices["close_price"].describe().rename({
-                "count":"Cuenta", "mean":"Media", "std":"Desv. Estándar",
-                "min":"Mínimo", "25%":"Percentil 25", "50%":"Mediana",
-                "75%":"Percentil 75", "max":"Máximo"
+                "count": "Cuenta", "mean": "Media", "std": "Desv. Estándar",
+                "min": "Mínimo", "25%": "Percentil 25", "50%": "Mediana",
+                "75%": "Percentil 75", "max": "Máximo"
             }))
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
@@ -460,7 +436,7 @@ def main_app():
              future_preds, rmse, mape, sentiment_factor, symbol) = result
             last_date = df_model["ds"].iloc[-1]
             current_price = df_model["close_price"].iloc[-1]
-            future_dates = pd.date_range(start=last_date, periods=horizon+1, freq="D")
+            future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
             pred_series = np.concatenate(([current_price], future_preds))
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(
@@ -473,13 +449,13 @@ def main_app():
             fig_future.update_yaxes(tickformat=",.2f")
             st.plotly_chart(fig_future, use_container_width=True)
             st.subheader("Valores Numéricos de la Predicción Futura")
-            future_df = pd.DataFrame({"Fecha":future_dates, "Predicción":pred_series})
+            future_df = pd.DataFrame({"Fecha": future_dates, "Predicción": pred_series})
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo para generar predicciones futuras.")
 
     with tabs[2]:
-        st.header("Noticias Recientes (LunarCrush)")
+        st.header("Noticias")
         if 'result' in locals() and result is not None:
             symbol = result[-1]
             st.subheader(f"Noticias recientes de {symbol}")
@@ -497,5 +473,5 @@ def main_app():
         else:
             st.info("Primero entrena el modelo para mostrar noticias.")
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main_app()
