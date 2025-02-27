@@ -113,7 +113,8 @@ def create_sequences(data, window_size=30):
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Construye un modelo secuencial que combina Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Se utiliza run_eagerly=True para evitar errores de retracing.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -125,7 +126,7 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.add(Dropout(0.3))
     model.add(Dense(1))
     opt = Adam(learning_rate=learning_rate)
-    model.compile(optimizer=opt, loss="mean_squared_error")
+    model.compile(optimizer=opt, loss="mean_squared_error", run_eagerly=True)
     return model
 
 ##############################################
@@ -145,9 +146,9 @@ def train_and_predict(
     learning_rate=0.001
 ):
     """
-    Descarga datos de CoinCap, entrena un modelo LSTM usando solo 'close_price'
-    y realiza predicciones en el conjunto de test y a futuro.
-    Además, ajusta las predicciones según el sentimiento extraído de X.
+    Descarga datos de CoinCap, entrena un modelo LSTM usando únicamente 'close_price'
+    y realiza predicciones en test y a futuro. Ajusta las predicciones según el sentimiento
+    extraído de X.
     """
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
@@ -155,8 +156,11 @@ def train_and_predict(
         return None
     df = temp_df.copy()
 
-    # Usar únicamente 'close_price'
     features = ["close_price"]
+    if "close_price" not in features:
+        st.warning("No se encontró 'close_price' para el entrenamiento.")
+        return None
+
     df_model = df[["ds"] + features].copy()
     data_for_model = df_model[features].values
 
@@ -221,7 +225,7 @@ def train_and_predict(
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Análisis de sentimiento y ajuste de predicción
+    # Integrar sentimiento: se analiza el sentimiento en X para la criptomoneda y para "crypto"
     coin_sentiment, _ = analyze_twitter_sentiment(crypto_name, max_tweets=50)
     industry_sentiment, _ = analyze_twitter_sentiment("crypto", max_tweets=50)
     if coin_sentiment is not None and industry_sentiment is not None:
@@ -237,8 +241,8 @@ def train_and_predict(
 def analyze_twitter_sentiment(keyword, max_tweets=50):
     """
     Extrae hasta max_tweets tweets relacionados con la keyword y calcula
-    el sentimiento promedio utilizando VaderSentiment.
-    Se utiliza el dominio "x.com" y se filtran tweets con al menos 5 likes.
+    el sentimiento promedio utilizando VaderSentiment. Se usa el dominio "x.com"
+    para la búsqueda y se filtran tweets con al menos 5 likes.
     """
     tweets = []
     threshold = 5
@@ -438,7 +442,7 @@ def main_app():
         st.header("Sentimiento en X")
         st.markdown("Analizando tweets recientes sobre la criptomoneda y la industria cripto...")
         try:
-            # Para la criptomoneda
+            # Análisis de sentimiento para la criptomoneda
             coin_keyword = crypto_name.split(" ")[0]
             tweets_coin = []
             max_tweets = 50
@@ -452,7 +456,7 @@ def main_app():
                     tweets_coin.append(tweet.content)
                 if i >= max_tweets:
                     break
-            # Para la industria
+            # Análisis de sentimiento para la industria cripto (keyword "crypto")
             tweets_industry = []
             for i, tweet in enumerate(sntwitter.TwitterSearchScraper(
                     "https://x.com/search?f=live&lang=en&q=crypto&src=typed_query").get_items()):
