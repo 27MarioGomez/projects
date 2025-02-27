@@ -49,7 +49,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
     Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
     se descarga el rango correspondiente; de lo contrario, se descarga todo el histórico.
-    Retorna un DataFrame con las columnas 'ds', 'close_price' y 'volume'.
+    Retorna un DataFrame con 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -71,7 +71,6 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                 return None
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-            # Extraer volumen si está disponible; si no, se asigna 0
             if "volumeUsd" in df.columns:
                 df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce").fillna(0)
             else:
@@ -146,7 +145,7 @@ def train_and_predict(
 ):
     """
     Descarga datos de CoinCap, entrena un modelo LSTM usando solo 'close_price'
-    y realiza predicciones en test y a futuro.
+    y realiza predicciones en el conjunto de test y a futuro.
     """
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
@@ -224,34 +223,38 @@ def train_and_predict(
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Obtener sentimiento actual y ajustar predicciones (factor de influencia 5%)
-    sentiment, _ = analyze_twitter_sentiment(crypto_name, max_tweets=50)
-    if sentiment is not None:
-        sentiment_factor = 0.05
-        future_preds = future_preds * (1 + sentiment_factor * sentiment)
+    # Integrar sentimiento de la criptomoneda y de la industria cripto
+    coin_sentiment, _ = analyze_twitter_sentiment(crypto_name, max_tweets=50)
+    industry_sentiment, _ = analyze_twitter_sentiment("crypto", max_tweets=50)
+    # Factores de influencia ajustables (por ejemplo, 5% para cada)
+    coin_sentiment_factor = 0.05
+    industry_sentiment_factor = 0.05
+    if coin_sentiment is not None and industry_sentiment is not None:
+        total_sentiment = (coin_sentiment + industry_sentiment) / 2.0
+        # Ajustar la predicción futura en función del sentimiento global
+        future_preds = future_preds * (1 + (coin_sentiment_factor + industry_sentiment_factor) * total_sentiment)
 
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
 # Análisis de sentimiento en X
 ##############################################
-def analyze_twitter_sentiment(crypto_name, max_tweets=50):
+def analyze_twitter_sentiment(keyword, max_tweets=50):
     """
-    Extrae hasta max_tweets tweets relacionados con la criptomoneda (usando la primera palabra)
-    y calcula el sentimiento promedio utilizando VaderSentiment.
-    Se utiliza el nuevo dominio 'x.com' para evitar problemas con Twitter.
-    Se filtran tweets relevantes (likeCount >= 5) para evitar bots.
+    Extrae hasta max_tweets tweets relacionados con la keyword y calcula
+    el sentimiento promedio utilizando VaderSentiment.
+    Se utiliza el dominio "x.com" para la búsqueda.
+    Se filtran tweets relevantes (con al menos 5 likes).
     """
     import snscrape.modules.twitter as sntwitter
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-    keyword = crypto_name.split(" ")[0]
     tweets = []
     threshold = 5
     for i, tweet in enumerate(sntwitter.TwitterSearchScraper(f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query").get_items()):
         try:
             if tweet.likeCount is not None and tweet.likeCount >= threshold:
                 tweets.append(tweet.content)
-        except:
+        except Exception:
             tweets.append(tweet.content)
         if i >= max_tweets:
             break
@@ -440,38 +443,50 @@ def main_app():
 
     with tabs[2]:
         st.header("Sentimiento en X")
-        st.markdown("Analizando tweets recientes sobre la criptomoneda seleccionada...")
+        st.markdown("Analizando tweets recientes sobre la criptomoneda y la industria cripto...")
         try:
             import snscrape.modules.twitter as sntwitter
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            # Se utiliza el nuevo dominio X mediante la construcción de la query URL
-            keyword = crypto_name.split(" ")[0]
-            tweets = []
+            # Análisis de sentimiento para la criptomoneda
+            coin_keyword = crypto_name.split(" ")[0]
+            tweets_coin = []
             max_tweets = 50
-            threshold = 5  # Se consideran relevantes solo tweets con al menos 5 likes
-            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query").get_items()):
+            threshold = 5
+            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(f"https://x.com/search?f=live&lang=en&q={coin_keyword}&src=typed_query").get_items()):
                 try:
                     if tweet.likeCount is not None and tweet.likeCount >= threshold:
-                        tweets.append(tweet.content)
+                        tweets_coin.append(tweet.content)
                 except Exception:
-                    tweets.append(tweet.content)
+                    tweets_coin.append(tweet.content)
                 if i >= max_tweets:
                     break
-            if tweets:
-                analyzer = SentimentIntensityAnalyzer()
-                scores = [analyzer.polarity_scores(t)['compound'] for t in tweets if t]
-                if scores:
-                    avg_sentiment = np.mean(scores)
-                    st.metric("Sentimiento Promedio", f"{avg_sentiment:.2f}")
-                    st.write("Ejemplos de tweets analizados:")
-                    for t in tweets[:5]:
-                        st.write(f"- {t}")
-                else:
-                    st.info("No se pudieron calcular scores de sentimiento.")
-            else:
-                st.info("No se encontraron tweets para analizar.")
+            # Análisis de sentimiento para la industria cripto (keyword "crypto")
+            tweets_industry = []
+            for i, tweet in enumerate(sntwitter.TwitterSearchScraper("https://x.com/search?f=live&lang=en&q=crypto&src=typed_query").get_items()):
+                try:
+                    if tweet.likeCount is not None and tweet.likeCount >= threshold:
+                        tweets_industry.append(tweet.content)
+                except Exception:
+                    tweets_industry.append(tweet.content)
+                if i >= max_tweets:
+                    break
+
+            analyzer = SentimentIntensityAnalyzer()
+            coin_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_coin if t]
+            industry_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_industry if t]
+            coin_sentiment = np.mean(coin_scores) if coin_scores else 0
+            industry_sentiment = np.mean(industry_scores) if industry_scores else 0
+            # Combinamos ambos sentimientos (ponderados; 50% cada uno)
+            total_sentiment = (coin_sentiment + industry_sentiment) / 2.0
+            st.metric("Sentimiento Promedio", f"{total_sentiment:.2f}")
+            st.write("Ejemplos de tweets de la criptomoneda:")
+            for t in tweets_coin[:3]:
+                st.write(f"- {t}")
+            st.write("Ejemplos de tweets de la industria:")
+            for t in tweets_industry[:3]:
+                st.write(f"- {t}")
         except Exception as e:
-            st.error(f"Error al analizar tweets: {e}")
+            st.error(f"Error al analizar sentimiento: {e}")
 
 if __name__ == "__main__":
     main_app()
