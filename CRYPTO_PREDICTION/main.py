@@ -16,6 +16,7 @@ from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout,
 from tensorflow.keras.optimizers import Adam
 import time
 import tensorflow.keras.backend as K
+import ssl  # Añadido para manejar SSL
 
 ##############################################
 # Funciones de apoyo
@@ -117,14 +118,15 @@ def create_sequences(data, window_size=30):
     """
     Crea secuencias de tamaño 'window_size' a partir de 'data'.
     Se asume que la primera columna es el target ('close_price').
+    'data' es un numpy.ndarray con shape (n_samples, n_features).
     """
     if len(data) <= window_size:
         st.warning(f"No hay datos suficientes para una ventana de {window_size} días.")
         return None, None
     X, y = [], []
     for i in range(window_size, len(data)):
-        X.append(data[i - window_size : i].values)
-        y.append(data.iloc[i, 0])  # Usamos 'close_price' como target
+        X.append(data[i - window_size : i])  # Usamos indexación directa en el array de NumPy
+        y.append(data[i, 0])  # Usamos 'close_price' como target (primera columna)
     return np.array(X), np.array(y)
 
 ##############################################
@@ -271,6 +273,10 @@ def analyze_twitter_sentiment(crypto_name, max_tweets=50):
         import snscrape.modules.twitter as sntwitter
         from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
         sntwitter.TWITTER_BASE_URL = "https://x.com"
+        # Desactivar verificación SSL como workaround temporal (no recomendado en producción)
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
     except Exception as e:
         st.error(f"Error importando snscrape o vaderSentiment: {e}")
         return None, []
