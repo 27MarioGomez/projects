@@ -502,7 +502,7 @@ def get_crypto_sentiment(hashtag, max_tweets=10, retries=3, delay=5):
                     st.warning(f"Error 500 en API de X para {hashtag}, reintentando en {delay}s...")
                     time.sleep(delay)
                     continue
-            st.error(f"Error de API de X para {hashtag}: {e} (Código {e.response.status_code if e.response else 'N/A'}})")
+            st.error(f"Error de API de X para {hashtag}: {e} (Código {e.response.status_code if e.response else 'N/A'})")
             return 50.0
         except Exception as e:
             st.error(f"Error inesperado al obtener tweets para {hashtag}: {e}")
