@@ -184,7 +184,6 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Limpiar la sesión y deshabilitar eager execution para evitar errores de TensorArray
     tf.keras.backend.clear_session()
     tf.config.run_functions_eagerly(False)  # Desactivar eager execution
     input_shape = (X_train.shape[1], X_train.shape[2])
@@ -235,9 +234,7 @@ def analyze_twitter_sentiment(crypto_name, max_tweets=50):
         import snscrape.modules.twitter as sntwitter
         from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
         sntwitter.TWITTER_BASE_URL = "https://x.com"
-        # Desactivar verificación SSL como workaround (no recomendado en producción)
-        import ssl
-        ssl._create_default_https_context = ssl._create_unverified_context
+        # No necesitamos desactivar certificados SSL porque certifi está instalado
     except Exception as e:
         st.error(f"Error importando snscrape o vaderSentiment: {e}")
         return None, []
