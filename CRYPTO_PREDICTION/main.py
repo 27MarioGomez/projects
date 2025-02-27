@@ -15,6 +15,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
+import tensorflow.keras.backend as K
 
 ##############################################
 # Funciones de apoyo
@@ -140,7 +141,10 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     """
     Entrena el modelo LSTM de forma aislada para evitar conflictos con el contexto global.
     """
-    # No usamos clear_session aquí para no interferir con el estado global
+    # Inicializar explícitamente el name_scope_stack si no existe
+    if K.get_value(K.name_scope_stack) is None:
+        K.set_value(K.name_scope_stack, [])
+
     model = build_lstm_model(input_shape, learning_rate=learning_rate)
     model.fit(
         X_train, y_train,
