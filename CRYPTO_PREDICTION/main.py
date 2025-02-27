@@ -338,7 +338,10 @@ def train_and_predict_with_sentiment(
 
     # Ajustar los datos de entrenamiento con el factor de sentimiento (precio + sentimiento, 2 características)
     # Verificar dimensiones para depuración
-    st.write(f"Dimensión de X_train antes de ajuste: {X_train.shape}")  # (None, window_size, 1)
+    st.write(f"Dimensión de X_train antes de ajuste: {X_train.shape}")  # Debería ser (None, window_size, 1)
+    if X_train.shape[-1] != 1:
+        st.error(f"Dimensión inesperada de X_train: {X_train.shape}. Se esperaba (None, {window_size}, 1)")
+        return None
     X_train_adjusted = np.concatenate([X_train, np.full((X_train.shape[0], X_train.shape[1], 1), sentiment_factor)], axis=-1)
     X_test_adjusted = np.concatenate([X_test, np.full((X_test.shape[0], X_test.shape[1], 1), sentiment_factor)], axis=-1)
     input_shape = (X_train_adjusted.shape[1], X_train_adjusted.shape[2])  # (window_size, 2)
@@ -389,22 +392,16 @@ def setup_x_api():
         tweepy.Client: Cliente de Tweepy configurado, o None si falla.
     
     Notes:
-        Depura los valores de los Secrets para identificar problemas de configuración.
+        No imprime Secrets en la interfaz para evitar exposiciones de seguridad.
+        Asegúrate de que 'x_api.bearer_token' esté configurado correctamente en Streamlit Secrets.
     """
     try:
         secrets = st.secrets["x_api"]
-        # Depuración para verificar valores en los Secrets
-        st.write("Valores de Secrets para X API:", {
-            "bearer_token": secrets.get("bearer_token", "None"),
-            "api_key": secrets.get("api_key", "None"),
-            "api_secret": secrets.get("api_secret", "None")
-        })
+        bearer_token = secrets.get("bearer_token", "")
+        if not bearer_token:
+            raise ValueError("Bearer Token no configurado o es vacío en los Secrets de Streamlit")
         
         # Usar solo bearer_token para el plan gratuito
-        bearer_token = secrets.get("bearer_token", "")
-        if not bearer_token or bearer_token == "None":
-            raise ValueError("Bearer Token no configurado o es None en los Secrets de Streamlit")
-        
         client = tweepy.Client(bearer_token=bearer_token)
         # Verificar si el cliente funciona con una solicitud mínima
         client.get_me()  # Prueba rápida para validar autenticación
@@ -561,6 +558,9 @@ def main_app():
     """
     Interfaz principal de la aplicación en Streamlit para predicción de precios de criptomonedas
     con análisis de sentimiento usando la API de X.
+    
+    Notes:
+        No imprime Secrets ni datos sensibles en la interfaz para evitar exposiciones de seguridad.
     """
     st.set_page_config(page_title="Crypto Price Predictions with Sentiment 🔮", layout="wide")
     st.title("Crypto Price Predictions with Sentiment 🔮")
