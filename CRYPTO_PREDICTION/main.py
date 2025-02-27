@@ -135,27 +135,6 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     return model
 
 ##############################################
-# Función aislada para entrenar el modelo
-##############################################
-def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate):
-    """
-    Entrena el modelo LSTM de forma aislada para evitar conflictos con el contexto global.
-    """
-    # Inicializar explícitamente el name_scope_stack si no existe
-    if K.get_value(K.name_scope_stack) is None:
-        K.set_value(K.name_scope_stack, [])
-
-    model = build_lstm_model(input_shape, learning_rate=learning_rate)
-    model.fit(
-        X_train, y_train,
-        validation_data=(X_val, y_val),
-        epochs=epochs,
-        batch_size=batch_size,
-        verbose=1
-    )
-    return model
-
-##############################################
 # Ajuste dinámico de hiperparámetros
 ##############################################
 def get_dynamic_params(df, horizon_days):
@@ -179,6 +158,27 @@ def get_dynamic_params(df, horizon_days):
     learning_rate = 0.0005 if mean_price > 1000 or volatility > 0.1 else 0.001
     
     return window_size, epochs, batch_size, learning_rate
+
+##############################################
+# Función aislada para entrenar el modelo
+##############################################
+def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate):
+    """
+    Entrena el modelo LSTM de forma aislada para evitar conflictos con el contexto global.
+    """
+    # Inicializar explícitamente el name_scope_stack si no existe
+    if K.get_value(K.name_scope_stack) is None:
+        K.set_value(K.name_scope_stack, [])
+
+    model = build_lstm_model(input_shape, learning_rate=learning_rate)
+    model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=1
+    )
+    return model
 
 ##############################################
 # Entrenamiento y predicción con LSTM
