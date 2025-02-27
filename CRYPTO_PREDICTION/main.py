@@ -12,7 +12,7 @@ from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
+from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 import time
 import tensorflow.keras.backend as K
@@ -26,6 +26,25 @@ def robust_mape(y_true, y_pred, eps=1e-9):
     Calcula el MAPE evitando divisiones por cero.
     """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
+
+def calculate_technical_indicators(df):
+    """
+    Calcula indicadores técnicos como medias móviles y RSI usando solo close_price.
+    """
+    df = df.copy()
+    # Media móvil simple de 7 días
+    df['MA7'] = df['close_price'].rolling(window=7, min_periods=1).mean()
+    # Media móvil simple de 14 días
+    df['MA14'] = df['close_price'].rolling(window=14, min_periods=1).mean()
+    
+    # RSI básico (simplificado, usando solo close_price)
+    delta = df['close_price'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    return df[['close_price', 'MA7', 'MA14', 'RSI']].fillna(0)
 
 # Diccionario con IDs de criptomonedas para CoinCap
 coincap_ids = {
@@ -51,7 +70,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
     Descarga datos de CoinCap con intervalo diario.
     Si se definen start_ms y end_ms se descarga ese rango; de lo contrario se descarga todo el histórico.
-    Retorna un DataFrame con las columnas 'ds', 'close_price' y 'volume'.
+    Retorna un DataFrame con las columnas 'ds' y 'close_price'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -73,11 +92,8 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                 return None
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-            if "volumeUsd" in df.columns:
-                df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce").fillna(0)
-            else:
-                df["volume"] = 0.0
-            df = df[["ds", "close_price", "volume"]].dropna(subset=["ds", "close_price"])
+            # Excluimos explícitamente el volumen para evitar problemas con RMSE y MAPE
+            df = df[["ds", "close_price"]].dropna(subset=["ds", "close_price"])
             df.sort_values(by="ds", inplace=True)
             df.reset_index(drop=True, inplace=True)
             df = df[df["close_price"] > 0].copy()
@@ -107,45 +123,43 @@ def create_sequences(data, window_size=30):
         return None, None
     X, y = [], []
     for i in range(window_size, len(data)):
-        X.append(data[i - window_size : i])
-        y.append(data[i, 0])
+        X.append(data[i - window_size : i].values)
+        y.append(data.iloc[i, 0])  # Usamos 'close_price' como target
     return np.array(X), np.array(y)
 
 ##############################################
-# Modelo LSTM: Conv1D + Bidirectional LSTM
+# Modelo LSTM mejorado: Conv1D + Bidirectional LSTM con regularización
 ##############################################
-def build_lstm_model(input_shape, learning_rate=0.001):
+def build_improved_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina:
-      - Conv1D para extracción de características locales
-      - Tres capas Bidirectional LSTM con Dropout
-      - Capa Dense final para regresión
+    Construye un modelo mejorado con más regularización y características.
     """
     model = Sequential()
-    model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
-    model.add(Bidirectional(LSTM(64, return_sequences=True)))
-    model.add(Dropout(0.3))
-    model.add(Bidirectional(LSTM(64, return_sequences=True)))
-    model.add(Dropout(0.3))
-    model.add(Bidirectional(LSTM(64, return_sequences=False)))
-    model.add(Dropout(0.3))
+    model.add(Conv1D(filters=64, kernel_size=3, activation="relu", input_shape=input_shape, padding="same"))
+    model.add(BatchNormalization())  # Añadir BatchNormalization para estabilizar
+    model.add(Bidirectional(LSTM(128, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(0.01))))
+    model.add(Dropout(0.4))  # Aumentar dropout para prevenir overfitting
+    model.add(Bidirectional(LSTM(128, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(0.01))))
+    model.add(Dropout(0.4))
+    model.add(Bidirectional(LSTM(64, return_sequences=False, kernel_regularizer=tf.keras.regularizers.l2(0.01))))
+    model.add(Dropout(0.4))
     model.add(Dense(1))
     opt = Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
 ##############################################
-# Función aislada para entrenar el modelo
+# Función aislada para entrenar el modelo mejorado
 ##############################################
 def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate):
     """
-    Entrena el modelo LSTM de forma aislada para evitar conflictos con el contexto global.
+    Entrena el modelo LSTM mejorado de forma aislada para evitar conflictos con el contexto global.
     """
     # Inicializar explícitamente el name_scope_stack si no existe
     if K.get_value(K.name_scope_stack) is None:
         K.set_value(K.name_scope_stack, [])
 
-    model = build_lstm_model(input_shape, learning_rate=learning_rate)
+    model = build_improved_lstm_model(input_shape, learning_rate=learning_rate)
     model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
@@ -156,7 +170,7 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     return model
 
 ##############################################
-# Entrenamiento y predicción con LSTM
+# Entrenamiento y predicción con LSTM mejorado
 ##############################################
 def train_and_predict(
     coin_id,
@@ -164,14 +178,14 @@ def train_and_predict(
     start_ms,
     end_ms,
     horizon_days=30,
-    window_size=30,
+    window_size=60,  # Aumentamos la ventana para capturar más patrones
     test_size=0.2,
-    epochs=10,
+    epochs=50,  # Más epochs para un mejor ajuste
     batch_size=32,
-    learning_rate=0.001
+    learning_rate=0.0005  # Ajuste del learning rate para estabilidad
 ):
     """
-    Descarga datos de CoinCap, entrena un modelo LSTM y realiza predicciones en test y a futuro.
+    Descarga datos de CoinCap, entrena un modelo LSTM mejorado y realiza predicciones.
     """
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
@@ -183,7 +197,9 @@ def train_and_predict(
         st.warning("No se encontró 'close_price' en los datos.")
         return None
 
-    data_for_model = df[["close_price"]].values
+    # Añadir indicadores técnicos (sin volumen)
+    df_features = calculate_technical_indicators(df)
+    data_for_model = df_features.values
 
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_target.fit_transform(data_for_model)
@@ -206,13 +222,15 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Entrenar el modelo en una función aislada
+    # Entrenar el modelo mejorado en una función aislada
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate)
 
+    # Predicciones del modelo LSTM
     test_preds_scaled = lstm_model.predict(X_test)
-    test_preds = scaler_target.inverse_transform(test_preds_scaled)
-    y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
+    # Desescalamos solo la columna 'close_price' (columna 0)
+    test_preds = scaler_target.inverse_transform(np.hstack([test_preds_scaled, np.zeros((test_preds_scaled.shape[0], test_data.shape[1]-1))]))[:, 0]
+    y_test_deserialized = scaler_target.inverse_transform(np.hstack([y_test.reshape(-1, 1), np.zeros((y_test.shape[0], test_data.shape[1]-1))]))[:, 0]
 
     valid_mask = ~np.isnan(test_preds) & ~np.isnan(y_test_deserialized)
     if np.sum(valid_mask) == 0:
@@ -221,6 +239,7 @@ def train_and_predict(
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
+    # Predicción futura iterativa con LSTM
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -228,13 +247,17 @@ def train_and_predict(
         future_pred = lstm_model.predict(current_input)[0][0]
         future_preds_scaled.append(future_pred)
         new_feature = np.copy(current_input[:, -1:, :])
-        new_feature[0, 0, 0] = future_pred
+        new_feature[0, 0, 0] = future_pred  # Actualizar solo 'close_price'
+        # Mantener las otras características constantes (MA7, MA14, RSI)
         for c in range(1, X_train.shape[2]):
             new_feature[0, 0, c] = current_input[0, -1, c]
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
-    future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
+    future_preds = scaler_target.inverse_transform(np.hstack([np.array(future_preds_scaled).reshape(-1, 1), np.zeros((horizon_days, scaled_data.shape[1]-1))]))[:, 0]
 
-    return df, test_preds, y_test_deserialized, future_preds, rmse, mape
+    # Suavizar predicciones futuras con media móvil (suavizado exponencial)
+    future_preds_smoothed = pd.Series(future_preds).ewm(span=5).mean().values
+
+    return df, test_preds, y_test_deserialized, future_preds_smoothed, rmse, mape
 
 ##############################################
 # Análisis de sentimiento en Twitter (ahora en X)
