@@ -135,21 +135,21 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 ##############################################
-# Modelo LSTM: Conv1D + Bidirectional LSTM
+# Modelo LSTM: Conv1D + Bidirectional LSTM ajustado para sentimiento
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina Conv1D y Bidirectional LSTM.
+    Construye un modelo secuencial que combina Conv1D y Bidirectional LSTM, ajustado para precio + sentimiento.
     """
     model = Sequential()
-    model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
+    model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))  # Ahora input_shape=(window_size, 2)
     model.add(Bidirectional(LSTM(64, return_sequences=True)))
     model.add(Dropout(0.3, name="dropout_1"))
     model.add(Bidirectional(LSTM(64, return_sequences=True)))
     model.add(Dropout(0.3, name="dropout_2"))
     model.add(Bidirectional(LSTM(64, return_sequences=False)))
     model.add(Dropout(0.3, name="dropout_3"))
-    model.add(Dense(1))
+    model.add(Dense(1))  # Solo predice el precio, el sentimiento es una característica adicional
     opt = Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
@@ -251,10 +251,10 @@ def train_and_predict_with_sentiment(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Ajustar los datos de entrenamiento con el factor de sentimiento
+    # Ajustar los datos de entrenamiento con el factor de sentimiento (ahora con 2 características)
     X_train_adjusted = np.concatenate([X_train, np.full((X_train.shape[0], X_train.shape[1], 1), sentiment_factor)], axis=-1)
     X_test_adjusted = np.concatenate([X_test, np.full((X_test.shape[0], X_test.shape[1], 1), sentiment_factor)], axis=-1)
-    input_shape = (X_train_adjusted.shape[1], X_train_adjusted.shape[2])
+    input_shape = (X_train_adjusted.shape[1], X_train_adjusted.shape[2])  # Ahora (window_size, 2)
 
     # Entrenar el modelo ajustado
     lstm_model = train_model(X_train_adjusted, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate)
@@ -294,14 +294,18 @@ def setup_x_api():
     Configura la API de X usando los Secrets de Streamlit.
     """
     secrets = st.secrets["x_api"]
-    client = tweepy.Client(
-        bearer_token=secrets.get("bearer_token", ""),
-        consumer_key=secrets.get("api_key", ""),
-        consumer_secret=secrets.get("api_secret", ""),
-        access_token=secrets.get("access_token", ""),
-        access_token_secret=secrets.get("access_token_secret", "")
-    )
-    return client
+    try:
+        client = tweepy.Client(
+            bearer_token=secrets.get("bearer_token", ""),
+            consumer_key=secrets.get("api_key", ""),
+            consumer_secret=secrets.get("api_secret", ""),
+            access_token=secrets.get("access_token", ""),
+            access_token_secret=secrets.get("access_token_secret", "")
+        )
+        return client
+    except Exception as e:
+        st.error(f"Error configurando la API de X: {e}")
+        return None
 
 def is_fake_news(tweet_text):
     """
@@ -316,6 +320,8 @@ def get_crypto_sentiment(hashtag, max_tweets=10):  # Limitado a 10 por el plan g
     Filtra por interacciones y excluye posibles fake news.
     """
     client = setup_x_api()
+    if client is None:
+        return 50.0  # Valor neutral en caso de error de autenticación
     analyzer = SentimentIntensityAnalyzer()
     tweets = []
     try:
@@ -342,9 +348,12 @@ def get_crypto_sentiment(hashtag, max_tweets=10):  # Limitado a 10 por el plan g
         scores = [analyzer.polarity_scores(tweet)["compound"] for tweet in tweets]
         avg_sentiment = np.mean(scores) * 50 + 50  # Normalizar a 0-100 (bearish a bullish)
         return max(0, min(100, avg_sentiment))  # Asegurar que esté entre 0 y 100
-    except Exception as e:
-        st.error(f"Error al obtener tweets para {hashtag}: {e}")
+    except tweepy.TweepyException as e:
+        st.error(f"Error de API de X para {hashtag}: {e} (Código {e.response.status_code if e.response else 'N/A'})")
         return 50.0  # Valor neutral en caso de error
+    except Exception as e:
+        st.error(f"Error inesperado al obtener tweets para {hashtag}: {e}")
+        return 50.0
 
 def get_market_crypto_sentiment(max_tweets=30):  # Limitado por el plan gratuito
     """
@@ -352,6 +361,8 @@ def get_market_crypto_sentiment(max_tweets=30):  # Limitado por el plan gratuito
     Filtra por interacciones y excluye posibles fake news.
     """
     client = setup_x_api()
+    if client is None:
+        return 50.0  # Valor neutral en caso de error de autenticación
     analyzer = SentimentIntensityAnalyzer()
     market_hashtags = ["#Crypto", "#Cryptocurrency", "#Blockchain"]
     all_tweets = []
@@ -377,8 +388,11 @@ def get_market_crypto_sentiment(max_tweets=30):  # Limitado por el plan gratuito
         scores = [analyzer.polarity_scores(tweet)["compound"] for tweet in all_tweets]
         avg_sentiment = np.mean(scores) * 50 + 50  # Normalizar a 0-100
         return max(0, min(100, avg_sentiment))
+    except tweepy.TweepyException as e:
+        st.error(f"Error de API de X para mercado crypto: {e} (Código {e.response.status_code if e.response else 'N/A'})")
+        return 50.0
     except Exception as e:
-        st.error(f"Error al obtener sentimiento del mercado crypto: {e}")
+        st.error(f"Error inesperado al obtener sentimiento del mercado crypto: {e}")
         return 50.0
 
 ##############################################
@@ -512,33 +526,38 @@ def main_app():
         
         # Mostrar tweets más relevantes (ordenados por interacciones, sin fake news)
         client = setup_x_api()
-        hashtag = crypto_hashtags[st.session_state["crypto_name"]]
-        try:
-            response = client.search_recent_tweets(
-                query=f"{hashtag} -is:retweet lang:en",
-                max_results=10,  # Límite gratuito
-                tweet_fields=["public_metrics", "created_at", "text", "context_annotations"],
-                expansions=["author_id"]
-            )
-            relevant_tweets = []
-            for tweet in response.data or []:
-                if tweet:
-                    metrics = tweet.public_metrics
-                    interactions = metrics.get("like_count", 0) + metrics.get("retweet_count", 0) + metrics.get("reply_count", 0)
-                    if interactions > 5 and not is_fake_news(tweet.text):
-                        if any(acc.lower() in tweet.text.lower() for acc in trusted_accounts) or \
-                           any("News" in str(ann) or "Verified" in str(ann) for ann in tweet.context_annotations or []):
-                            relevant_tweets.append({
-                                "texto": tweet.text,
-                                "interacciones": interactions,
-                                "fecha": tweet.created_at
-                            })
-            relevant_tweets = sorted(relevant_tweets, key=lambda x: x["interacciones"], reverse=True)[:5]
-            st.write("Tweets más relevantes (por interacciones, sin fake news):")
-            for tweet in relevant_tweets:
-                st.write(f"- **{tweet['texto']}** (Interacciones: {tweet['interacciones']}, Fecha: {tweet['fecha']})")
-        except Exception as e:
-            st.error(f"Error al obtener tweets relevantes: {e}")
+        if client:
+            hashtag = crypto_hashtags[st.session_state["crypto_name"]]
+            try:
+                response = client.search_recent_tweets(
+                    query=f"{hashtag} -is:retweet lang:en",
+                    max_results=10,  # Límite gratuito
+                    tweet_fields=["public_metrics", "created_at", "text", "context_annotations"],
+                    expansions=["author_id"]
+                )
+                relevant_tweets = []
+                for tweet in response.data or []:
+                    if tweet:
+                        metrics = tweet.public_metrics
+                        interactions = metrics.get("like_count", 0) + metrics.get("retweet_count", 0) + metrics.get("reply_count", 0)
+                        if interactions > 5 and not is_fake_news(tweet.text):
+                            if any(acc.lower() in tweet.text.lower() for acc in trusted_accounts) or \
+                               any("News" in str(ann) or "Verified" in str(ann) for ann in tweet.context_annotations or []):
+                                relevant_tweets.append({
+                                    "texto": tweet.text,
+                                    "interacciones": interactions,
+                                    "fecha": tweet.created_at
+                                })
+                relevant_tweets = sorted(relevant_tweets, key=lambda x: x["interacciones"], reverse=True)[:5]
+                st.write("Tweets más relevantes (por interacciones, sin fake news):")
+                for tweet in relevant_tweets:
+                    st.write(f"- **{tweet['texto']}** (Interacciones: {tweet['interacciones']}, Fecha: {tweet['fecha']})")
+            except tweepy.TweepyException as e:
+                st.error(f"Error de API de X para tweets relevantes: {e} (Código {e.response.status_code if e.response else 'N/A'})")
+            except Exception as e:
+                st.error(f"Error inesperado al obtener tweets relevantes: {e}")
+        else:
+            st.error("No se pudo configurar la API de X. Verifica las claves en los Secrets de Streamlit.")
 
         # Sentimiento del mercado crypto
         market_sentiment = get_market_crypto_sentiment(max_tweets=30)
