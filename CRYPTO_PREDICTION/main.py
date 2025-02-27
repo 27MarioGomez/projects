@@ -17,17 +17,11 @@ from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
 
-###############################################################
-# 1. Funciones de apoyo y diccionarios
-###############################################################
-
+# Función para calcular MAPE evitando división por cero
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """
-    Calcula el MAPE evitando divisiones por cero.
-    """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario para CoinCap con IDs. Se ha cambiado "XRP" por "Ripple (XRP)"
+# Diccionario con IDs de criptomonedas para CoinCap
 coincap_ids = {
     "Bitcoin (BTC)":       "bitcoin",
     "Ethereum (ETH)":      "ethereum",
@@ -43,37 +37,28 @@ coincap_ids = {
     "Stellar (XLM)":       "stellar"
 }
 
-###############################################################
-# 2. Función para descargar datos desde CoinCap (intervalo diario fijo)
-###############################################################
+# Función para descargar datos desde CoinCap con intervalo diario fijo
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
-    """
-    Descarga el histórico de precios desde CoinCap a intervalo diario (d1).
-    Si no se proporcionan start_ms y end_ms, se descarga todo el histórico.
-    Devuelve un DataFrame con las columnas 'ds' y 'close_price' o None si hay error.
-    """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
         url += f"&start={start_ms}&end={end_ms}"
-
     headers = {"User-Agent": "Mozilla/5.0"}
     for attempt in range(max_retries):
         resp = requests.get(url, headers=headers)
         if resp.status_code == 200:
             data = resp.json()
             if "data" not in data:
-                st.warning("CoinCap: Datos no disponibles (falta 'data').")
+                st.warning("CoinCap: Datos no disponibles ('data' faltante).")
                 return None
             df = pd.DataFrame(data["data"])
             if df.empty:
                 st.info("CoinCap devolvió datos vacíos. Reajusta el rango de fechas.")
                 return None
             if "time" not in df.columns or "priceUsd" not in df.columns:
-                st.warning("CoinCap: Columnas 'time' o 'priceUsd' no encontradas en la respuesta.")
+                st.warning("CoinCap: Columnas 'time' o 'priceUsd' no encontradas.")
                 st.write(df.head())
                 return None
-
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
             df = df[["ds", "close_price"]]
@@ -91,16 +76,11 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
         else:
             st.info(f"CoinCap: status code {resp.status_code}. Revisa los parámetros o prueba otro rango.")
             return None
-    st.info("CoinCap: Se alcanzó el número máximo de reintentos sin éxito.")
+    st.info("CoinCap: Número máximo de reintentos alcanzado.")
     return None
 
-###############################################################
-# 3. Funciones para indicadores técnicos (opcional)
-###############################################################
+# Función para añadir indicadores técnicos (RSI, MACD, Bollinger Bands)
 def add_indicators(df):
-    """
-    Calcula RSI, MACD y Bollinger Bands con pandas_ta y rellena huecos.
-    """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
     bbands_df = ta.bbands(df["close_price"], length=20, std=2)
@@ -111,14 +91,8 @@ def add_indicators(df):
 def add_all_indicators(df):
     return add_indicators(df)
 
-###############################################################
-# 4. Creación de secuencias para LSTM
-###############################################################
+# Función para crear secuencias a partir de una serie escalada
 def create_sequences(data, window_size=30):
-    """
-    Genera secuencias de longitud 'window_size' a partir de la serie escalada 'data'.
-    Devuelve (X, y) como np.array.
-    """
     if len(data) <= window_size:
         st.warning(f"No hay suficientes datos para una ventana de {window_size} días. Prueba otro rango.")
         return None, None
@@ -128,16 +102,8 @@ def create_sequences(data, window_size=30):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
-###############################################################
-# 5. Construcción del modelo LSTM (Conv1D + Bidirectional LSTM)
-###############################################################
+# Construcción del modelo LSTM: Conv1D + 3 capas Bidirectional LSTM con Dropout y Dense final
 def build_lstm_model(input_shape, learning_rate=0.001):
-    """
-    Construye un modelo secuencial con:
-    - 1D Conv
-    - 3 capas Bidirectional LSTM con Dropout
-    - Capa Dense final para regresión.
-    """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
     model.add(Bidirectional(LSTM(64, return_sequences=True)))
@@ -151,9 +117,7 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
-###############################################################
-# 6. Entrenamiento y predicción con LSTM
-###############################################################
+# Función para entrenar el modelo LSTM y hacer predicciones (test y futuro)
 def train_and_predict(
     coin_id,
     use_custom_range,
@@ -167,10 +131,6 @@ def train_and_predict(
     batch_size=32,
     learning_rate=0.001
 ):
-    """
-    Descarga datos de CoinCap (diario) con rango si se especifica (o todo el histórico).
-    Aplica indicadores si se desea, prepara secuencias para LSTM, entrena y predice futuro iterativamente.
-    """
     if use_custom_range:
         df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     else:
@@ -229,7 +189,6 @@ def train_and_predict(
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
-    # Predicción futura iterativa
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -250,14 +209,9 @@ def train_and_predict(
     return df_prices, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ###############################################################
-# 7. Lógica principal de la app (main_app)
+# 7. Función principal de la app
 ###############################################################
 def main_app():
-    """
-    Interfaz principal de Streamlit para predecir precios de criptomonedas usando
-    datos de CoinCap (diario) con opción de rango de fechas personalizado o todo el histórico.
-    Se incluyen parámetros de LSTM, indicadores técnicos y opción para ver estadísticas descriptivas.
-    """
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
     st.markdown("**Fuente de Datos:** CoinCap")
@@ -272,8 +226,8 @@ def main_app():
     )
     coin_id = coincap_ids[crypto_name]
 
-    # Opción de rango de fechas
-    st.sidebar.subheader("Rango de Fechas (Diario)")
+    # Opción para rango de fechas
+    st.sidebar.subheader("Rango de Fechas")
     use_custom_range = st.sidebar.checkbox(
         "Habilitar rango de fechas",
         value=True,
@@ -290,7 +244,7 @@ def main_app():
         start_ms = None
         end_ms = None
 
-    # Parámetros de Predicción
+    # Parámetros de predicción
     st.sidebar.subheader("Parámetros de Predicción")
     horizon = st.sidebar.slider(
         "Días a predecir:",
@@ -307,10 +261,10 @@ def main_app():
     show_stats = st.sidebar.checkbox(
         "Ver estadísticas descriptivas",
         value=False,
-        help="Muestra un resumen (mín, máx, media, etc.) del histórico de precios."
+        help="Muestra un resumen estadístico del histórico de precios."
     )
 
-    # Escenario del modelo (hiperparámetros)
+    # Escenario del modelo
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox(
         "Elige un escenario:",
@@ -330,11 +284,12 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Descargamos datos para mostrar el gráfico histórico
+    # Descarga y visualización del gráfico histórico
     df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
-        df_chart["ds_str"] = df_chart["ds"].dt.strftime("%Y-%m-%d")
+        # Formateo de fecha en estilo DD/MM/YYYY
+        df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
         fig_hist = px.line(
             df_chart, x="ds_str", y="close_price",
             title=f"Histórico de {crypto_name}",
@@ -352,7 +307,7 @@ def main_app():
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
-    # Pestañas para Entrenamiento/Test y Predicción
+    # Pestañas: Entrenamiento/Test y Predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
@@ -378,6 +333,7 @@ def main_app():
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
+
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
@@ -401,8 +357,7 @@ def main_app():
                 fig_test.update_yaxes(tickformat=",.2f")
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
-                st.info("No se pudo entrenar el modelo con los parámetros seleccionados. Revisa los avisos arriba.")
-
+                st.info("No se pudo entrenar el modelo con los parámetros seleccionados. Revisa los avisos.")
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_name}")
         if 'result' in locals() and result is not None:
