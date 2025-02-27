@@ -8,7 +8,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
-from datetime import datetime, date
+from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
@@ -47,9 +47,9 @@ coincap_ids = {
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
-    se descarga el rango indicado; de lo contrario, se descarga todo el histórico.
-    Retorna un DataFrame con las columnas 'ds', 'close_price' y 'volume'.
+    Descarga datos de CoinCap en intervalo diario (d1). Si se definen start_ms y end_ms,
+    se descarga el rango indicado; si no, se descarga todo el histórico.
+    Retorna un DataFrame con columnas: 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -113,7 +113,8 @@ def create_sequences(data, window_size=30):
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Construye un modelo secuencial que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Se fuerza la construcción del modelo para evitar problemas de name_scope.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -126,7 +127,7 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.add(Dense(1))
     opt = Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss="mean_squared_error")
-    # Forzamos la construcción del modelo para evitar problemas de name_scope
+    # Forzar la construcción con la forma de entrada para evitar errores de name_scope
     model.build((None, input_shape[0], input_shape[1]))
     return model
 
@@ -147,23 +148,21 @@ def train_and_predict(
     learning_rate=0.001
 ):
     """
-    Descarga datos de CoinCap, entrena un modelo LSTM usando 'close_price' y realiza
-    predicciones en el conjunto de test y a futuro. Además, ajusta la predicción futura
-    en función del sentimiento obtenido de X.
+    Descarga datos de CoinCap, entrena un modelo LSTM usando 'close_price'
+    y realiza predicciones en el conjunto de test y a futuro.
+    Se ajusta el precio futuro con análisis de sentimiento de X.
     """
-    temp_df = load_coincap_data(coin_id, start_ms, end_ms)
-    if temp_df is None or temp_df.empty:
+    df = load_coincap_data(coin_id, start_ms, end_ms)
+    if df is None or df.empty:
         st.warning("No se pudieron descargar datos suficientes. Reajusta el rango de fechas.")
         return None
-    df = temp_df.copy()
 
-    features = ["close_price"]
-    if "close_price" not in features:
-        st.warning("No se encontró 'close_price' para el entrenamiento.")
+    if "close_price" not in df.columns:
+        st.warning("No se encontró 'close_price' en los datos descargados.")
         return None
 
-    df_model = df[["ds"] + features].copy()
-    data_for_model = df_model[features].values
+    df_model = df[["ds", "close_price"]].copy()
+    data_for_model = df_model[["close_price"]].values
 
     scaler_features = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_features.fit_transform(data_for_model)
@@ -188,6 +187,7 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+    # Se evita limpiar la sesión para no provocar errores internos
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
@@ -212,6 +212,7 @@ def train_and_predict(
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
+
     for _ in range(horizon_days):
         future_pred = lstm_model.predict(current_input)[0][0]
         future_preds_scaled.append(future_pred)
@@ -223,29 +224,29 @@ def train_and_predict(
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Incorporar análisis de sentimiento para ajustar la predicción futura
+    # Análisis de sentimiento en X para ajustar ligeramente la predicción futura
     coin_sentiment, _ = analyze_twitter_sentiment(crypto_name, max_tweets=50)
     industry_sentiment, _ = analyze_twitter_sentiment("crypto", max_tweets=50)
     if coin_sentiment is not None and industry_sentiment is not None:
         total_sentiment = (coin_sentiment + industry_sentiment) / 2.0
-        sentiment_factor = 0.05  # Factor de influencia
+        sentiment_factor = 0.05  # Factor de ajuste (modificar si se desea)
         future_preds = future_preds * (1 + sentiment_factor * total_sentiment)
 
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Análisis de sentimiento en X
+# Análisis de sentimiento en X (Twitter)
 ##############################################
 def analyze_twitter_sentiment(keyword, max_tweets=50):
     """
-    Extrae hasta max_tweets tweets relacionados con la keyword y calcula
-    el sentimiento promedio utilizando VaderSentiment.
-    Se fuerza el uso de x.com para la búsqueda y se consideran solo tweets con al menos 5 likes.
+    Extrae hasta max_tweets tweets relacionados con la keyword usando snscrape
+    y calcula el sentimiento promedio usando VaderSentiment.
+    Se fuerza la búsqueda en x.com.
     """
-    # Forzar uso de x.com
+    # Forzar el uso de x.com como base para la búsqueda
     sntwitter.TWITTER_BASE_URL = "https://x.com"
     tweets = []
-    threshold = 5
+    threshold = 5  # Solo se consideran tweets con al menos 5 likes
     search_url = f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query"
     for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url).get_items()):
         try:
@@ -274,6 +275,7 @@ def main_app():
     st.markdown("**Fuente de Datos:** CoinCap")
 
     st.sidebar.header("Configuración de la predicción")
+
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
@@ -299,7 +301,8 @@ def main_app():
         end_ms = None
 
     st.sidebar.subheader("Parámetros de Predicción")
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
+                                help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
 
@@ -439,7 +442,7 @@ def main_app():
 
     with tabs[2]:
         st.header("Sentimiento en X")
-        st.markdown("Analizando tweets recientes sobre la criptomoneda y la industria cripto...")
+        st.markdown("Analizando tweets recientes sobre la criptomoneda y la industria...")
         try:
             coin_keyword = crypto_name.split(" ")[0]
             tweets_coin = []
@@ -455,6 +458,7 @@ def main_app():
                     tweets_coin.append(tweet.content)
                 if i >= max_tweets:
                     break
+
             tweets_industry = []
             search_url_industry = "https://x.com/search?f=live&lang=en&q=crypto&src=typed_query"
             for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url_industry).get_items()):
@@ -465,6 +469,7 @@ def main_app():
                     tweets_industry.append(tweet.content)
                 if i >= max_tweets:
                     break
+
             analyzer = SentimentIntensityAnalyzer()
             coin_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_coin if t]
             industry_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_industry if t]
