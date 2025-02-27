@@ -1,5 +1,5 @@
 #########################
-# main.py (actualizado con mejoras de LunarCrush)
+# main.py (corregido)
 #########################
 
 import streamlit as st
@@ -125,7 +125,14 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                     return None
                 df["ds"] = pd.to_datetime(df["time"], unit="ms", errors="coerce")
                 df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-                df["volume"] = pd.to_numeric(df.get("volumeUsd", 0), errors="coerce").fillna(0.0)
+                
+                # Manejar 'volumeUsd' de manera segura
+                if "volumeUsd" in df.columns:
+                    df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce")
+                else:
+                    df["volume"] = pd.Series([0.0] * len(df), index=df.index)  # Crear Series con ceros
+                df["volume"] = df["volume"].fillna(0.0)  # Rellenar NaN con 0.0
+                
                 df = df[["ds", "close_price", "volume"]].dropna(subset=["ds", "close_price"])
                 df.sort_values(by="ds", inplace=True)
                 df.reset_index(drop=True, inplace=True)
@@ -427,7 +434,7 @@ def train_and_predict_with_sentiment(
     return df, test_preds, y_test_real, future_preds, rmse, mape, combined_sentiment, lunar_metrics
 
 ##############################################
-# Análisis de sentimiento usando X API (sin cambios)
+# Análisis de sentimiento usando X API
 ##############################################
 def setup_x_api():
     """Configura la API de X con el bearer_token desde st.secrets."""
