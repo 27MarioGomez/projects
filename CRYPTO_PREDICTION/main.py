@@ -20,7 +20,7 @@ import os
 import tweepy
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-# Configurar certificados SSL para requests y tweepy
+# Configurar certificados SSL para requests y tweepy, asegurando seguridad en conexiones
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 os.environ["SSL_CERT_FILE"] = certifi.where()
 
@@ -30,11 +30,19 @@ os.environ["SSL_CERT_FILE"] = certifi.where()
 
 def robust_mape(y_true, y_pred, eps=1e-9):
     """
-    Calcula el MAPE evitando divisiones por cero.
+    Calcula el Mean Absolute Percentage Error (MAPE) evitando divisiones por cero.
+    
+    Args:
+        y_true (np.ndarray): Valores reales.
+        y_pred (np.ndarray): Valores predichos.
+        eps (float): Pequeño valor para evitar divisiones por cero.
+    
+    Returns:
+        float: MAPE en porcentaje.
     """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario con IDs de criptomonedas para CoinCap y hashtags para X
+# Diccionarios con IDs de criptomonedas para CoinCap y hashtags para X
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -63,20 +71,29 @@ crypto_hashtags = {
     "TRON (TRX)": "#TRON",
     "Stellar (XLM)": "#Stellar"
 }
-trusted_accounts = ["@CoinMarketCap", "@CoinDesk", "@Binance", "@Krakenfx"]  # Ejemplo de cuentas confiables
+trusted_accounts = ["@CoinMarketCap", "@CoinDesk", "@Binance", "@Krakenfx"]  # Cuentas confiables en el mercado crypto
 
 ##############################################
 # Descarga de datos desde CoinCap (intervalo diario)
 ##############################################
-@st.cache_data
+@st.cache_data  # Cache para optimizar rendimiento en Streamlit
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap con intervalo diario.
+    Descarga datos históricos diarios de precios y volumen de una criptomoneda desde CoinCap.
+    
+    Args:
+        coin_id (str): ID de la criptomoneda en CoinCap.
+        start_ms (int, optional): Timestamp de inicio en milisegundos.
+        end_ms (int, optional): Timestamp de fin en milisegundos.
+        max_retries (int): Número máximo de reintentos en caso de fallo.
+    
+    Returns:
+        pd.DataFrame: DataFrame con columnas 'ds', 'close_price', y 'volume', o None si falla.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
         url += f"&start={start_ms}&end={end_ms}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0"}  # Usar User-Agent para cumplir con políticas de CoinCap
     for attempt in range(max_retries):
         try:
             resp = requests.get(url, headers=headers, verify=certifi.where(), timeout=10)
@@ -94,10 +111,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                     return None
                 df["ds"] = pd.to_datetime(df["time"], unit="ms")
                 df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-                if "volumeUsd" in df.columns:
-                    df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce").fillna(0)
-                else:
-                    df["volume"] = 0.0
+                df["volume"] = pd.to_numeric(df.get("volumeUsd", 0), errors="coerce").fillna(0)
                 df = df[["ds", "close_price", "volume"]].dropna(subset=["ds", "close_price"])
                 df.sort_values(by="ds", inplace=True)
                 df.reset_index(drop=True, inplace=True)
@@ -123,7 +137,14 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
 ##############################################
 def create_sequences(data, window_size=30):
     """
-    Crea secuencias de tamaño 'window_size' a partir de 'data'.
+    Crea secuencias temporales de tamaño 'window_size' a partir de datos de precios.
+    
+    Args:
+        data (np.ndarray): Array con los datos de precios (una sola característica por defecto).
+        window_size (int): Tamaño de la ventana de tiempo para las secuencias.
+    
+    Returns:
+        tuple: (X, y) con secuencias de entrada y valores objetivo, o (None, None) si hay insuficientes datos.
     """
     if len(data) <= window_size:
         st.warning(f"No hay datos suficientes para una ventana de {window_size} días.")
@@ -135,21 +156,30 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 ##############################################
-# Modelo LSTM: Conv1D + Bidirectional LSTM ajustado para sentimiento
+# Modelo LSTM: Conv1D + Bidirectional LSTM ajustado para precio + sentimiento
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina Conv1D y Bidirectional LSTM, ajustado para precio + sentimiento.
+    Construye un modelo secuencial que combina Conv1D y Bidirectional LSTM, ajustado para manejar
+    precio y sentimiento como características (2 dimensiones en axis -1).
+    
+    Args:
+        input_shape (tuple): Forma de entrada (window_size, 2) para precio + sentimiento.
+        learning_rate (float): Tasa de aprendizaje para el optimizador Adam.
+    
+    Returns:
+        Sequential: Modelo Keras compilado.
     """
     model = Sequential()
-    model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))  # Ahora input_shape=(window_size, 2)
+    # Ajustar input_shape para manejar 2 características (precio + sentimiento)
+    model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
     model.add(Bidirectional(LSTM(64, return_sequences=True)))
     model.add(Dropout(0.3, name="dropout_1"))
     model.add(Bidirectional(LSTM(64, return_sequences=True)))
     model.add(Dropout(0.3, name="dropout_2"))
     model.add(Bidirectional(LSTM(64, return_sequences=False)))
     model.add(Dropout(0.3, name="dropout_3"))
-    model.add(Dense(1))  # Solo predice el precio, el sentimiento es una característica adicional
+    model.add(Dense(1))  # Salida: predicción del precio
     opt = Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
@@ -159,8 +189,22 @@ def build_lstm_model(input_shape, learning_rate=0.001):
 ##############################################
 def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate):
     """
-    Entrena el modelo LSTM de forma aislada para evitar conflictos.
+    Entrena el modelo LSTM de forma aislada, limpiando el estado global para evitar conflictos en Streamlit.
+    
+    Args:
+        X_train (np.ndarray): Datos de entrenamiento ajustados (precio + sentimiento).
+        y_train (np.ndarray): Valores objetivo de entrenamiento.
+        X_val (np.ndarray): Datos de validación ajustados.
+        y_val (np.ndarray): Valores objetivo de validación.
+        input_shape (tuple): Forma de entrada esperada por el modelo.
+        epochs (int): Número de épocas de entrenamiento.
+        batch_size (int): Tamaño del batch.
+        learning_rate (float): Tasa de aprendizaje.
+    
+    Returns:
+        model: Modelo LSTM entrenado.
     """
+    # Limpiar la sesión de Keras para evitar conflictos entre ejecuciones en Streamlit
     tf.keras.backend.clear_session()
 
     model = build_lstm_model(input_shape, learning_rate=learning_rate)
@@ -178,7 +222,14 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
 ##############################################
 def get_dynamic_params(df, horizon_days):
     """
-    Calcula hiperparámetros dinámicos basados en las características de los datos.
+    Calcula hiperparámetros dinámicos basados en características del dataset, como volatilidad y tamaño.
+    
+    Args:
+        df (pd.DataFrame): DataFrame con datos históricos de precios.
+        horizon_days (int): Días a predecir.
+    
+    Returns:
+        tuple: (window_size, epochs, batch_size, learning_rate) ajustados dinámicamente.
     """
     data_len = len(df)
     volatility = df["close_price"].pct_change().std()
@@ -199,8 +250,19 @@ def train_and_predict_with_sentiment(
 ):
     """
     Descarga datos de CoinCap, entrena un modelo LSTM ajustado por sentimiento y realiza predicciones.
+    
+    Args:
+        coin_id (str): ID de la criptomoneda en CoinCap.
+        use_custom_range (bool): Indica si se usa un rango de fechas personalizado.
+        start_ms (int): Timestamp de inicio en milisegundos.
+        end_ms (int): Timestamp de fin en milisegundos.
+        horizon_days (int): Días a predecir en el futuro.
+        test_size (float): Proporción de datos para el conjunto de test.
+    
+    Returns:
+        tuple: (df, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor) o None si falla.
     """
-    # Cargar datos de precios
+    # Cargar datos de precios desde CoinCap
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
         st.warning("No se pudieron descargar datos suficientes de CoinCap.")
@@ -212,7 +274,7 @@ def train_and_predict_with_sentiment(
         st.warning("No se encontró 'close_price' en los datos.")
         return None
 
-    # Obtener sentimiento para la criptomoneda y el mercado crypto
+    # Obtener sentimientos para la criptomoneda y el mercado crypto
     crypto_sentiment = get_crypto_sentiment(crypto_hashtags[st.session_state["crypto_name"]])
     market_sentiment = get_market_crypto_sentiment()
     
@@ -228,11 +290,14 @@ def train_and_predict_with_sentiment(
     st.info(f"Hiperparámetros ajustados: window_size={window_size}, epochs={epochs}, "
             f"batch_size={batch_size}, learning_rate={learning_rate}")
 
+    # Preparar datos para el modelo
     data_for_model = df[["close_price"]].values
 
+    # Escalar los datos al rango [0, 1]
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_target.fit_transform(data_for_model)
 
+    # Dividir en conjuntos de entrenamiento y test
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
         st.warning("Datos insuficientes para entrenar. Reajusta parámetros.")
@@ -247,23 +312,25 @@ def train_and_predict_with_sentiment(
     if X_test is None:
         return None
 
+    # Dividir en entrenamiento y validación
     val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Ajustar los datos de entrenamiento con el factor de sentimiento (ahora con 2 características)
+    # Ajustar los datos de entrenamiento con el factor de sentimiento (precio + sentimiento, 2 características)
     X_train_adjusted = np.concatenate([X_train, np.full((X_train.shape[0], X_train.shape[1], 1), sentiment_factor)], axis=-1)
     X_test_adjusted = np.concatenate([X_test, np.full((X_test.shape[0], X_test.shape[1], 1), sentiment_factor)], axis=-1)
-    input_shape = (X_train_adjusted.shape[1], X_train_adjusted.shape[2])  # Ahora (window_size, 2)
+    input_shape = (X_train_adjusted.shape[1], X_train_adjusted.shape[2])  # (window_size, 2)
 
-    # Entrenar el modelo ajustado
+    # Entrenar el modelo ajustado para manejar precio + sentimiento
     lstm_model = train_model(X_train_adjusted, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate)
 
-    # Predicciones ajustadas
+    # Predicciones ajustadas en el conjunto de test
     test_preds_scaled = lstm_model.predict(X_test_adjusted)
     test_preds = scaler_target.inverse_transform(test_preds_scaled)
     y_test_real = scaler_target.inverse_transform(y_test.reshape(-1, 1))
 
+    # Calcular métricas de error
     valid_mask = ~np.isnan(test_preds) & ~np.isnan(y_test_real)
     if np.sum(valid_mask) == 0:
         rmse, mape = np.nan, np.nan
@@ -287,91 +354,76 @@ def train_and_predict_with_sentiment(
     return df, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor
 
 ##############################################
-# Análisis de sentimiento usando X API
+# Análisis de sentimiento usando X API (plan gratuito)
 ##############################################
 def setup_x_api():
     """
-    Configura la API de X usando los Secrets de Streamlit.
+    Configura la API de X usando los Secrets de Streamlit, manejando errores de autenticación.
+    
+    Returns:
+        tweepy.Client: Cliente de Tweepy configurado, o None si falla.
     """
-    secrets = st.secrets["x_api"]
     try:
+        secrets = st.secrets["x_api"]
+        # Usar solo bearer_token para el plan gratuito, ignorando otras claves si no son necesarias
         client = tweepy.Client(
             bearer_token=secrets.get("bearer_token", ""),
-            consumer_key=secrets.get("api_key", ""),
-            consumer_secret=secrets.get("api_secret", ""),
-            access_token=secrets.get("access_token", ""),
-            access_token_secret=secrets.get("access_token_secret", "")
+            # Opcional, descomenta si necesitas autenticación completa:
+            # consumer_key=secrets.get("api_key", ""),
+            # consumer_secret=secrets.get("api_secret", ""),
+            # access_token=secrets.get("access_token", ""),
+            # access_token_secret=secrets.get("access_token_secret", "")
         )
+        # Verificar si el cliente funciona
+        client.get_me()  # Prueba rápida para validar autenticación
         return client
+    except tweepy.TweepyException as e:
+        st.error(f"Error de autenticación en la API de X: {e} (Código {e.response.status_code if e.response else 'N/A'})")
+        return None
     except Exception as e:
-        st.error(f"Error configurando la API de X: {e}")
+        st.error(f"Error inesperado configurando la API de X: {e}")
         return None
 
 def is_fake_news(tweet_text):
     """
-    Heurística simple para detectar posibles fake news.
+    Heurística simple para detectar posibles fake news en el texto de un tweet.
+    
+    Args:
+        tweet_text (str): Texto del tweet a evaluar.
+    
+    Returns:
+        bool: True si el texto podría ser fake news, False de lo contrario.
     """
     fake_keywords = ["fake", "scam", "hoax", "misinformation", "rumor", "false"]
     return any(keyword.lower() in tweet_text.lower() for keyword in fake_keywords)
 
-def get_crypto_sentiment(hashtag, max_tweets=10):  # Limitado a 10 por el plan gratuito
+def get_crypto_sentiment(hashtag, max_tweets=10, retries=3, delay=5):
     """
     Obtiene el sentimiento promedio de tweets relevantes para una criptomoneda usando X API.
-    Filtra por interacciones y excluye posibles fake news.
+    Filtra por interacciones y excluye posibles fake news, manejando errores 500 con reintentos.
+    
+    Args:
+        hashtag (str): Hashtag de la criptomoneda (ej. "#Bitcoin").
+        max_tweets (int): Máximo de tweets a recuperar (límite 10 por request en plan gratuito).
+        retries (int): Número de reintentos para errores 500.
+        delay (int): Segundos de espera entre reintentos.
+    
+    Returns:
+        float: Sentimiento promedio normalizado a 0-100 (bearish a bullish), o 50.0 si falla.
     """
     client = setup_x_api()
     if client is None:
-        return 50.0  # Valor neutral en caso de error de autenticación
+        return 50.0  # Valor neutral en caso de fallo de autenticación
     analyzer = SentimentIntensityAnalyzer()
     tweets = []
-    try:
-        # Buscar tweets recientes con el hashtag, excluyendo retweets
-        query = f"{hashtag} -is:retweet lang:en"
-        response = client.search_recent_tweets(
-            query=query,
-            max_results=max_tweets,
-            tweet_fields=["public_metrics", "created_at", "text", "context_annotations"],
-            expansions=["author_id"]
-        )
-        for tweet in response.data or []:
-            if tweet:
-                metrics = tweet.public_metrics
-                interactions = metrics.get("like_count", 0) + metrics.get("retweet_count", 0) + metrics.get("reply_count", 0)
-                # Filtrar por interacciones y excluir fake news
-                if interactions > 5 and not is_fake_news(tweet.text):
-                    # Priorizar tweets de cuentas confiables o con contexto "News" o "Verified"
-                    if any(acc.lower() in tweet.text.lower() for acc in trusted_accounts) or \
-                       any("News" in str(ann) or "Verified" in str(ann) for ann in tweet.context_annotations or []):
-                        tweets.append(tweet.text)
-        if not tweets:
-            return 50.0  # Valor neutral si no hay tweets
-        scores = [analyzer.polarity_scores(tweet)["compound"] for tweet in tweets]
-        avg_sentiment = np.mean(scores) * 50 + 50  # Normalizar a 0-100 (bearish a bullish)
-        return max(0, min(100, avg_sentiment))  # Asegurar que esté entre 0 y 100
-    except tweepy.TweepyException as e:
-        st.error(f"Error de API de X para {hashtag}: {e} (Código {e.response.status_code if e.response else 'N/A'})")
-        return 50.0  # Valor neutral en caso de error
-    except Exception as e:
-        st.error(f"Error inesperado al obtener tweets para {hashtag}: {e}")
-        return 50.0
-
-def get_market_crypto_sentiment(max_tweets=30):  # Limitado por el plan gratuito
-    """
-    Obtiene el sentimiento promedio del mercado crypto usando hashtags generales.
-    Filtra por interacciones y excluye posibles fake news.
-    """
-    client = setup_x_api()
-    if client is None:
-        return 50.0  # Valor neutral en caso de error de autenticación
-    analyzer = SentimentIntensityAnalyzer()
-    market_hashtags = ["#Crypto", "#Cryptocurrency", "#Blockchain"]
-    all_tweets = []
-    try:
-        for hashtag in market_hashtags:
+    
+    for attempt in range(retries):
+        try:
+            # Buscar tweets recientes con el hashtag, excluyendo retweets
             query = f"{hashtag} -is:retweet lang:en"
             response = client.search_recent_tweets(
                 query=query,
-                max_results=min(max_tweets // len(market_hashtags), 10),
+                max_results=max_tweets,
                 tweet_fields=["public_metrics", "created_at", "text", "context_annotations"],
                 expansions=["author_id"]
             )
@@ -379,26 +431,102 @@ def get_market_crypto_sentiment(max_tweets=30):  # Limitado por el plan gratuito
                 if tweet:
                     metrics = tweet.public_metrics
                     interactions = metrics.get("like_count", 0) + metrics.get("retweet_count", 0) + metrics.get("reply_count", 0)
+                    # Filtrar por interacciones y excluir fake news
                     if interactions > 5 and not is_fake_news(tweet.text):
+                        # Priorizar tweets de cuentas confiables o con contexto "News" o "Verified"
                         if any(acc.lower() in tweet.text.lower() for acc in trusted_accounts) or \
                            any("News" in str(ann) or "Verified" in str(ann) for ann in tweet.context_annotations or []):
-                            all_tweets.append(tweet.text)
-        if not all_tweets:
-            return 50.0  # Valor neutral si no hay tweets
-        scores = [analyzer.polarity_scores(tweet)["compound"] for tweet in all_tweets]
-        avg_sentiment = np.mean(scores) * 50 + 50  # Normalizar a 0-100
-        return max(0, min(100, avg_sentiment))
-    except tweepy.TweepyException as e:
-        st.error(f"Error de API de X para mercado crypto: {e} (Código {e.response.status_code if e.response else 'N/A'})")
-        return 50.0
-    except Exception as e:
-        st.error(f"Error inesperado al obtener sentimiento del mercado crypto: {e}")
-        return 50.0
+                            tweets.append(tweet.text)
+            if tweets:
+                break  # Salir si se obtuvieron tweets
+            elif attempt < retries - 1:
+                time.sleep(delay)  # Esperar antes de reintentar
+        except tweepy.TweepyException as e:
+            if e.response and e.response.status_code == 500:
+                if attempt < retries - 1:
+                    st.warning(f"Error 500 en API de X para {hashtag}, reintentando en {delay}s...")
+                    time.sleep(delay)
+                    continue
+            st.error(f"Error de API de X para {hashtag}: {e} (Código {e.response.status_code if e.response else 'N/A'})")
+            return 50.0
+        except Exception as e:
+            st.error(f"Error inesperado al obtener tweets para {hashtag}: {e}")
+            return 50.0
+    
+    if not tweets:
+        return 50.0  # Valor neutral si no hay tweets válidos
+    scores = [analyzer.polarity_scores(tweet)["compound"] for tweet in tweets]
+    avg_sentiment = np.mean(scores) * 50 + 50  # Normalizar a 0-100 (bearish a bullish)
+    return max(0, min(100, avg_sentiment))  # Asegurar que esté entre 0 y 100
+
+def get_market_crypto_sentiment(max_tweets=30, retries=3, delay=5):
+    """
+    Obtiene el sentimiento promedio del mercado crypto usando hashtags generales.
+    Filtra por interacciones y excluye posibles fake news, manejando errores 500 con reintentos.
+    
+    Args:
+        max_tweets (int): Máximo de tweets a recuperar (distribuido entre hashtags).
+        retries (int): Número de reintentos para errores 500.
+        delay (int): Segundos de espera entre reintentos.
+    
+    Returns:
+        float: Sentimiento promedio normalizado a 0-100, o 50.0 si falla.
+    """
+    client = setup_x_api()
+    if client is None:
+        return 50.0  # Valor neutral en caso de fallo de autenticación
+    analyzer = SentimentIntensityAnalyzer()
+    market_hashtags = ["#Crypto", "#Cryptocurrency", "#Blockchain"]
+    all_tweets = []
+    
+    for attempt in range(retries):
+        try:
+            for hashtag in market_hashtags:
+                query = f"{hashtag} -is:retweet lang:en"
+                response = client.search_recent_tweets(
+                    query=query,
+                    max_results=min(max_tweets // len(market_hashtags), 10),
+                    tweet_fields=["public_metrics", "created_at", "text", "context_annotations"],
+                    expansions=["author_id"]
+                )
+                for tweet in response.data or []:
+                    if tweet:
+                        metrics = tweet.public_metrics
+                        interactions = metrics.get("like_count", 0) + metrics.get("retweet_count", 0) + metrics.get("reply_count", 0)
+                        if interactions > 5 and not is_fake_news(tweet.text):
+                            if any(acc.lower() in tweet.text.lower() for acc in trusted_accounts) or \
+                               any("News" in str(ann) or "Verified" in str(ann) for ann in tweet.context_annotations or []):
+                                all_tweets.append(tweet.text)
+            if all_tweets:
+                break  # Salir si se obtuvieron tweets
+            elif attempt < retries - 1:
+                time.sleep(delay)  # Esperar antes de reintentar
+        except tweepy.TweepyException as e:
+            if e.response and e.response.status_code == 500:
+                if attempt < retries - 1:
+                    st.warning(f"Error 500 en API de X para mercado crypto, reintentando en {delay}s...")
+                    time.sleep(delay)
+                    continue
+            st.error(f"Error de API de X para mercado crypto: {e} (Código {e.response.status_code if e.response else 'N/A'})")
+            return 50.0
+        except Exception as e:
+            st.error(f"Error inesperado al obtener sentimiento del mercado crypto: {e}")
+            return 50.0
+    
+    if not all_tweets:
+        return 50.0  # Valor neutral si no hay tweets válidos
+    scores = [analyzer.polarity_scores(tweet)["compound"] for tweet in all_tweets]
+    avg_sentiment = np.mean(scores) * 50 + 50  # Normalizar a 0-100
+    return max(0, min(100, avg_sentiment))
 
 ##############################################
 # Función principal de la app
 ##############################################
 def main_app():
+    """
+    Interfaz principal de la aplicación en Streamlit para predicción de precios de criptomonedas
+    con análisis de sentimiento usando la API de X.
+    """
     st.set_page_config(page_title="Crypto Price Predictions with Sentiment 🔮", layout="wide")
     st.title("Crypto Price Predictions with Sentiment 🔮")
     st.markdown("**Fuente de Datos:** CoinCap y X API")
@@ -432,7 +560,7 @@ def main_app():
                                 help="Número de días a futuro a predecir.")
     st.sidebar.markdown("**Nota:** Los hiperparámetros (ventana, épocas, etc.) se ajustan automáticamente según los datos.")
 
-    # Cargar datos históricos
+    # Cargar datos históricos de CoinCap
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
@@ -531,7 +659,7 @@ def main_app():
             try:
                 response = client.search_recent_tweets(
                     query=f"{hashtag} -is:retweet lang:en",
-                    max_results=10,  # Límite gratuito
+                    max_results=10,  # Límite del plan gratuito
                     tweet_fields=["public_metrics", "created_at", "text", "context_annotations"],
                     expansions=["author_id"]
                 )
