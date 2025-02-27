@@ -15,7 +15,8 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
-import tensorflow.keras.backend as K
+import certifi
+import os
 
 ##############################################
 # Funciones de apoyo
@@ -58,7 +59,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
         url += f"&start={start_ms}&end={end_ms}"
     headers = {"User-Agent": "Mozilla/5.0"}
     for attempt in range(max_retries):
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, verify=certifi.where())
         if resp.status_code == 200:
             data = resp.json()
             if "data" not in data:
@@ -166,9 +167,8 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     """
     Entrena el modelo LSTM de forma aislada para evitar conflictos con el contexto global.
     """
-    # Inicializar explícitamente el name_scope_stack si no existe
-    if K.get_value(K.name_scope_stack) is None:
-        K.set_value(K.name_scope_stack, [])
+    # Limpiar la sesión de Keras para evitar conflictos entre ejecuciones
+    tf.keras.backend.clear_session()
 
     model = build_lstm_model(input_shape, learning_rate=learning_rate)
     model.fit(
@@ -274,6 +274,8 @@ def analyze_twitter_sentiment(crypto_name, max_tweets=50):
         import snscrape.modules.twitter as sntwitter
         from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
         sntwitter.TWITTER_BASE_URL = "https://x.com"
+        # Asegurar que requests use los certificados de certifi
+        os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
     except Exception as e:
         st.error(f"Error importando snscrape o vaderSentiment: {e}")
         return None, []
