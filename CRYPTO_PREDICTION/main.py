@@ -12,9 +12,10 @@ from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout, BatchNormalization
+from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
+import tensorflow.keras.backend as K
 import ssl
 import certifi  # Añadido para manejar certificados SSL
 
@@ -30,7 +31,7 @@ def robust_mape(y_true, y_pred, eps=1e-9):
 
 def calculate_technical_indicators(df):
     """
-    Calcula indicadores técnicos como medias móviles y RSI usando solo close_price.
+    Calcula indicadores técnicos como medias móviles (MA7, MA14) y RSI usando solo close_price.
     """
     df = df.copy()
     # Media móvil simple de 7 días
@@ -130,53 +131,51 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 ##############################################
-# Modelo LSTM mejorado: Conv1D + Bidirectional LSTM con regularización
+# Modelo LSTM: Conv1D + Bidirectional LSTM
 ##############################################
-def build_improved_lstm_model(input_shape, learning_rate=0.001):
+def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo mejorado con más regularización y características.
+    Construye un modelo secuencial que combina:
+      - Conv1D para extracción de características locales
+      - Tres capas Bidirectional LSTM con Dropout
+      - Capa Dense final para regresión
     """
     model = Sequential()
-    model.add(Conv1D(filters=64, kernel_size=3, activation="relu", input_shape=input_shape, padding="same"))
-    model.add(BatchNormalization())  # Añadir BatchNormalization para estabilizar
-    model.add(Bidirectional(LSTM(128, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(0.01))))
-    model.add(Dropout(0.4))  # Aumentar dropout para prevenir overfitting
-    model.add(Bidirectional(LSTM(128, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(0.01))))
-    model.add(Dropout(0.4))
-    model.add(Bidirectional(LSTM(64, return_sequences=False, kernel_regularizer=tf.keras.regularizers.l2(0.01))))
-    model.add(Dropout(0.4))
+    model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
+    model.add(Bidirectional(LSTM(64, return_sequences=True)))
+    model.add(Dropout(0.3))
+    model.add(Bidirectional(LSTM(64, return_sequences=True)))
+    model.add(Dropout(0.3))
+    model.add(Bidirectional(LSTM(64, return_sequences=False)))
+    model.add(Dropout(0.3))
     model.add(Dense(1))
     opt = Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
 ##############################################
-# Función aislada para entrenar el modelo mejorado
+# Función aislada para entrenar el modelo
 ##############################################
 def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate):
     """
-    Entrena el modelo LSTM mejorado de forma aislada para evitar conflictos con el contexto global.
+    Entrena el modelo LSTM de forma aislada para evitar conflictos con el contexto global.
     """
-    # Reiniciar completamente el grafo de TensorFlow para evitar conflictos y mantener estabilidad
-    tf.keras.backend.clear_session()
+    # Usar un enfoque minimalista: reiniciar TensorFlow y construir/entrenar el modelo directamente
+    tf.keras.backend.clear_session()  # Reiniciar el grafo para evitar conflictos
     
-    # Crear y entrenar el modelo directamente, sin manipular name_scope_stack manualmente
-    model = build_improved_lstm_model(input_shape, learning_rate=learning_rate)
-    try:
-        model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=1
-        )
-    except Exception as e:
-        st.error(f"Error al entrenar el modelo: {e}")
-        raise
+    # Crear y entrenar el modelo sin manipular name_scope_stack manualmente
+    model = build_lstm_model(input_shape, learning_rate=learning_rate)
+    model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=1
+    )
     return model
 
 ##############################################
-# Entrenamiento y predicción con LSTM mejorado
+# Entrenamiento y predicción con LSTM
 ##############################################
 def train_and_predict(
     coin_id,
@@ -184,14 +183,14 @@ def train_and_predict(
     start_ms,
     end_ms,
     horizon_days=30,
-    window_size=60,  # Aumentamos la ventana para capturar más patrones
+    window_size=30,
     test_size=0.2,
-    epochs=50,  # Más epochs para un mejor ajuste
+    epochs=10,
     batch_size=32,
-    learning_rate=0.0005  # Ajuste del learning rate para estabilidad
+    learning_rate=0.001
 ):
     """
-    Descarga datos de CoinCap, entrena un modelo LSTM mejorado y realiza predicciones.
+    Descarga datos de CoinCap, entrena un modelo LSTM y realiza predicciones en test y a futuro.
     """
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
@@ -228,7 +227,7 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Entrenar el modelo mejorado en una función aislada
+    # Entrenar el modelo en una función aislada
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate)
 
