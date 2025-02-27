@@ -323,26 +323,26 @@ def main_app():
     st.set_page_config(page_title="Crypto Price Predictions (LunarCrush) 🔮", layout="wide")
     st.title("Crypto Price Predictions (LunarCrush) 🔮")
     st.markdown("**Fuente de Datos:** CoinCap y LunarCrush")
-    
+
     st.session_state["crypto_name"] = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[st.session_state["crypto_name"]]
-    
-    st.sidebar.subheader("Rango de Fechas")
+
+    st.sidebar.subheader("Parámetros de Predicción ❓")
+    st.sidebar.markdown("Ajusta el rango de fechas y otros parámetros; los hiperparámetros se configuran automáticamente.")
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=True)
     default_start = datetime(2021, 1, 1)
     default_end = datetime.now()
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start)
         end_date = st.sidebar.date_input("Fecha de fin", default_end)
-        start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
-        end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
+        start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp()*1000)
+        end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp()*1000)
     else:
         start_ms, end_ms = None, None
-    
-    st.sidebar.subheader("Parámetros de Predicción")
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30)
+
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
     st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos.**")
-    
+
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
@@ -362,7 +362,7 @@ def main_app():
             }))
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
-    
+
     tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📰 Noticias"])
     
     with tabs[0]:
@@ -388,7 +388,8 @@ def main_app():
                 fig_test = go.Figure()
                 fig_test.add_trace(go.Scatter(x=test_dates, y=y_test_real.flatten(), mode="lines", name="Precio Real (Test)"))
                 fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(), mode="lines", name="Predicción (Test)"))
-                fig_test.update_layout(title=f"Comparación en Test: {symbol}", xaxis_title="Fecha", yaxis_title="Precio en USD")
+                fig_test.update_layout(title=f"Comparación en Test: {symbol}",
+                                       xaxis_title="Fecha", yaxis_title="Precio en USD")
                 fig_test.update_yaxes(tickformat=",.2f")
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
@@ -415,9 +416,12 @@ def main_app():
             st.info("Primero entrena el modelo para generar predicciones futuras.")
     
     with tabs[2]:
-        st.header("Noticias recientes de {symbol}")
+        # Título de la pestaña con mensaje de control de errores amigable
+        st.header("Noticias Recientes")
+        st.markdown("Si hay problemas para cargar las noticias, por favor inténtalo más tarde.")
         if 'result' in locals() and result is not None:
             symbol = result[-1]
+            st.subheader(f"Noticias recientes de {symbol}")
             news_items = get_lunarcrush_news(symbol, limit=5)
             if news_items:
                 for i, item in enumerate(news_items, start=1):
