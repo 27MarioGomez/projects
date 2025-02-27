@@ -76,7 +76,8 @@ trusted_accounts = ["@CoinMarketCap", "@CoinDesk", "@Binance", "@Krakenfx"]  # C
 ##############################################
 # Descarga de datos desde CoinCap (intervalo diario)
 ##############################################
-def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):  # Quité @st.cache_data para depuración
+@st.cache_data  # Cache para optimizar rendimiento en Streamlit
+def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
     Descarga datos históricos diarios de precios y volumen de una criptomoneda desde CoinCap.
     
@@ -128,9 +129,6 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):  # Qu
                 df.sort_values(by="ds", inplace=True)
                 df.reset_index(drop=True, inplace=True)
                 df = df[df["close_price"] > 0].copy()
-                
-                # Depuración de dimensiones
-                st.write(f"Dimensión de data_for_model antes de escalar: {df[['close_price']].values.shape}")
                 return df
             elif resp.status_code == 429:
                 st.warning(f"CoinCap: Error 429 en intento {attempt+1}. Esperando {15*(attempt+1)}s...")
@@ -148,16 +146,15 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):  # Qu
     return None
 
 ##############################################
-# Creación de secuencias para LSTM con múltiples características
+# Creación de secuencias para LSTM
 ##############################################
-def create_sequences(data, window_size=30, n_features=1):
+def create_sequences(data, window_size=30):
     """
-    Crea secuencias temporales de tamaño 'window_size' a partir de datos con múltiples características.
+    Crea secuencias temporales de tamaño 'window_size' a partir de datos de precios.
     
     Args:
-        data (np.ndarray): Array con los datos (n_samples, n_features).
+        data (np.ndarray): Array con los datos de precios (una sola característica por defecto).
         window_size (int): Tamaño de la ventana de tiempo para las secuencias.
-        n_features (int): Número de características en los datos (por defecto 1 para close_price).
     
     Returns:
         tuple: (X, y) con secuencias de entrada y valores objetivo, o (None, None) si hay insuficientes datos.
@@ -165,18 +162,11 @@ def create_sequences(data, window_size=30, n_features=1):
     if len(data) <= window_size:
         st.warning(f"No hay datos suficientes para una ventana de {window_size} días.")
         return None, None
-    
-    n_samples = len(data) - window_size
-    X = np.zeros((n_samples, window_size, n_features))
-    y = np.zeros((n_samples, n_features))
-    
-    for i in range(n_samples):
-        X[i] = data[i:i + window_size]
-        y[i] = data[i + window_size, 0]  # Usar la primera característica (precio) como objetivo
-    
-    st.write(f"Dimensión de X después de create_sequences: {X.shape}")  # Debería ser (n_samples, window_size, n_features)
-    st.write(f"Dimensión de y después de create_sequences: {y.shape}")  # Debería ser (n_samples, n_features)
-    return X, y
+    X, y = [], []
+    for i in range(window_size, len(data)):
+        X.append(data[i - window_size : i])
+        y.append(data[i, 0])
+    return np.array(X), np.array(y)
 
 ##############################################
 # Modelo LSTM: Conv1D + Bidirectional LSTM ajustado para precio + sentimiento
@@ -229,23 +219,9 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     
     Returns:
         model: Modelo LSTM entrenado.
-    
-    Notes:
-        Valida las dimensiones de los datos antes de entrenar para evitar ValueErrors.
     """
     # Limpiar la sesión de Keras para evitar conflictos entre ejecuciones en Streamlit
     tf.keras.backend.clear_session()
-
-    # Validar dimensiones antes de entrenar
-    assert X_train.shape[-1] == input_shape[1], f"Dimensión incorrecta de X_train: {X_train.shape[-1]} esperada {input_shape[1]}"
-    assert X_val.shape[-1] == input_shape[1], f"Dimensión incorrecta de X_val: {X_val.shape[-1]} esperada {input_shape[1]}"
-    assert y_train.shape[-1] == 1, f"Dimensión incorrecta de y_train: {y_train.shape[-1]} esperada 1"
-    assert y_val.shape[-1] == 1, f"Dimensión incorrecta de y_val: {y_val.shape[-1]} esperada 1"
-    
-    st.write(f"Dimensión de X_train antes de fit: {X_train.shape}")
-    st.write(f"Dimensión de y_train antes de fit: {y_train.shape}")
-    st.write(f"Dimensión de X_val antes de fit: {X_val.shape}")
-    st.write(f"Dimensión de y_val antes de fit: {y_val.shape}")
 
     model = build_lstm_model(input_shape, learning_rate=learning_rate)
     model.fit(
@@ -333,30 +309,25 @@ def train_and_predict_with_sentiment(
     st.info(f"Hiperparámetros ajustados: window_size={window_size}, epochs={epochs}, "
             f"batch_size={batch_size}, learning_rate={learning_rate}")
 
-    # Preparar datos para el modelo (precio + sentimiento como características)
-    data_for_model = df[["close_price"]].values  # Solo precio por ahora, pero ajustaremos para sentimiento
+    # Preparar datos para el modelo
+    data_for_model = df[["close_price"]].values
 
     # Escalar los datos al rango [0, 1]
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_target.fit_transform(data_for_model)
 
-    # Añadir sentimiento como característica adicional antes de crear secuencias
-    sentiment_array = np.full((len(scaled_data), 1), sentiment_factor)  # Añadir sentimiento como segunda característica
-    scaled_data_with_sentiment = np.concatenate([scaled_data, sentiment_array], axis=1)
-    st.write(f"Dimensión de scaled_data_with_sentiment: {scaled_data_with_sentiment.shape}")  # Debería ser (n_samples, 2)
-
     # Dividir en conjuntos de entrenamiento y test
-    split_index = int(len(scaled_data_with_sentiment) * (1 - test_size))
+    split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
         st.warning("Datos insuficientes para entrenar. Reajusta parámetros.")
         return None
 
-    train_data = scaled_data_with_sentiment[:split_index]
-    test_data = scaled_data_with_sentiment[split_index:]
-    X_train, y_train = create_sequences(train_data, window_size=window_size, n_features=2)
+    train_data = scaled_data[:split_index]
+    test_data = scaled_data[split_index:]
+    X_train, y_train = create_sequences(train_data, window_size=window_size)
     if X_train is None:
         return None
-    X_test, y_test = create_sequences(test_data, window_size=window_size, n_features=2)
+    X_test, y_test = create_sequences(test_data, window_size=window_size)
     if X_test is None:
         return None
 
@@ -365,18 +336,26 @@ def train_and_predict_with_sentiment(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Verificar dimensiones antes de entrenar
-    st.write(f"Dimensión de X_train antes de entrenar: {X_train.shape}")  # Debería ser (None, window_size, 2)
-    st.write(f"Dimensión de y_train antes de entrenar: {y_train.shape}")  # Debería ser (None, 2)
-    input_shape = (window_size, 2)  # Explicitar input_shape con 2 características
+    # Ajustar los datos de entrenamiento, validación y test con el factor de sentimiento
+    st.write(f"Dimensión de X_train antes de ajuste: {X_train.shape}")  # (None, window_size, 1)
+    X_train_adjusted = np.concatenate([X_train, np.full((X_train.shape[0], X_train.shape[1], 1), sentiment_factor)], axis=-1)
+    X_val_adjusted = np.concatenate([X_val, np.full((X_val.shape[0], X_val.shape[1], 1), sentiment_factor)], axis=-1)
+    X_test_adjusted = np.concatenate([X_test, np.full((X_test.shape[0], X_test.shape[1], 1), sentiment_factor)], axis=-1)
+
+    input_shape = (X_train_adjusted.shape[1], X_train_adjusted.shape[2])  # (window_size, 2)
+
+    st.write(f"Dimensión de X_train_adjusted después de ajuste: {X_train_adjusted.shape}")  # (None, window_size, 2)
+    if X_train_adjusted.shape[-1] != 2:
+        st.error(f"Dimensión inesperada de X_train_adjusted: {X_train_adjusted.shape}. Se esperaba (None, {window_size}, 2)")
+        return None
 
     # Entrenar el modelo ajustado para manejar precio + sentimiento
-    lstm_model = train_model(X_train, y_train[:, 0], X_val, y_val[:, 0], input_shape, epochs, batch_size, learning_rate)
+    lstm_model = train_model(X_train_adjusted, y_train, X_val_adjusted, y_val, input_shape, epochs, batch_size, learning_rate)
 
     # Predicciones ajustadas en el conjunto de test
-    test_preds_scaled = lstm_model.predict(X_test)
-    test_preds = scaler_target.inverse_transform(test_preds_scaled.reshape(-1, 1))
-    y_test_real = scaler_target.inverse_transform(y_test[:, 0].reshape(-1, 1))
+    test_preds_scaled = lstm_model.predict(X_test_adjusted)
+    test_preds = scaler_target.inverse_transform(test_preds_scaled)
+    y_test_real = scaler_target.inverse_transform(y_test.reshape(-1, 1))
 
     # Calcular métricas de error
     valid_mask = ~np.isnan(test_preds) & ~np.isnan(y_test_real)
@@ -387,18 +366,21 @@ def train_and_predict_with_sentiment(
         mape = robust_mape(y_test_real[valid_mask], test_preds[valid_mask])
 
     # Predicciones futuras ajustadas por sentimiento
-    last_window = scaled_data_with_sentiment[-window_size:]
+    last_window = scaled_data[-window_size:]
     future_preds_scaled = []
-    current_input = last_window
+    # Aquí combinamos la última ventana con el sentimiento
+    current_input = np.concatenate(
+        [last_window.reshape(1, window_size, 1), np.full((1, window_size, 1), sentiment_factor)],
+        axis=-1
+    )
     for _ in range(horizon_days):
-        future_pred = lstm_model.predict(current_input[np.newaxis, ...])[0, 0]
+        future_pred = lstm_model.predict(current_input)[0][0]
         future_preds_scaled.append(future_pred)
-        new_feature = np.zeros((1, window_size, 2))
-        new_feature[0, :-1] = current_input[1:]
-        new_feature[0, -1, 0] = future_pred
-        new_feature[0, -1, 1] = sentiment_factor  # Mantener el factor de sentimiento
-        current_input = new_feature[0]
-    future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1))
+        new_feature = np.copy(current_input[:, -1:, :])
+        new_feature[0, 0, 0] = future_pred
+        new_feature[0, 0, 1] = sentiment_factor  # Mantener el factor de sentimiento
+        current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
+    future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
     return df, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor
 
@@ -415,8 +397,8 @@ def setup_x_api():
     
     Notes:
         No imprime Secrets en la interfaz para evitar exposiciones de seguridad.
-        Usa el Bearer Token generado en X Developer Portal para el plan Free, accediendo directamente a st.secrets["bearer_token"].
-        Asegúrate de que 'bearer_token' esté configurado correctamente en Streamlit Secrets sin [x_api].
+        Usa el Bearer Token generado en X Developer Portal para el plan Free, accediendo directamente
+        a st.secrets["bearer_token"].
     """
     try:
         secrets = st.secrets
@@ -424,8 +406,15 @@ def setup_x_api():
         if not bearer_token or bearer_token.strip() == "":
             raise ValueError("Bearer Token no configurado, vacío, o contiene solo espacios en los Secrets de Streamlit")
         
-        # Usar solo bearer_token para el plan gratuito de X API v2
-        client = tweepy.Client(bearer_token=bearer_token)
+        # Para el plan Free de la API v2, basta con el bearer_token. Si Tweepy
+        # exige consumer_key/secret, se ponen como strings vacías.
+        client = tweepy.Client(
+            bearer_token=bearer_token,
+            consumer_key="",      # <<--- Ajuste para evitar NoneType
+            consumer_secret="",   # <<--- Ajuste para evitar NoneType
+            access_token="",
+            access_token_secret=""
+        )
         # Verificar si el cliente funciona con una solicitud mínima
         client.get_me()  # Prueba rápida para validar autenticación
         return client
@@ -679,6 +668,7 @@ def main_app():
 
     with tabs[1]:
         st.header(f"Predicción de Precios - {st.session_state['crypto_name']}")
+        # Verificamos si ya existe un resultado en 'result'
         if 'result' in locals() and result is not None:
             df_model, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor = result
             last_date = df_model["ds"].iloc[-1]
