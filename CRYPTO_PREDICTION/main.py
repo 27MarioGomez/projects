@@ -89,6 +89,9 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     
     Returns:
         pd.DataFrame: DataFrame con columnas 'ds', 'close_price', y 'volume', o None si falla.
+    
+    Notes:
+        Maneja casos en los que 'volumeUsd' puede no existir o ser None, asegurando consistencia con pandas.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -109,9 +112,19 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                 if "time" not in df.columns or "priceUsd" not in df.columns:
                     st.warning("CoinCap: Faltan las columnas 'time' o 'priceUsd'.")
                     return None
-                df["ds"] = pd.to_datetime(df["time"], unit="ms")
+                
+                # Procesar 'time' y 'priceUsd' de manera segura
+                df["ds"] = pd.to_datetime(df["time"], unit="ms", errors="coerce")
                 df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-                df["volume"] = pd.to_numeric(df.get("volumeUsd", 0), errors="coerce").fillna(0)
+                
+                # Manejar 'volumeUsd' de manera segura, asegurando un Series pandas
+                if "volumeUsd" in df.columns:
+                    df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce")
+                else:
+                    df["volume"] = pd.Series(0.0, index=df.index)  # Crear un Series con ceros
+                df["volume"] = df["volume"].fillna(0.0)  # Rellenar NaN con 0.0 de manera segura
+                
+                # Filtrar y limpiar datos
                 df = df[["ds", "close_price", "volume"]].dropna(subset=["ds", "close_price"])
                 df.sort_values(by="ds", inplace=True)
                 df.reset_index(drop=True, inplace=True)
@@ -169,6 +182,9 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     
     Returns:
         Sequential: Modelo Keras compilado.
+    
+    Notes:
+        Asegura que el modelo procese 2 características (precio + sentimiento) en la última dimensión.
     """
     model = Sequential()
     # Ajustar input_shape para manejar 2 características (precio + sentimiento)
@@ -193,7 +209,7 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     
     Args:
         X_train (np.ndarray): Datos de entrenamiento ajustados (precio + sentimiento).
-        y_train (np.ndarray): Valores objetivo de entrenamiento.
+        y_train (np.ndarray): Valores objetivo de entrenamiento (solo precio).
         X_val (np.ndarray): Datos de validación ajustados.
         y_val (np.ndarray): Valores objetivo de validación.
         input_shape (tuple): Forma de entrada esperada por el modelo.
@@ -374,7 +390,7 @@ def setup_x_api():
             # access_token=secrets.get("access_token", ""),
             # access_token_secret=secrets.get("access_token_secret", "")
         )
-        # Verificar si el cliente funciona
+        # Verificar si el cliente funciona con una solicitud mínima
         client.get_me()  # Prueba rápida para validar autenticación
         return client
     except tweepy.TweepyException as e:
