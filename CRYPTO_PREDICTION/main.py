@@ -10,20 +10,20 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
-import pandas_ta as ta
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
-import snscrape.modules.twitter as sntwitter
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 ##############################################
 # Funciones de apoyo
 ##############################################
+
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """Calcula el MAPE evitando divisiones por cero."""
+    """
+    Calcula el MAPE evitando divisiones por cero.
+    """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
 # Diccionario con IDs de criptomonedas para CoinCap
@@ -43,14 +43,14 @@ coincap_ids = {
 }
 
 ##############################################
-# Descarga de datos desde CoinCap
+# Descarga de datos desde CoinCap (intervalo diario)
 ##############################################
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
-    se descarga el rango indicado; de lo contrario, se descarga todo el histórico.
-    Retorna un DataFrame con 'ds', 'close_price' y 'volume'.
+    Descarga datos de CoinCap con intervalo diario.
+    Si se definen start_ms y end_ms se descarga ese rango; de lo contrario se descarga todo el histórico.
+    Retorna un DataFrame con las columnas 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -94,28 +94,12 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     return None
 
 ##############################################
-# Indicadores técnicos (opcional)
-##############################################
-def add_indicators(df):
-    """
-    Calcula RSI, MACD y Bollinger Bands a partir de 'close_price'.
-    """
-    df["rsi"] = ta.rsi(df["close_price"], length=14)
-    macd_df = ta.macd(df["close_price"])
-    bbands_df = ta.bbands(df["close_price"], length=20, std=2)
-    df = pd.concat([df, macd_df, bbands_df], axis=1)
-    df.ffill(inplace=True)
-    return df
-
-def add_all_indicators(df):
-    return add_indicators(df)
-
-##############################################
 # Creación de secuencias para LSTM
 ##############################################
 def create_sequences(data, window_size=30):
     """
-    Crea secuencias de tamaño 'window_size' para el entrenamiento.
+    Crea secuencias de tamaño 'window_size' a partir de 'data'.
+    Se asume que la primera columna es el target ('close_price').
     """
     if len(data) <= window_size:
         st.warning(f"No hay datos suficientes para una ventana de {window_size} días.")
@@ -127,23 +111,26 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 ##############################################
-# Modelo LSTM: Conv1D + Bidirectional LSTM (API funcional)
+# Modelo LSTM: Conv1D + Bidirectional LSTM
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo funcional que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Construye un modelo secuencial que combina:
+      - Conv1D para extracción de características locales
+      - Tres capas Bidirectional LSTM con Dropout
+      - Capa Dense final para regresión
     """
-    inputs = tf.keras.Input(shape=input_shape)
-    x = Conv1D(filters=32, kernel_size=3, activation="relu")(inputs)
-    x = Bidirectional(LSTM(64, return_sequences=True))(x)
-    x = Dropout(0.3)(x)
-    x = Bidirectional(LSTM(64, return_sequences=True))(x)
-    x = Dropout(0.3)(x)
-    x = Bidirectional(LSTM(64, return_sequences=False))(x)
-    x = Dropout(0.3)(x)
-    outputs = Dense(1)(x)
-    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+    model = Sequential()
+    model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
+    model.add(Bidirectional(LSTM(64, return_sequences=True)))
+    model.add(Dropout(0.3))
+    model.add(Bidirectional(LSTM(64, return_sequences=True)))
+    model.add(Dropout(0.3))
+    model.add(Bidirectional(LSTM(64, return_sequences=False)))
+    model.add(Dropout(0.3))
+    model.add(Dense(1))
     opt = Adam(learning_rate=learning_rate)
+    # Se entrena en modo eager para evitar errores de retracing (aunque es menos eficiente)
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
@@ -152,7 +139,6 @@ def build_lstm_model(input_shape, learning_rate=0.001):
 ##############################################
 def train_and_predict(
     coin_id,
-    crypto_name,
     use_custom_range,
     start_ms,
     end_ms,
@@ -161,33 +147,27 @@ def train_and_predict(
     test_size=0.2,
     epochs=10,
     batch_size=32,
-    learning_rate=0.001,
-    use_indicators=False
+    learning_rate=0.001
 ):
     """
-    Descarga datos de CoinCap, añade indicadores (si se activa),
-    entrena un modelo LSTM univariado (close_price) y realiza predicciones en test y a futuro.
+    Descarga datos de CoinCap, entrena un modelo LSTM y realiza predicciones en test y a futuro.
     """
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
         st.warning("No se pudieron descargar datos suficientes. Reajusta el rango de fechas.")
         return None
     df = temp_df.copy()
-    if use_indicators:
-        df = add_all_indicators(df)
+
+    # Usamos solo 'close_price' (no se incluyen indicadores ni multivariable en esta versión)
     if "close_price" not in df.columns:
-        st.warning("No se encontró 'close_price' en los datos descargados.")
+        st.warning("No se encontró 'close_price' en los datos.")
         return None
 
-    df_model = df[["ds", "close_price"]].copy()
-    data_for_model = df_model[["close_price"]].values
+    data_for_model = df[["close_price"]].values
 
-    scaler_features = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler_features.fit_transform(data_for_model)
-    # Reemplazar NaN en los datos escalados
-    scaled_data = np.nan_to_num(scaled_data, nan=0.0)
+    # Escalado de datos
     scaler_target = MinMaxScaler(feature_range=(0, 1))
-    scaler_target.fit(df_model[["close_price"]])
+    scaled_data = scaler_target.fit_transform(data_for_model)
 
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
@@ -207,15 +187,18 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+    # Limpiar la sesión para evitar conflictos
     tf.keras.backend.clear_session()
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
+    # Entrenamos el modelo en modo eager para evitar errores en la gráfica de name_scope
     lstm_model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
         epochs=epochs,
         batch_size=batch_size,
-        verbose=1
+        verbose=1,
+        run_eagerly=True
     )
 
     test_preds_scaled = lstm_model.predict(X_test)
@@ -229,6 +212,7 @@ def train_and_predict(
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
+    # Predicción futura iterativa
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -237,38 +221,37 @@ def train_and_predict(
         future_preds_scaled.append(future_pred)
         new_feature = np.copy(current_input[:, -1:, :])
         new_feature[0, 0, 0] = future_pred
+        # Mantener las demás columnas sin cambios
         for c in range(1, X_train.shape[2]):
             new_feature[0, 0, c] = current_input[0, -1, c]
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
+    return df, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Módulo de análisis de sentimiento en X
+# Análisis de sentimiento en Twitter (ahora en X)
 ##############################################
 def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     """
-    Extrae hasta max_tweets tweets relacionados con la criptomoneda (usando la primera palabra)
-    y calcula el sentimiento promedio usando VaderSentiment.
-    Forzamos la búsqueda en x.com.
+    Extrae hasta max_tweets tweets (ahora desde X.com) relacionados con la criptomoneda
+    (se usa la primera palabra) y calcula el sentimiento promedio usando VaderSentiment.
     """
     try:
+        import snscrape.modules.twitter as sntwitter
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        # Forzamos que la librería use X como base
         sntwitter.TWITTER_BASE_URL = "https://x.com"
-    except Exception:
-        pass  # Si falla, se usa la configuración por defecto
+    except Exception as e:
+        st.error(f"Error importando snscrape o vaderSentiment: {e}")
+        return None, []
+
     keyword = crypto_name.split(" ")[0]
     tweets = []
-    threshold = 5
-    search_url = f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query"
-    for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url).get_items()):
-        try:
-            if hasattr(tweet, 'likeCount') and tweet.likeCount is not None and tweet.likeCount >= threshold:
-                tweets.append(tweet.content)
-        except Exception:
-            tweets.append(tweet.content)
+    for i, tweet in enumerate(sntwitter.TwitterSearchScraper(keyword).get_items()):
         if i >= max_tweets:
             break
+        tweets.append(tweet.content)
     if not tweets:
         return None, []
     analyzer = SentimentIntensityAnalyzer()
@@ -289,6 +272,7 @@ def main_app():
 
     st.sidebar.header("Configuración de la predicción")
 
+    # Selección de criptomoneda
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
@@ -296,6 +280,7 @@ def main_app():
     )
     coin_id = coincap_ids[crypto_name]
 
+    # Rango de fechas
     st.sidebar.subheader("Rango de Fechas")
     use_custom_range = st.sidebar.checkbox(
         "Habilitar rango de fechas",
@@ -313,12 +298,14 @@ def main_app():
         start_ms = None
         end_ms = None
 
+    # Parámetros de predicción
     st.sidebar.subheader("Parámetros de Predicción")
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
                                 help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
 
+    # Se elimina la opción de multivariable en esta versión
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox(
         "Elige un escenario:",
@@ -340,6 +327,7 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
+    # Visualización del histórico
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
@@ -352,8 +340,8 @@ def main_app():
         fig_hist.update_yaxes(tickformat=",.2f")
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45, nticks=10))
         st.plotly_chart(fig_hist, use_container_width=True)
-        if st.sidebar.checkbox("Ver estadísticas descriptivas", value=False,
-                               help="Muestra un resumen estadístico del precio."):
+        # Estadísticas descriptivas
+        if st.sidebar.checkbox("Ver estadísticas descriptivas", value=False):
             st.subheader("Estadísticas Descriptivas")
             st.write(df_prices["close_price"].describe().rename({
                 "count": "Cuenta",
@@ -368,8 +356,8 @@ def main_app():
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
+    # Pestañas: Entrenamiento/Test, Predicción y Sentimiento en Twitter (X)
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}", "💬 Sentimiento en X"])
-    result = None
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
@@ -377,7 +365,6 @@ def main_app():
             with st.spinner("Entrenando el modelo, por favor espera..."):
                 result = train_and_predict(
                     coin_id=coin_id,
-                    crypto_name=crypto_name,
                     use_custom_range=use_custom_range,
                     start_ms=start_ms,
                     end_ms=end_ms,
@@ -386,8 +373,7 @@ def main_app():
                     test_size=0.2,
                     epochs=epochs_val,
                     batch_size=batch_size_val,
-                    learning_rate=learning_rate_val,
-                    use_indicators=True
+                    learning_rate=learning_rate_val
                 )
             if result is not None:
                 df_model, test_preds, y_test_real, future_preds, rmse, mape = result
@@ -422,7 +408,7 @@ def main_app():
 
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_name}")
-        if result is not None:
+        if 'result' in locals() and result is not None:
             df_model, test_preds, y_test_real, future_preds, rmse, mape = result
             last_date = df_model["ds"].iloc[-1]
             current_price = df_model["close_price"].iloc[-1]
@@ -450,49 +436,33 @@ def main_app():
 
     with tabs[2]:
         st.header("Sentimiento en X")
-        st.markdown("Analizando tweets recientes sobre la criptomoneda y la industria...")
+        st.markdown("Analizando tweets recientes sobre la criptomoneda seleccionada...")
         try:
-            keyword = crypto_name.split(" ")[0]
-            tweets_coin = []
-            max_tweets = 50
-            threshold = 5
-            search_url_coin = f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query"
+            import snscrape.modules.twitter as sntwitter
+            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
             sntwitter.TWITTER_BASE_URL = "https://x.com"
-            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url_coin).get_items()):
-                try:
-                    if hasattr(tweet, 'likeCount') and tweet.likeCount is not None and tweet.likeCount >= threshold:
-                        tweets_coin.append(tweet.content)
-                except Exception:
-                    tweets_coin.append(tweet.content)
+            keyword = crypto_name.split(" ")[0]
+            tweets = []
+            max_tweets = 50
+            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(keyword).get_items()):
                 if i >= max_tweets:
                     break
-
-            tweets_industry = []
-            search_url_industry = "https://x.com/search?f=live&lang=en&q=crypto&src=typed_query"
-            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url_industry).get_items()):
-                try:
-                    if hasattr(tweet, 'likeCount') and tweet.likeCount is not None and tweet.likeCount >= threshold:
-                        tweets_industry.append(tweet.content)
-                except Exception:
-                    tweets_industry.append(tweet.content)
-                if i >= max_tweets:
-                    break
-
-            analyzer = SentimentIntensityAnalyzer()
-            coin_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_coin if t]
-            industry_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_industry if t]
-            coin_sentiment = np.mean(coin_scores) if coin_scores else 0
-            industry_sentiment = np.mean(industry_scores) if industry_scores else 0
-            total_sentiment = (coin_sentiment + industry_sentiment) / 2.0
-            st.metric("Sentimiento Promedio", f"{total_sentiment:.2f}")
-            st.write("Ejemplos de tweets de la criptomoneda:")
-            for t in tweets_coin[:3]:
-                st.write(f"- {t}")
-            st.write("Ejemplos de tweets de la industria:")
-            for t in tweets_industry[:3]:
-                st.write(f"- {t}")
+                tweets.append(tweet.content)
+            if tweets:
+                analyzer = SentimentIntensityAnalyzer()
+                scores = [analyzer.polarity_scores(t)['compound'] for t in tweets if t]
+                if scores:
+                    avg_sentiment = np.mean(scores)
+                    st.metric("Sentimiento Promedio", f"{avg_sentiment:.2f}")
+                    st.write("Ejemplos de tweets analizados:")
+                    for t in tweets[:5]:
+                        st.write(f"- {t}")
+                else:
+                    st.info("No se pudieron calcular scores de sentimiento.")
+            else:
+                st.info("No se encontraron tweets para analizar.")
         except Exception as e:
-            st.error(f"Error al analizar sentimiento: {e}")
+            st.error(f"Error al analizar tweets: {e}")
 
 if __name__ == "__main__":
     main_app()
