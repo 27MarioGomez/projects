@@ -15,7 +15,8 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 import time
-import ssl  # Añadido para manejar SSL
+import ssl
+import certifi  # Añadido para manejar certificados SSL
 
 ##############################################
 # Funciones de apoyo
@@ -156,8 +157,13 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     """
     Entrena el modelo LSTM mejorado de forma aislada para evitar conflictos con el contexto global.
     """
-    # Eliminamos la inicialización manual de name_scope_stack, ya que no está disponible en TensorFlow 2.18.0
-    model = build_improved_lstm_model(input_shape, learning_rate=learning_rate)
+    # Reiniciar completamente el grafo de TensorFlow para evitar conflictos
+    tf.keras.backend.clear_session()
+    
+    # Usar init_scope para inicializar el contexto de TensorFlow
+    with tf.init_scope():
+        model = build_improved_lstm_model(input_shape, learning_rate=learning_rate)
+    
     model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
@@ -268,13 +274,22 @@ def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     try:
         import snscrape.modules.twitter as sntwitter
         from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        import certifi  # Importar certifi para usar certificados
         sntwitter.TWITTER_BASE_URL = "https://x.com"
-        # Desactivar verificación SSL como workaround temporal (no recomendado en producción)
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+
+        # Intentar con verificación SSL primero (usando certificados de certifi)
+        try:
+            # Configurar el contexto SSL con certificados de certifi
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+        except Exception as e:
+            st.warning(f"No se pudieron cargar certificados de certifi, intentando sin verificación: {e}")
+            # Workaround temporal: deshabilitar verificación SSL (no recomendado en producción)
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
     except Exception as e:
-        st.error(f"Error importando snscrape o vaderSentiment: {e}")
+        st.error(f"Error importando snscrape, vaderSentiment o certifi: {e}")
         return None, []
 
     keyword = crypto_name.split(" ")[0]
