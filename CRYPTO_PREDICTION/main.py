@@ -11,15 +11,12 @@ import requests
 from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Conv1D, Bidirectional, LSTM, Dropout, Dense
 from tensorflow.keras.optimizers import Adam
 import time
 import snscrape.modules.twitter as sntwitter
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
-# Forzar que las funciones se ejecuten de forma eager (evita problemas con tf.function)
-tf.config.run_functions_eagerly(True)
 
 ##############################################
 # Funciones de apoyo
@@ -112,21 +109,22 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 ##############################################
-# Modelo LSTM: Conv1D + Bidirectional LSTM
+# Modelo LSTM usando la API funcional de Keras
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Construye un modelo funcional que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
     """
-    model = Sequential()
-    model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
-    model.add(Bidirectional(LSTM(64, return_sequences=True)))
-    model.add(Dropout(0.3))
-    model.add(Bidirectional(LSTM(64, return_sequences=True)))
-    model.add(Dropout(0.3))
-    model.add(Bidirectional(LSTM(64, return_sequences=False)))
-    model.add(Dropout(0.3))
-    model.add(Dense(1))
+    inputs = Input(shape=input_shape)
+    x = Conv1D(filters=32, kernel_size=3, activation="relu")(inputs)
+    x = Bidirectional(LSTM(64, return_sequences=True))(x)
+    x = Dropout(0.3)(x)
+    x = Bidirectional(LSTM(64, return_sequences=True))(x)
+    x = Dropout(0.3)(x)
+    x = Bidirectional(LSTM(64, return_sequences=False))(x)
+    x = Dropout(0.3)(x)
+    outputs = Dense(1)(x)
+    model = tf.keras.Model(inputs=inputs, outputs=outputs)
     opt = Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
@@ -149,8 +147,8 @@ def train_and_predict(
 ):
     """
     Descarga datos de CoinCap, entrena un modelo LSTM univariado (close_price)
-    y realiza predicciones en test y a futuro. También incorpora un ajuste de sentimiento
-    basado en tweets extraídos de X (anteriormente Twitter).
+    y realiza predicciones en test y a futuro. Además, ajusta la predicción futura
+    usando análisis de sentimiento de X.
     """
     df = load_coincap_data(coin_id, start_ms, end_ms)
     if df is None or df.empty:
@@ -208,6 +206,7 @@ def train_and_predict(
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
+    # Predicción futura iterativa
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -224,7 +223,7 @@ def train_and_predict(
 
     # Análisis de sentimiento en X para ajustar la predicción
     try:
-        # Forzamos la búsqueda en x.com para evitar problemas con twitter.com
+        # Forzamos la búsqueda en x.com
         sntwitter.TWITTER_BASE_URL = "https://x.com"
         keyword = crypto_name.split(" ")[0]
         tweets = []
@@ -244,7 +243,6 @@ def train_and_predict(
             scores = [analyzer.polarity_scores(t)['compound'] for t in tweets if t]
             if scores:
                 avg_sentiment = np.mean(scores)
-                # Ajuste simple: se modifica la predicción futura en base al sentimiento
                 sentiment_factor = 0.05
                 future_preds = future_preds * (1 + sentiment_factor * avg_sentiment)
             else:
@@ -257,6 +255,37 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
+# Análisis de sentimiento en X (Twitter)
+##############################################
+def analyze_twitter_sentiment(keyword, max_tweets=50):
+    """
+    Extrae hasta max_tweets tweets relacionados con la keyword usando snscrape
+    y calcula el sentimiento promedio usando VaderSentiment.
+    Se fuerza la búsqueda en x.com.
+    """
+    sntwitter.TWITTER_BASE_URL = "https://x.com"
+    tweets = []
+    threshold = 5
+    search_url = f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query"
+    for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url).get_items()):
+        try:
+            if hasattr(tweet, 'likeCount') and tweet.likeCount is not None and tweet.likeCount >= threshold:
+                tweets.append(tweet.content)
+        except Exception:
+            tweets.append(tweet.content)
+        if i >= max_tweets:
+            break
+    if not tweets:
+        return None, []
+    analyzer = SentimentIntensityAnalyzer()
+    scores = [analyzer.polarity_scores(t)['compound'] for t in tweets if t]
+    if scores:
+        avg_sentiment = np.mean(scores)
+        return avg_sentiment, tweets[:5]
+    else:
+        return None, []
+
+##############################################
 # Función principal de la app
 ##############################################
 def main_app():
@@ -265,7 +294,6 @@ def main_app():
     st.markdown("**Fuente de Datos:** CoinCap")
 
     st.sidebar.header("Configuración de la predicción")
-
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
@@ -335,8 +363,7 @@ def main_app():
 
     # Pestañas: Entrenamiento/Test, Predicción y Sentimiento en X
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}", "💬 Sentimiento en X"])
-
-    result = None  # Variable global para almacenar el resultado del entrenamiento
+    result = None
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
