@@ -163,73 +163,63 @@ def get_dynamic_params(df, horizon_days):
 ##############################################
 # Llamadas a la API de LunarCrush (versión Free)
 ##############################################
-def get_crypto_sentiment_lunarcrush(symbol):
+def get_crypto_sentiment_lunarcrush(symbol, max_retries=3, wait_time=5):
     api_key = st.secrets["lunarcrush_api_key"]
     base = "https://api.lunarcrush.com/v2"
     url = (f"{base}?data=assets&symbol={symbol}&key={api_key}"
            "&metrics=galaxy_score,alt_rank,average_sentiment,bullish_sentiment,bearish_sentiment")
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            st.warning(f"LunarCrush (assets): Error {resp.status_code} para {symbol}.")
-            return 50.0
-        assets = resp.json().get("data", [])
-        if not assets:
-            return 50.0
-        asset = assets[0]
-        galaxy = asset.get("galaxy_score", 50)
-        alt_rank = asset.get("alt_rank", 2000)
-        avg_sent = asset.get("average_sentiment", 0.5) * 100
-        bull = asset.get("bullish_sentiment", 0)
-        bear = asset.get("bearish_sentiment", 0)
-        alt_score = max(0, min(100, (2000 - alt_rank)/2000*100))
-        raw = 0.4 * galaxy + 0.1 * alt_score + 0.2 * avg_sent + 0.15 * bull - 0.15 * bear
-        final = max(0, min(100, raw))
-        return final
-    except Exception as e:
-        st.warning("Streamlit está experimentando algunos problemas. Usamos un valor neutro para el sentimiento.")
-        return 50.0
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                if data:
+                    asset = data[0]
+                    galaxy = asset.get("galaxy_score", 50)
+                    alt_rank = asset.get("alt_rank", 2000)
+                    avg_sent = asset.get("average_sentiment", 0.5) * 100
+                    bull = asset.get("bullish_sentiment", 0)
+                    bear = asset.get("bearish_sentiment", 0)
+                    alt_score = max(0, min(100, (2000 - alt_rank)/2000*100))
+                    raw = 0.4 * galaxy + 0.1 * alt_score + 0.2 * avg_sent + 0.15 * bull - 0.15 * bear
+                    final = max(0, min(100, raw))
+                    return final
+                return 50.0
+            else:
+                st.warning(f"Intento {attempt+1}: Error {resp.status_code} para {symbol}.")
+        except Exception as e:
+            st.warning(f"Intento {attempt+1} fallido: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(wait_time)
+    st.error("No se pudo conectar a LunarCrush después de varios intentos.")
+    return 50.0
 
-def get_market_crypto_sentiment_lunarcrush():
+def get_market_crypto_sentiment_lunarcrush(max_retries=3, wait_time=5):
     api_key = st.secrets["lunarcrush_api_key"]
     url = f"https://api.lunarcrush.com/v2?data=market&key={api_key}"
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json().get("data", [])
-            if data:
-                item = data[0]
-                btc_dom = item.get("btc_dominance", 45)
-                dom_sent = (btc_dom - 30) / (60 - 30) * 100
-                return max(0, min(100, dom_sent))
-            return 50.0
-        else:
-            st.warning(f"LunarCrush (market): Error {resp.status_code}.")
-            return 50.0
-    except Exception as e:
-        st.warning("Streamlit está experimentando algunos problemas. Usamos un valor neutro para el sentimiento.")
-        return 50.0
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                if data:
+                    item = data[0]
+                    btc_dom = item.get("btc_dominance", 45)
+                    dom_sent = (btc_dom - 30) / (60 - 30) * 100
+                    return max(0, min(100, dom_sent))
+                return 50.0
+            else:
+                st.warning(f"Intento {attempt+1}: Error {resp.status_code}.")
+        except Exception as e:
+            st.warning(f"Intento {attempt+1} fallido: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(wait_time)
+    st.error("No se pudo conectar a LunarCrush después de varios intentos.")
+    return 50.0
 
 def get_lunarcrush_news(symbol, limit=5):
-    api_key = st.secrets["lunarcrush_api_key"]
-    url = f"https://api.lunarcrush.com/v2?data=news&symbol={symbol}&limit={limit}&key={api_key}"
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            return []
-        items = resp.json().get("data", [])
-        news_list = []
-        for it in items:
-            news_list.append({
-                "title": it.get("title"),
-                "url": it.get("url"),
-                "description": it.get("description"),
-                "published_at": it.get("published_at")
-            })
-        return news_list
-    except Exception as e:
-        st.warning("No se pueden mostrar noticias ahora mismo, vuelve luego.")
-        return []
+    st.info("Las noticias no están disponibles con la versión gratuita de LunarCrush.")
+    return []
 
 ##############################################
 # Entrenamiento y predicción con sentimiento
@@ -440,21 +430,8 @@ def main_app():
 
     with tabs[2]:
         st.header(f"Noticias recientes de {st.session_state['crypto_name']}")
-        if 'result' in locals() and result is not None:
-            symbol = result[-1]
-            news_items = get_lunarcrush_news(symbol, limit=5)
-            if news_items:
-                for i, item in enumerate(news_items, start=1):
-                    st.markdown(f"**{i}. {item['title']}**")
-                    st.markdown(f"[Ver noticia]({item['url']})")
-                    if item["description"]:
-                        st.write(item["description"])
-                    st.write(f"Publicado: {item['published_at']}")
-                    st.write("---")
-            else:
-                st.write("No hay noticias disponibles en este momento.")
-        else:
-            st.info("Primero entrena el modelo para mostrar noticias.")
+        st.info("Las noticias no están disponibles con la versión gratuita de LunarCrush.")
+        # No se intenta conectar a la API de noticias
 
 if __name__ == "__main__":
     main_app()
