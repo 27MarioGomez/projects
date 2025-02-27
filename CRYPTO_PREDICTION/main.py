@@ -134,6 +134,24 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     return model
 
 ##############################################
+# Función aislada para entrenar el modelo
+##############################################
+def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate):
+    """
+    Entrena el modelo LSTM de forma aislada para evitar conflictos con el contexto global.
+    """
+    # No usamos clear_session aquí para no interferir con el estado global
+    model = build_lstm_model(input_shape, learning_rate=learning_rate)
+    model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=1
+    )
+    return model
+
+##############################################
 # Entrenamiento y predicción con LSTM
 ##############################################
 def train_and_predict(
@@ -184,19 +202,9 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Limpiar la sesión y entrenar dentro de un contexto explícito
-    tf.keras.backend.clear_session()
+    # Entrenar el modelo en una función aislada
     input_shape = (X_train.shape[1], X_train.shape[2])
-    
-    with tf.name_scope("LSTM_Training"):
-        lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
-        lstm_model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=1
-        )
+    lstm_model = train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate)
 
     test_preds_scaled = lstm_model.predict(X_test)
     test_preds = scaler_target.inverse_transform(test_preds_scaled)
