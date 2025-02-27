@@ -15,7 +15,6 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 import time
-import tensorflow.keras.backend as K
 import ssl  # Añadido para manejar SSL
 
 ##############################################
@@ -157,10 +156,7 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     """
     Entrena el modelo LSTM mejorado de forma aislada para evitar conflictos con el contexto global.
     """
-    # Inicializar explícitamente el name_scope_stack si no existe
-    if K.get_value(K.name_scope_stack) is None:
-        K.set_value(K.name_scope_stack, [])
-
+    # Eliminamos la inicialización manual de name_scope_stack, ya que no está disponible en TensorFlow 2.18.0
     model = build_improved_lstm_model(input_shape, learning_rate=learning_rate)
     model.fit(
         X_train, y_train,
