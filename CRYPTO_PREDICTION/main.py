@@ -25,67 +25,66 @@ def robust_mape(y_true, y_pred, eps=1e-9):
     """Calcula el MAPE evitando divisiones por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario con IDs de criptomonedas para CoinCap y CoinGecko
+# Diccionario con IDs de criptomonedas para CoinCap y CoinPaprika
 crypto_ids = {
     "Bitcoin (BTC)": {
         "coincap": "bitcoin",
-        "coingecko": "bitcoin"
+        "coinpaprika": "btc-bitcoin"
     },
     "Ethereum (ETH)": {
         "coincap": "ethereum",
-        "coingecko": "ethereum"
+        "coinpaprika": "eth-ethereum"
     },
     "Ripple (XRP)": {
         "coincap": "xrp",
-        "coingecko": "ripple"
+        "coinpaprika": "xrp-ripple"
     },
     "Binance Coin (BNB)": {
         "coincap": "binance-coin",
-        "coingecko": "binancecoin"
+        "coinpaprika": "bnb-binance-coin"
     },
     "Cardano (ADA)": {
         "coincap": "cardano",
-        "coingecko": "cardano"
+        "coinpaprika": "ada-cardano"
     },
     "Solana (SOL)": {
         "coincap": "solana",
-        "coingecko": "solana"
+        "coinpaprika": "sol-solana"
     },
     "Dogecoin (DOGE)": {
         "coincap": "dogecoin",
-        "coingecko": "dogecoin"
+        "coinpaprika": "doge-dogecoin"
     },
     "Polkadot (DOT)": {
         "coincap": "polkadot",
-        "coingecko": "polkadot"
+        "coinpaprika": "dot-polkadot"
     },
     "Polygon (MATIC)": {
         "coincap": "polygon",
-        "coingecko": "polygon"
+        "coinpaprika": "matic-polygon"
     },
     "Litecoin (LTC)": {
         "coincap": "litecoin",
-        "coingecko": "litecoin"
+        "coinpaprika": "ltc-litecoin"
     },
     "TRON (TRX)": {
         "coincap": "tron",
-        "coingecko": "tron"
+        "coinpaprika": "trx-tron"
     },
     "Stellar (XLM)": {
         "coincap": "stellar",
-        "coingecko": "stellar"
+        "coinpaprika": "xlm-stellar"
     }
 }
 
 ##############################################
-# Descarga de datos desde CoinCap
+# Descarga de datos desde CoinCap (como respaldo)
 ##############################################
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
-    se descarga el rango correspondiente; de lo contrario, se descarga todo el histórico.
-    Retorna un DataFrame con 'ds', 'close_price' y 'volume'.
+    Descarga datos de CoinCap con intervalo diario (d1).
+    Retorna DataFrame con 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -129,34 +128,36 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     return None
 
 ##############################################
-# Descarga de datos desde CoinGecko
+# Descarga de datos desde CoinPaprika
 ##############################################
 @st.cache_data
-def load_coingecko_data(coin_id, days="max"):
+def load_coinpaprika_data(coin_id, start_date="2021-01-01", end_date=None):
     """
-    Descarga el histórico de precios desde CoinGecko usando el endpoint market_chart.
+    Descarga datos históricos de CoinPaprika.
+    Utiliza el endpoint OHLCV/historical. El parámetro 'end_date' debe ser una cadena en formato YYYY-MM-DD.
     Retorna un DataFrame con 'ds', 'close_price', 'volume' y 'market_cap'.
     """
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days={days}"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json"
-    }
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    url = f"https://api.coinpaprika.com/v1/coins/{coin_id}/ohlcv/historical?start={start_date}&end={end_date}"
+    headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(url, headers=headers)
     if resp.status_code != 200:
-        st.error(f"Error al obtener datos de CoinGecko (status code {resp.status_code}).")
+        st.error(f"Error al obtener datos de CoinPaprika (status code {resp.status_code}).")
         return None
-    data = resp.json()
-    if "prices" not in data or "total_volumes" not in data or "market_caps" not in data:
-        st.error("CoinGecko: datos incompletos.")
+    df = pd.DataFrame(resp.json())
+    if df.empty:
+        st.info("CoinPaprika devolvió datos vacíos. Reajusta el rango de fechas.")
         return None
-    df_prices = pd.DataFrame(data["prices"], columns=["timestamp", "close_price"])
-    df_vol = pd.DataFrame(data["total_volumes"], columns=["timestamp", "volume"])
-    df_mc = pd.DataFrame(data["market_caps"], columns=["timestamp", "market_cap"])
-    df = pd.merge(df_prices, df_vol, on="timestamp", how="outer")
-    df = pd.merge(df, df_mc, on="timestamp", how="outer")
-    df["ds"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df.drop(columns=["timestamp"], inplace=True)
+    # Renombrar columnas para homogeneidad
+    df.rename(columns={
+        "time_open": "ds",
+        "close": "close_price",
+        "volume": "volume",
+        "market_cap": "market_cap"
+    }, inplace=True)
+    df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+    df = df[["ds", "close_price", "volume", "market_cap"]].dropna(subset=["ds", "close_price"])
     df.sort_values(by="ds", inplace=True)
     df.reset_index(drop=True, inplace=True)
     df["close_price"] = pd.to_numeric(df["close_price"], errors="coerce")
@@ -166,29 +167,32 @@ def load_coingecko_data(coin_id, days="max"):
     return df
 
 ##############################################
-# Combinar datos de CoinCap y CoinGecko
+# Combinar datos de CoinCap y CoinPaprika
 ##############################################
 @st.cache_data
-def load_combined_data(coin_id_cap, coin_id_cg, start_ms=None, end_ms=None):
+def load_combined_data(coin_id_cap, coin_id_cp, start_ms=None, end_ms=None):
     """
-    Descarga datos de CoinCap y CoinGecko y los combina por fecha ('ds').
-    Para cada campo numérico se promedia el valor si ambos están disponibles.
+    Combina datos de CoinCap y CoinPaprika mediante un merge outer por 'ds'.
+    Para cada campo numérico, se toma el promedio si ambas fuentes están disponibles.
     """
+    # Para CoinCap se usa el rango (start_ms, end_ms); para CoinPaprika se usa todo el histórico
     df_cap = load_coincap_data(coin_id_cap, start_ms, end_ms)
-    df_cg = load_coingecko_data(coin_id_cg, days="max")
-    if (df_cap is None or df_cap.empty) and (df_cg is None or df_cg.empty):
+    # Convertir fechas a cadena para CoinPaprika
+    start_date = datetime.fromtimestamp(start_ms/1000).strftime("%Y-%m-%d") if start_ms else "2021-01-01"
+    df_cp = load_coinpaprika_data(coin_id_cp, start_date=start_date)
+    if (df_cap is None or df_cap.empty) and (df_cp is None or df_cp.empty):
         st.error("No se pudieron descargar datos de ninguna fuente.")
         return None
     if df_cap is None or df_cap.empty:
-        return df_cg
-    if df_cg is None or df_cg.empty:
+        return df_cp
+    if df_cp is None or df_cp.empty:
         return df_cap
-    df_comb = pd.merge(df_cap, df_cg, on="ds", how="outer", suffixes=("_cap", "_cg"))
+    df_comb = pd.merge(df_cap, df_cp, on="ds", how="outer", suffixes=("_cap", "_cp"))
     df_comb.sort_values(by="ds", inplace=True)
     df_comb.reset_index(drop=True, inplace=True)
     def avg_field(row, field):
         val1 = row.get(f"{field}_cap")
-        val2 = row.get(f"{field}_cg")
+        val2 = row.get(f"{field}_cp")
         if pd.notna(val1) and pd.notna(val2):
             return (val1 + val2) / 2
         elif pd.notna(val1):
@@ -258,7 +262,7 @@ def build_lstm_model(input_shape, learning_rate=0.001):
 ##############################################
 def train_and_predict(
     coin_id,
-    coin_id_cg,
+    coin_id_cp,
     use_custom_range,
     start_ms,
     end_ms,
@@ -272,19 +276,17 @@ def train_and_predict(
     use_multivariable=False
 ):
     """
-    Descarga datos de CoinCap y CoinGecko, los combina y añade indicadores si se desea.
-    Luego entrena un modelo LSTM (univariado o multivariable) y realiza predicciones en test y a futuro.
+    Combina datos de CoinCap y CoinPaprika, añade indicadores (opcional) y entrena un modelo LSTM.
+    Realiza predicciones en el conjunto de test y de forma iterativa para el horizonte futuro.
     """
-    df_combined = load_combined_data(coin_id, coin_id_cg, start_ms, end_ms)
+    df_combined = load_combined_data(coin_id, coin_id_cp, start_ms, end_ms)
     if df_combined is None or df_combined.empty:
         st.warning("No se pudieron descargar datos suficientes de ambas fuentes. Reajusta el rango de fechas.")
         return None
     df = df_combined.copy()
-
     if use_indicators:
         df = add_all_indicators(df)
 
-    # Selección de features
     if use_multivariable:
         features = ["close_price"]
         if "volume" in df.columns and not df["volume"].isna().all() and df["volume"].var() > 0:
@@ -366,12 +368,12 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Módulo de análisis de sentimiento en X (Twitter)
+# Análisis de sentimiento en X (Twitter)
 ##############################################
 def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     """
-    Extrae hasta max_tweets tweets relacionados con la criptomoneda (usando la primera palabra)
-    y calcula el sentimiento promedio usando VaderSentiment.
+    Extrae hasta max_tweets tweets relacionados con la criptomoneda (por su primera palabra)
+    y calcula el sentimiento promedio utilizando VaderSentiment.
     """
     import snscrape.modules.twitter as sntwitter
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -397,16 +399,17 @@ def analyze_twitter_sentiment(crypto_name, max_tweets=50):
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
-    st.markdown("**Fuente de Datos:** CoinCap + CoinGecko")
+    st.markdown("**Fuente de Datos:** CoinCap + CoinPaprika")
 
     st.sidebar.header("Configuración de la predicción")
+
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(crypto_ids.keys()),
         help="Elige la criptomoneda para la predicción."
     )
     coin_id_cap = crypto_ids[crypto_name]["coincap"]
-    coin_id_cg = crypto_ids[crypto_name]["coingecko"]
+    coin_id_cp = crypto_ids[crypto_name]["coinpaprika"]
 
     st.sidebar.subheader("Rango de Fechas")
     use_custom_range = st.sidebar.checkbox(
@@ -429,11 +432,13 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
+
     use_multivariable = st.sidebar.checkbox(
         "Usar multivariable (volumen + indicadores)",
         value=False,
         help="Incluye volumen e indicadores (RSI, MACD, BBANDS) para el modelo."
     )
+
     show_stats = st.sidebar.checkbox(
         "Ver estadísticas descriptivas",
         value=False,
@@ -461,8 +466,8 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Cargar datos combinados de ambas fuentes
-    df_prices = load_combined_data(coin_id_cap, coin_id_cg, start_ms, end_ms)
+    # Cargar datos combinados de CoinCap y CoinPaprika
+    df_prices = load_combined_data(coin_id_cap, coin_id_cp, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
@@ -497,7 +502,7 @@ def main_app():
             with st.spinner("Entrenando el modelo, por favor espera..."):
                 result = train_and_predict(
                     coin_id=coin_id_cap,
-                    coin_id_cg=coin_id_cg,
+                    coin_id_cg=coin_id_cp,
                     use_custom_range=use_custom_range,
                     start_ms=start_ms,
                     end_ms=end_ms,
