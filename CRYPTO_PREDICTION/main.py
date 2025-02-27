@@ -17,11 +17,14 @@ from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
 
-# Función para calcular MAPE evitando división por cero
+###############################################################
+# Funciones de apoyo y diccionarios
+###############################################################
+
 def robust_mape(y_true, y_pred, eps=1e-9):
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario con IDs de criptomonedas para CoinCap
+# Diccionario para CoinCap
 coincap_ids = {
     "Bitcoin (BTC)":       "bitcoin",
     "Ethereum (ETH)":      "ethereum",
@@ -37,7 +40,9 @@ coincap_ids = {
     "Stellar (XLM)":       "stellar"
 }
 
-# Función para descargar datos desde CoinCap con intervalo diario fijo
+###############################################################
+# Función para descargar datos desde CoinCap (diario)
+###############################################################
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
@@ -49,7 +54,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
         if resp.status_code == 200:
             data = resp.json()
             if "data" not in data:
-                st.warning("CoinCap: Datos no disponibles ('data' faltante).")
+                st.warning("CoinCap: Datos no disponibles (falta 'data').")
                 return None
             df = pd.DataFrame(data["data"])
             if df.empty:
@@ -76,10 +81,12 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
         else:
             st.info(f"CoinCap: status code {resp.status_code}. Revisa los parámetros o prueba otro rango.")
             return None
-    st.info("CoinCap: Número máximo de reintentos alcanzado.")
+    st.info("CoinCap: Se alcanzó el número máximo de reintentos sin éxito.")
     return None
 
-# Función para añadir indicadores técnicos (RSI, MACD, Bollinger Bands)
+###############################################################
+# Funciones para indicadores técnicos
+###############################################################
 def add_indicators(df):
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -91,7 +98,9 @@ def add_indicators(df):
 def add_all_indicators(df):
     return add_indicators(df)
 
-# Función para crear secuencias a partir de una serie escalada
+###############################################################
+# Creación de secuencias para LSTM
+###############################################################
 def create_sequences(data, window_size=30):
     if len(data) <= window_size:
         st.warning(f"No hay suficientes datos para una ventana de {window_size} días. Prueba otro rango.")
@@ -102,7 +111,9 @@ def create_sequences(data, window_size=30):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
-# Construcción del modelo LSTM: Conv1D + 3 capas Bidirectional LSTM con Dropout y Dense final
+###############################################################
+# Construcción del modelo LSTM
+###############################################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -117,7 +128,9 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
-# Función para entrenar el modelo LSTM y hacer predicciones (test y futuro)
+###############################################################
+# Entrenamiento y predicción con LSTM
+###############################################################
 def train_and_predict(
     coin_id,
     use_custom_range,
@@ -144,7 +157,7 @@ def train_and_predict(
         df_prices = add_all_indicators(df_prices)
 
     if "close_price" not in df_prices.columns:
-        st.warning("No se encontró la columna 'close_price' tras la descarga o indicadores.")
+        st.warning("No se encontró la columna 'close_price'.")
         return None
 
     data_for_model = df_prices[["close_price"]].values
@@ -153,7 +166,7 @@ def train_and_predict(
 
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
-        st.warning("No hay suficientes datos para entrenar (split_index <= window_size). Reajusta parámetros.")
+        st.warning("No hay suficientes datos para entrenar. Reajusta parámetros.")
         return None
     train_data = scaled_data[:split_index]
     test_data = scaled_data[split_index:]
@@ -209,7 +222,7 @@ def train_and_predict(
     return df_prices, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ###############################################################
-# 7. Función principal de la app
+# Lógica principal de la app
 ###############################################################
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
@@ -226,8 +239,8 @@ def main_app():
     )
     coin_id = coincap_ids[crypto_name]
 
-    # Opción para rango de fechas
-    st.sidebar.subheader("Rango de Fechas")
+    # Opción para habilitar rango de fechas personalizado
+    st.sidebar.subheader("Rango de Fechas (Diario)")
     use_custom_range = st.sidebar.checkbox(
         "Habilitar rango de fechas",
         value=True,
@@ -236,8 +249,8 @@ def main_app():
     default_start = datetime(2021, 1, 1)
     default_end = datetime.now()
     if use_custom_range:
-        start_date = st.sidebar.date_input("Fecha de inicio", default_start)
-        end_date = st.sidebar.date_input("Fecha de fin", default_end)
+        start_date = st.sidebar.date_input("Fecha de inicio (DD/MM/AAAA)", default_start)
+        end_date = st.sidebar.date_input("Fecha de fin (DD/MM/AAAA)", default_end)
         start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
         end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
     else:
@@ -264,12 +277,14 @@ def main_app():
         help="Muestra un resumen estadístico del histórico de precios."
     )
 
-    # Escenario del modelo
+    # Escenario del modelo con breve descripción
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox(
         "Elige un escenario:",
         ["Pesimista", "Neutro", "Optimista"],
-        help="Ajusta automáticamente los hiperparámetros del modelo."
+        help=("Pesimista: Predicciones conservadoras, ajustadas a riesgos altos. "
+              "Neutro: Balance entre riesgo y retorno. "
+              "Optimista: Predicciones agresivas con mayor potencial de retorno.")
     )
     if scenario == "Pesimista":
         epochs_val = 20
@@ -288,7 +303,6 @@ def main_app():
     df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
-        # Formateo de fecha en estilo DD/MM/YYYY
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
         fig_hist = px.line(
             df_chart, x="ds_str", y="close_price",
@@ -307,7 +321,7 @@ def main_app():
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
-    # Pestañas: Entrenamiento/Test y Predicción
+    # Pestañas para Entrenamiento/Test y Predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
