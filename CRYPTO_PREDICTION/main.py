@@ -396,20 +396,16 @@ def setup_x_api():
     
     Notes:
         No imprime Secrets en la interfaz para evitar exposiciones de seguridad.
-        Verifica si 'x_api.bearer_token' o 'bearer_token' están configurados correctamente en Streamlit Secrets.
-        Si eliminas [x_api], usa st.secrets["bearer_token"] directamente.
+        Usa el Bearer Token generado en X Developer Portal para el plan Free, accediendo directamente a st.secrets["bearer_token"].
+        Asegúrate de que 'bearer_token' esté configurado correctamente en Streamlit Secrets sin [x_api].
     """
     try:
         secrets = st.secrets
-        # Intentar con la estructura jerárquica [x_api]
-        bearer_token = secrets.get("x_api", {}).get("bearer_token", "")
-        # Si [x_api] no existe, intentar con nombre directo
-        if not bearer_token:
-            bearer_token = secrets.get("bearer_token", "")
-        if not bearer_token:
-            raise ValueError("Bearer Token no configurado o es vacío en los Secrets de Streamlit")
+        bearer_token = secrets.get("bearer_token", "")
+        if not bearer_token or bearer_token.strip() == "":
+            raise ValueError("Bearer Token no configurado, vacío, o contiene solo espacios en los Secrets de Streamlit")
         
-        # Usar solo bearer_token para el plan gratuito
+        # Usar solo bearer_token para el plan gratuito de X API v2
         client = tweepy.Client(bearer_token=bearer_token)
         # Verificar si el cliente funciona con una solicitud mínima
         client.get_me()  # Prueba rápida para validar autenticación
