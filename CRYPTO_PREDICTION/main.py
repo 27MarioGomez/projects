@@ -130,7 +130,6 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.add(Dropout(0.3))
     model.add(Dense(1))
     opt = Adam(learning_rate=learning_rate)
-    # Se entrena en modo eager para evitar errores de retracing (aunque es menos eficiente)
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
@@ -158,14 +157,12 @@ def train_and_predict(
         return None
     df = temp_df.copy()
 
-    # Usamos solo 'close_price' (no se incluyen indicadores ni multivariable en esta versión)
     if "close_price" not in df.columns:
         st.warning("No se encontró 'close_price' en los datos.")
         return None
 
     data_for_model = df[["close_price"]].values
 
-    # Escalado de datos
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_target.fit_transform(data_for_model)
 
@@ -187,18 +184,17 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Limpiar la sesión para evitar conflictos
+    # Limpiar la sesión y deshabilitar eager execution para evitar errores de TensorArray
     tf.keras.backend.clear_session()
+    tf.config.run_functions_eagerly(False)  # Desactivar eager execution
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
-    # Entrenamos el modelo en modo eager para evitar errores en la gráfica de name_scope
     lstm_model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
         epochs=epochs,
         batch_size=batch_size,
-        verbose=1,
-        run_eagerly=True
+        verbose=1
     )
 
     test_preds_scaled = lstm_model.predict(X_test)
@@ -212,7 +208,6 @@ def train_and_predict(
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
-    # Predicción futura iterativa
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -221,7 +216,6 @@ def train_and_predict(
         future_preds_scaled.append(future_pred)
         new_feature = np.copy(current_input[:, -1:, :])
         new_feature[0, 0, 0] = future_pred
-        # Mantener las demás columnas sin cambios
         for c in range(1, X_train.shape[2]):
             new_feature[0, 0, c] = current_input[0, -1, c]
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
@@ -240,18 +234,25 @@ def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     try:
         import snscrape.modules.twitter as sntwitter
         from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-        # Forzamos que la librería use X como base
         sntwitter.TWITTER_BASE_URL = "https://x.com"
+        # Desactivar verificación SSL como workaround (no recomendado en producción)
+        import ssl
+        ssl._create_default_https_context = ssl._create_unverified_context
     except Exception as e:
         st.error(f"Error importando snscrape o vaderSentiment: {e}")
         return None, []
 
     keyword = crypto_name.split(" ")[0]
     tweets = []
-    for i, tweet in enumerate(sntwitter.TwitterSearchScraper(keyword).get_items()):
-        if i >= max_tweets:
-            break
-        tweets.append(tweet.content)
+    try:
+        for i, tweet in enumerate(sntwitter.TwitterSearchScraper(keyword).get_items()):
+            if i >= max_tweets:
+                break
+            tweets.append(tweet.content)
+    except Exception as e:
+        st.error(f"Error al obtener tweets: {e}")
+        return None, []
+
     if not tweets:
         return None, []
     analyzer = SentimentIntensityAnalyzer()
@@ -272,7 +273,6 @@ def main_app():
 
     st.sidebar.header("Configuración de la predicción")
 
-    # Selección de criptomoneda
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
@@ -280,7 +280,6 @@ def main_app():
     )
     coin_id = coincap_ids[crypto_name]
 
-    # Rango de fechas
     st.sidebar.subheader("Rango de Fechas")
     use_custom_range = st.sidebar.checkbox(
         "Habilitar rango de fechas",
@@ -298,14 +297,12 @@ def main_app():
         start_ms = None
         end_ms = None
 
-    # Parámetros de predicción
     st.sidebar.subheader("Parámetros de Predicción")
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
                                 help="Número de días a futuro a predecir.")
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
 
-    # Se elimina la opción de multivariable en esta versión
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox(
         "Elige un escenario:",
@@ -327,7 +324,6 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Visualización del histórico
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
@@ -340,7 +336,6 @@ def main_app():
         fig_hist.update_yaxes(tickformat=",.2f")
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45, nticks=10))
         st.plotly_chart(fig_hist, use_container_width=True)
-        # Estadísticas descriptivas
         if st.sidebar.checkbox("Ver estadísticas descriptivas", value=False):
             st.subheader("Estadísticas Descriptivas")
             st.write(df_prices["close_price"].describe().rename({
@@ -356,7 +351,6 @@ def main_app():
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
-    # Pestañas: Entrenamiento/Test, Predicción y Sentimiento en Twitter (X)
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}", "💬 Sentimiento en X"])
 
     with tabs[0]:
@@ -437,32 +431,14 @@ def main_app():
     with tabs[2]:
         st.header("Sentimiento en X")
         st.markdown("Analizando tweets recientes sobre la criptomoneda seleccionada...")
-        try:
-            import snscrape.modules.twitter as sntwitter
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            sntwitter.TWITTER_BASE_URL = "https://x.com"
-            keyword = crypto_name.split(" ")[0]
-            tweets = []
-            max_tweets = 50
-            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(keyword).get_items()):
-                if i >= max_tweets:
-                    break
-                tweets.append(tweet.content)
-            if tweets:
-                analyzer = SentimentIntensityAnalyzer()
-                scores = [analyzer.polarity_scores(t)['compound'] for t in tweets if t]
-                if scores:
-                    avg_sentiment = np.mean(scores)
-                    st.metric("Sentimiento Promedio", f"{avg_sentiment:.2f}")
-                    st.write("Ejemplos de tweets analizados:")
-                    for t in tweets[:5]:
-                        st.write(f"- {t}")
-                else:
-                    st.info("No se pudieron calcular scores de sentimiento.")
-            else:
-                st.info("No se encontraron tweets para analizar.")
-        except Exception as e:
-            st.error(f"Error al analizar tweets: {e}")
+        avg_sentiment, sample_tweets = analyze_twitter_sentiment(crypto_name)
+        if avg_sentiment is not None:
+            st.metric("Sentimiento Promedio", f"{avg_sentiment:.2f}")
+            st.write("Ejemplos de tweets analizados:")
+            for t in sample_tweets:
+                st.write(f"- {t}")
+        else:
+            st.info("No se encontraron tweets o hubo un error al analizar el sentimiento.")
 
 if __name__ == "__main__":
     main_app()
