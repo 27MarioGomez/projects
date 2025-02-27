@@ -126,6 +126,8 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.add(Dense(1))
     opt = Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss="mean_squared_error")
+    # Forzamos la construcción del modelo para evitar problemas de name_scope
+    model.build((None, input_shape[0], input_shape[1]))
     return model
 
 ##############################################
@@ -145,20 +147,16 @@ def train_and_predict(
     learning_rate=0.001
 ):
     """
-    Descarga datos de CoinCap, entrena un modelo LSTM usando 'close_price'
-    y realiza predicciones en test y a futuro.
-    Ajusta la predicción en función del sentimiento extraído de X.
+    Descarga datos de CoinCap, entrena un modelo LSTM usando 'close_price' y realiza
+    predicciones en el conjunto de test y a futuro. Además, ajusta la predicción futura
+    en función del sentimiento obtenido de X.
     """
-    # Limpiar la sesión al inicio para evitar problemas de name scopes
-    tf.keras.backend.clear_session()
-    
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
         st.warning("No se pudieron descargar datos suficientes. Reajusta el rango de fechas.")
         return None
     df = temp_df.copy()
 
-    # Se usa únicamente 'close_price'
     features = ["close_price"]
     if "close_price" not in features:
         st.warning("No se encontró 'close_price' para el entrenamiento.")
@@ -167,7 +165,6 @@ def train_and_predict(
     df_model = df[["ds"] + features].copy()
     data_for_model = df_model[features].values
 
-    # Escalado
     scaler_features = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_features.fit_transform(data_for_model)
     scaler_target = MinMaxScaler(feature_range=(0, 1))
@@ -212,7 +209,6 @@ def train_and_predict(
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
-    # Predicción futura iterativa
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -227,7 +223,7 @@ def train_and_predict(
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Análisis de sentimiento: se obtienen tweets para la criptomoneda y para "crypto"
+    # Incorporar análisis de sentimiento para ajustar la predicción futura
     coin_sentiment, _ = analyze_twitter_sentiment(crypto_name, max_tweets=50)
     industry_sentiment, _ = analyze_twitter_sentiment("crypto", max_tweets=50)
     if coin_sentiment is not None and industry_sentiment is not None:
@@ -243,10 +239,10 @@ def train_and_predict(
 def analyze_twitter_sentiment(keyword, max_tweets=50):
     """
     Extrae hasta max_tweets tweets relacionados con la keyword y calcula
-    el sentimiento promedio utilizando VaderSentiment. Se configura snscrape para usar "x.com".
-    Solo se consideran tweets con al menos 5 likes.
+    el sentimiento promedio utilizando VaderSentiment.
+    Se fuerza el uso de x.com para la búsqueda y se consideran solo tweets con al menos 5 likes.
     """
-    # Forzar el uso de x.com
+    # Forzar uso de x.com
     sntwitter.TWITTER_BASE_URL = "https://x.com"
     tweets = []
     threshold = 5
@@ -278,7 +274,6 @@ def main_app():
     st.markdown("**Fuente de Datos:** CoinCap")
 
     st.sidebar.header("Configuración de la predicción")
-
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
