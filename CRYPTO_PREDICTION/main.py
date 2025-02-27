@@ -562,7 +562,7 @@ def get_market_crypto_sentiment(max_tweets=30, retries=3, delay=5):
                     st.warning(f"Error 500 en API de X para mercado crypto, reintentando en {delay}s...")
                     time.sleep(delay)
                     continue
-            st.error(f"Error de API de X para mercado crypto: {e} (Código {e.response.status_code if e.response else 'N/A'}})")
+            st.error(f"Error de API de X para mercado crypto: {e} (Código {e.response.status_code if e.response else 'N/A'})")
             return 50.0
         except Exception as e:
             st.error(f"Error inesperado al obtener sentimiento del mercado crypto: {e}")
@@ -739,7 +739,7 @@ def main_app():
                 for tweet in relevant_tweets:
                     st.write(f"- **{tweet['texto']}** (Interacciones: {tweet['interacciones']}, Fecha: {tweet['fecha']})")
             except tweepy.TweepyException as e:
-                st.error(f"Error de API de X para tweets relevantes: {e} (Código {e.response.status_code if e.response else 'N/A'}})")
+                st.error(f"Error de API de X para tweets relevantes: {e} (Código {e.response.status_code if e.response else 'N/A'})")
             except Exception as e:
                 st.error(f"Error inesperado al obtener tweets relevantes: {e}")
         else:
