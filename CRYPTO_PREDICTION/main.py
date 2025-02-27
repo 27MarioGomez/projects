@@ -126,7 +126,6 @@ def build_lstm_model(input_shape, learning_rate=0.001):
     model.add(Dropout(0.3))
     model.add(Dense(1))
     opt = Adam(learning_rate=learning_rate)
-    # Se omite run_eagerly para evitar errores en la pila de scopes
     model.compile(optimizer=opt, loss="mean_squared_error")
     return model
 
@@ -157,7 +156,6 @@ def train_and_predict(
         return None
     df = temp_df.copy()
 
-    # Se usa únicamente 'close_price'
     features = ["close_price"]
     if "close_price" not in features:
         st.warning("No se encontró 'close_price' para el entrenamiento.")
@@ -190,7 +188,7 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    tf.keras.backend.clear_session()
+    # Se elimina clear_session para evitar el error "pop from empty list"
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
@@ -227,7 +225,7 @@ def train_and_predict(
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Análisis de sentimiento: se analizan tweets para la criptomoneda y para "crypto"
+    # Análisis de sentimiento: se extraen tweets para la criptomoneda y para "crypto"
     coin_sentiment, _ = analyze_twitter_sentiment(crypto_name, max_tweets=50)
     industry_sentiment, _ = analyze_twitter_sentiment("crypto", max_tweets=50)
     if coin_sentiment is not None and industry_sentiment is not None:
@@ -238,7 +236,7 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Análisis de sentimiento en X
+# Análisis de sentimiento en X (Twitter)
 ##############################################
 def analyze_twitter_sentiment(keyword, max_tweets=50):
     """
@@ -248,9 +246,8 @@ def analyze_twitter_sentiment(keyword, max_tweets=50):
     """
     tweets = []
     threshold = 5
-    # Se utiliza el dominio x.com para la búsqueda
-    for i, tweet in enumerate(sntwitter.TwitterSearchScraper(
-            f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query").get_items()):
+    search_url = f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query"
+    for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url).get_items()):
         try:
             if tweet.likeCount is not None and tweet.likeCount >= threshold:
                 tweets.append(tweet.content)
