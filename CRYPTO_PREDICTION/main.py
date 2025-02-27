@@ -348,6 +348,9 @@ def train_and_predict_with_sentiment(
 
     # Verificar dimensiones después del ajuste para depuración
     st.write(f"Dimensión de X_train_adjusted después de ajuste: {X_train_adjusted.shape}")  # Debería ser (None, window_size, 2)
+    if X_train_adjusted.shape[-1] != 2:
+        st.error(f"Dimensión inesperada de X_train_adjusted: {X_train_adjusted.shape}. Se esperaba (None, {window_size}, 2)")
+        return None
 
     # Entrenar el modelo ajustado para manejar precio + sentimiento
     lstm_model = train_model(X_train_adjusted, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate)
@@ -393,11 +396,16 @@ def setup_x_api():
     
     Notes:
         No imprime Secrets en la interfaz para evitar exposiciones de seguridad.
-        Asegúrate de que 'x_api.bearer_token' esté configurado correctamente en Streamlit Secrets.
+        Verifica si 'x_api.bearer_token' o 'bearer_token' están configurados correctamente en Streamlit Secrets.
+        Si eliminas [x_api], usa st.secrets["bearer_token"] directamente.
     """
     try:
-        secrets = st.secrets["x_api"]
-        bearer_token = secrets.get("bearer_token", "")
+        secrets = st.secrets
+        # Intentar con la estructura jerárquica [x_api]
+        bearer_token = secrets.get("x_api", {}).get("bearer_token", "")
+        # Si [x_api] no existe, intentar con nombre directo
+        if not bearer_token:
+            bearer_token = secrets.get("bearer_token", "")
         if not bearer_token:
             raise ValueError("Bearer Token no configurado o es vacío en los Secrets de Streamlit")
         
