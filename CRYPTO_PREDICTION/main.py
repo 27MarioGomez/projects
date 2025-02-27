@@ -157,10 +157,10 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     """
     Entrena el modelo LSTM mejorado de forma aislada para evitar conflictos con el contexto global.
     """
-    # Reiniciar completamente el grafo de TensorFlow para evitar conflictos
-    tf.keras.backend.clear_session()
+    # Usar un enfoque minimalista: reiniciar TensorFlow y construir/entrenar el modelo directamente
+    tf.keras.backend.clear_session()  # Reiniciar el grafo para evitar conflictos
     
-    # Crear y entrenar el modelo directamente, confiando en TensorFlow predeterminado
+    # Crear y entrenar el modelo sin manipular name_scope_stack manualmente
     model = build_improved_lstm_model(input_shape, learning_rate=learning_rate)
     model.fit(
         X_train, y_train,
