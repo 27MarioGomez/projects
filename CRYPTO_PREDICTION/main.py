@@ -187,7 +187,7 @@ def get_crypto_sentiment_lunarcrush(symbol):
         final = max(0, min(100, raw))
         return final
     except Exception as e:
-        st.warning("Streamlit tiene problemas con la conexión. Usamos un valor neutro para el sentimiento.")
+        st.warning("Streamlit está experimentando algunos problemas. Usamos un valor neutro para el sentimiento.")
         return 50.0
 
 def get_market_crypto_sentiment_lunarcrush():
@@ -207,7 +207,7 @@ def get_market_crypto_sentiment_lunarcrush():
             st.warning(f"LunarCrush (market): Error {resp.status_code}.")
             return 50.0
     except Exception as e:
-        st.warning("Streamlit tiene problemas con la conexión. Usamos un valor neutro para el sentimiento.")
+        st.warning("Streamlit está experimentando algunos problemas. Usamos un valor neutro para el sentimiento.")
         return 50.0
 
 def get_lunarcrush_news(symbol, limit=5):
@@ -228,7 +228,7 @@ def get_lunarcrush_news(symbol, limit=5):
             })
         return news_list
     except Exception as e:
-        st.warning("Streamlit tiene problemas con la conexión. No mostramos noticias.")
+        st.warning("No se pueden mostrar noticias ahora mismo, vuelve luego.")
         return []
 
 ##############################################
@@ -323,7 +323,7 @@ def main_app():
     st.session_state["crypto_name"] = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
-        help="Elige la criptomoneda que quieres analizar."
+        help="Elige la criptomoneda que deseas analizar."
     )
     coin_id = coincap_ids[st.session_state["crypto_name"]]
 
@@ -384,7 +384,7 @@ def main_app():
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir", key="train_test"):
-            with st.spinner("Entrenando el modelo, espera un momento..."):
+            with st.spinner("Esto puede tardar un poco, por favor espera..."):
                 result = train_and_predict_with_sentiment(
                     coin_id=coin_id,
                     use_custom_range=use_custom_range,
@@ -395,23 +395,23 @@ def main_app():
                 )
             if result is not None:
                 df_model, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor, symbol = result
-                st.success("Modelo entrenado y predicciones generadas!")
+                st.success("Entrenamiento y predicción completados!")
                 col1, col2 = st.columns(2)
                 col1.metric(
                     "RMSE (Test)",
                     f"{rmse:.2f}",
-                    help=f"Error promedio en dólares: {rmse:.2f}."
+                    help=f"Este valor indica el error promedio en dólares. Un RMSE de {rmse:.2f} significa que la predicción puede variar en promedio {rmse:.2f} dólares arriba o abajo del valor real."
                 )
                 col2.metric(
                     "MAPE (Test)",
                     f"{mape:.2f}%",
-                    help=f"Error porcentual promedio: {mape:.2f}%."
+                    help=f"Este porcentaje muestra el error promedio en términos relativos. Un MAPE de {mape:.2f}% indica que, en promedio, la predicción se desvía un {mape:.2f}% del valor real."
                 )
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
-                fig_test.add_trace(go.Scatter(x=test_dates, y=y_test_real.flatten(), mode="lines", name="Precio Real"))
-                fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(), mode="lines", name="Predicción"))
+                fig_test.add_trace(go.Scatter(x=test_dates, y=y_test_real.flatten(), mode="lines", name="Precio Real (Test)"))
+                fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(), mode="lines", name="Predicción (Test)"))
                 fig_test.update_layout(title=f"Comparación en Test: {symbol}", xaxis_title="Fecha", yaxis_title="Precio en USD")
                 fig_test.update_yaxes(tickformat=",.2f")
                 st.plotly_chart(fig_test, use_container_width=True)
@@ -428,15 +428,15 @@ def main_app():
             pred_series = np.concatenate(([current_price], future_preds))
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(x=future_dates, y=pred_series, mode="lines+markers", name="Predicción Futura"))
-            fig_future.update_layout(title=f"Predicción a {horizon} días - {symbol} (Sentimiento: {sentiment_factor:.2f})",
+            fig_future.update_layout(title=f"Predicción a Futuro ({horizon} días) - {symbol} (Factor Sent.: {sentiment_factor:.2f})",
                                      xaxis_title="Fecha", yaxis_title="Precio en USD")
             fig_future.update_yaxes(tickformat=",.2f")
             st.plotly_chart(fig_future, use_container_width=True)
-            st.subheader("Valores de la Predicción")
+            st.subheader("Valores Numéricos de la Predicción Futura")
             future_df = pd.DataFrame({"Fecha": future_dates, "Predicción": pred_series})
             st.dataframe(future_df)
         else:
-            st.info("Entrena el modelo para ver predicciones futuras.")
+            st.info("Primero entrena el modelo para generar predicciones futuras.")
 
     with tabs[2]:
         st.header(f"Noticias recientes de {st.session_state['crypto_name']}")
@@ -452,9 +452,9 @@ def main_app():
                     st.write(f"Publicado: {item['published_at']}")
                     st.write("---")
             else:
-                st.write("No hay noticias disponibles (limitado por el plan Free).")
+                st.write("No hay noticias disponibles en este momento.")
         else:
-            st.info("Entrena el modelo para ver noticias.")
+            st.info("Primero entrena el modelo para mostrar noticias.")
 
 if __name__ == "__main__":
     main_app()
