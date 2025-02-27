@@ -156,6 +156,31 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
     return model
 
 ##############################################
+# Ajuste dinámico de hiperparámetros
+##############################################
+def get_dynamic_params(df, horizon_days):
+    """
+    Calcula hiperparámetros dinámicos basados en las características de los datos.
+    """
+    data_len = len(df)
+    volatility = df["close_price"].pct_change().std()  # Volatilidad histórica
+    mean_price = df["close_price"].mean()
+
+    # Tamaño de ventana: proporcional al horizonte, entre 10 y 60 días, y limitado por datos
+    window_size = min(max(10, horizon_days * 2), min(60, data_len // 2))
+    
+    # Epochs: más datos o volatilidad implican más épocas, entre 20 y 50
+    epochs = min(50, max(20, int(data_len / 100) + int(volatility * 100)))
+    
+    # Batch size: menor para alta volatilidad o menos datos
+    batch_size = 16 if volatility > 0.05 or data_len < 500 else 32
+    
+    # Learning rate: menor para precios altos o alta volatilidad
+    learning_rate = 0.0005 if mean_price > 1000 or volatility > 0.1 else 0.001
+    
+    return window_size, epochs, batch_size, learning_rate
+
+##############################################
 # Entrenamiento y predicción con LSTM
 ##############################################
 def train_and_predict(
@@ -164,11 +189,7 @@ def train_and_predict(
     start_ms,
     end_ms,
     horizon_days=30,
-    window_size=30,
-    test_size=0.2,
-    epochs=10,
-    batch_size=32,
-    learning_rate=0.001
+    test_size=0.2
 ):
     """
     Descarga datos de CoinCap, entrena un modelo LSTM y realiza predicciones en test y a futuro.
@@ -182,6 +203,11 @@ def train_and_predict(
     if "close_price" not in df.columns:
         st.warning("No se encontró 'close_price' en los datos.")
         return None
+
+    # Calcular hiperparámetros dinámicos
+    window_size, epochs, batch_size, learning_rate = get_dynamic_params(df, horizon_days)
+    st.info(f"Hiperparámetros ajustados: window_size={window_size}, epochs={epochs}, "
+            f"batch_size={batch_size}, learning_rate={learning_rate}")
 
     data_for_model = df[["close_price"]].values
 
@@ -310,29 +336,7 @@ def main_app():
     st.sidebar.subheader("Parámetros de Predicción")
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30,
                                 help="Número de días a futuro a predecir.")
-    auto_window = min(60, max(5, horizon * 2))
-    st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
-
-    st.sidebar.subheader("Escenario del Modelo")
-    scenario = st.sidebar.selectbox(
-        "Elige un escenario:",
-        ["Pesimista", "Neutro", "Optimista"],
-        index=0,
-        help=("Pesimista: Predicciones conservadoras. Neutro: Balance. "
-              "Optimista: Predicciones agresivas con mayor potencial.")
-    )
-    if scenario == "Pesimista":
-        epochs_val = 20
-        batch_size_val = 32
-        learning_rate_val = 0.001
-    elif scenario == "Neutro":
-        epochs_val = 30
-        batch_size_val = 32
-        learning_rate_val = 0.0008
-    else:
-        epochs_val = 50
-        batch_size_val = 16
-        learning_rate_val = 0.0005
+    st.sidebar.markdown("**Nota:** Los hiperparámetros (ventana, épocas, etc.) se ajustan automáticamente según los datos.")
 
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
@@ -373,11 +377,7 @@ def main_app():
                     start_ms=start_ms,
                     end_ms=end_ms,
                     horizon_days=horizon,
-                    window_size=auto_window,
-                    test_size=0.2,
-                    epochs=epochs_val,
-                    batch_size=batch_size_val,
-                    learning_rate=learning_rate_val
+                    test_size=0.2
                 )
             if result is not None:
                 df_model, test_preds, y_test_real, future_preds, rmse, mape = result
