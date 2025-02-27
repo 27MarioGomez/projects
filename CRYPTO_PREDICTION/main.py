@@ -22,34 +22,68 @@ import time
 ##############################################
 
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """Calcula el MAPE evitando divisiones por cero."""
+    """Calcula el MAPE evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario con IDs de criptomonedas para CoinCap
-coincap_ids = {
-    "Bitcoin (BTC)":       "bitcoin",
-    "Ethereum (ETH)":      "ethereum",
-    "Ripple (XRP)":        "xrp",
-    "Binance Coin (BNB)":  "binance-coin",
-    "Cardano (ADA)":       "cardano",
-    "Solana (SOL)":        "solana",
-    "Dogecoin (DOGE)":     "dogecoin",
-    "Polkadot (DOT)":      "polkadot",
-    "Polygon (MATIC)":     "polygon",
-    "Litecoin (LTC)":      "litecoin",
-    "TRON (TRX)":          "tron",
-    "Stellar (XLM)":       "stellar"
+# Diccionario combinado con IDs para ambas fuentes
+crypto_ids = {
+    "Bitcoin (BTC)": {
+        "coincap": "bitcoin",
+        "coingecko": "bitcoin"
+    },
+    "Ethereum (ETH)": {
+        "coincap": "ethereum",
+        "coingecko": "ethereum"
+    },
+    "Ripple (XRP)": {
+        "coincap": "xrp",
+        "coingecko": "ripple"
+    },
+    "Binance Coin (BNB)": {
+        "coincap": "binance-coin",
+        "coingecko": "binancecoin"
+    },
+    "Cardano (ADA)": {
+        "coincap": "cardano",
+        "coingecko": "cardano"
+    },
+    "Solana (SOL)": {
+        "coincap": "solana",
+        "coingecko": "solana"
+    },
+    "Dogecoin (DOGE)": {
+        "coincap": "dogecoin",
+        "coingecko": "dogecoin"
+    },
+    "Polkadot (DOT)": {
+        "coincap": "polkadot",
+        "coingecko": "polkadot"
+    },
+    "Polygon (MATIC)": {
+        "coincap": "polygon",
+        "coingecko": "polygon"
+    },
+    "Litecoin (LTC)": {
+        "coincap": "litecoin",
+        "coingecko": "litecoin"
+    },
+    "TRON (TRX)": {
+        "coincap": "tron",
+        "coingecko": "tron"
+    },
+    "Stellar (XLM)": {
+        "coincap": "stellar",
+        "coingecko": "stellar"
+    }
 }
 
 ##############################################
-# Descarga de datos desde CoinCap
+# Descarga desde CoinCap
 ##############################################
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
-    se descarga el rango correspondiente; de lo contrario, se descarga todo el histórico.
-    Retorna un DataFrame con 'ds', 'close_price' y 'volume'.
+    Descarga datos de CoinCap (intervalo diario) y retorna un DataFrame con 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -71,7 +105,6 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                 return None
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-            # Extraer volumen si está disponible; de lo contrario, fijarlo a 0
             if "volumeUsd" in df.columns:
                 df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce").fillna(0)
             else:
@@ -94,11 +127,84 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     return None
 
 ##############################################
-# Indicadores técnicos
+# Descarga desde CoinGecko (para volumen y market cap)
+##############################################
+@st.cache_data
+def load_coingecko_data(coin_id, days="max"):
+    """
+    Descarga datos desde CoinGecko usando el endpoint market_chart.
+    Retorna un DataFrame con 'ds', 'close_price', 'volume' y 'market_cap'.
+    """
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days={days}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers)
+    if resp.status_code != 200:
+        st.error(f"Error al obtener datos de CoinGecko (status code {resp.status_code}).")
+        return None
+    data = resp.json()
+    if "prices" not in data or "total_volumes" not in data or "market_caps" not in data:
+        st.error("CoinGecko: datos incompletos.")
+        return None
+    df_prices = pd.DataFrame(data["prices"], columns=["timestamp", "close_price"])
+    df_vol = pd.DataFrame(data["total_volumes"], columns=["timestamp", "volume"])
+    df_mc = pd.DataFrame(data["market_caps"], columns=["timestamp", "market_cap"])
+    df = pd.merge(df_prices, df_vol, on="timestamp", how="outer")
+    df = pd.merge(df, df_mc, on="timestamp", how="outer")
+    df["ds"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df.drop(columns=["timestamp"], inplace=True)
+    df.sort_values(by="ds", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    df["close_price"] = pd.to_numeric(df["close_price"], errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+    df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce").fillna(0)
+    df = df[df["close_price"] > 0].copy()
+    return df
+
+##############################################
+# Combinar datos de CoinCap y CoinGecko
+##############################################
+@st.cache_data
+def load_combined_data(coin_id_cap, coin_id_cg, start_ms=None, end_ms=None):
+    """
+    Descarga datos de CoinCap y CoinGecko y los combina por fecha ('ds').
+    Para cada campo numérico, se toma el promedio de ambas fuentes (si ambas están disponibles).
+    """
+    df_cap = load_coincap_data(coin_id_cap, start_ms, end_ms)
+    df_cg = load_coingecko_data(coin_id_cg, days="max")
+    if df_cap is None and df_cg is None:
+        st.error("No se pudieron descargar datos de ninguna fuente.")
+        return None
+    # Si una de las fuentes está vacía, usar la otra
+    if df_cap is None or df_cap.empty:
+        return df_cg
+    if df_cg is None or df_cg.empty:
+        return df_cap
+    # Merge outer por 'ds'
+    df_comb = pd.merge(df_cap, df_cg, on="ds", how="outer", suffixes=("_cap", "_cg"))
+    df_comb.sort_values(by="ds", inplace=True)
+    df_comb.reset_index(drop=True, inplace=True)
+    # Para cada campo, tomar el promedio si ambos existen; de lo contrario, el que no sea NaN
+    def avg_field(row, field):
+        val1 = row.get(f"{field}_cap")
+        val2 = row.get(f"{field}_cg")
+        if pd.notna(val1) and pd.notna(val2):
+            return (val1 + val2) / 2
+        elif pd.notna(val1):
+            return val1
+        else:
+            return val2
+    for field in ["close_price", "volume", "market_cap"]:
+        df_comb[field] = df_comb.apply(lambda row: avg_field(row, field), axis=1)
+    # Seleccionar columnas finales
+    df_final = df_comb[["ds", "close_price", "volume", "market_cap"]].copy()
+    return df_final
+
+##############################################
+# Indicadores técnicos (sobre la serie combinada)
 ##############################################
 def add_indicators(df):
     """
-    Calcula indicadores técnicos (RSI, MACD, Bollinger Bands) a partir de 'close_price'.
+    Calcula RSI, MACD y Bollinger Bands a partir de 'close_price'.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -131,7 +237,7 @@ def create_sequences(data, window_size=30):
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Construye un modelo secuencial que combina Conv1D y tres capas Bidirectional LSTM con Dropout.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -151,6 +257,7 @@ def build_lstm_model(input_shape, learning_rate=0.001):
 ##############################################
 def train_and_predict(
     coin_id,
+    coin_id_cg,
     use_custom_range,
     start_ms,
     end_ms,
@@ -164,24 +271,24 @@ def train_and_predict(
     use_multivariable=False
 ):
     """
-    Descarga datos de CoinCap, añade indicadores (y volumen si se usa multivariable),
-    entrena un modelo LSTM y realiza predicciones en test y a futuro.
+    Descarga datos de CoinCap y CoinGecko, los combina y añade indicadores si se desea.
+    Luego entrena un modelo LSTM (univariado o multivariable) y realiza predicciones.
     """
-    temp_df = load_coincap_data(coin_id, start_ms, end_ms)
-    if temp_df is None or temp_df.empty:
-        st.warning("No se pudieron descargar datos suficientes. Reajusta el rango de fechas.")
+    df_combined = load_combined_data(coin_id, coin_id_cg, start_ms, end_ms)
+    if df_combined is None or df_combined.empty:
+        st.warning("No se pudieron descargar datos suficientes de ambas fuentes. Reajusta el rango de fechas.")
         return None
-    df = temp_df.copy()
+    df = df_combined.copy()
 
     if use_indicators:
         df = add_all_indicators(df)
 
-    # Definir las features a usar
+    # Seleccionar features
     if use_multivariable:
         features = ["close_price"]
-        # Incluir volumen solo si no es todo NaN y tiene variación
-        if "volume" in df.columns and (not df["volume"].isna().all()) and (df["volume"].var() > 0):
+        if "volume" in df.columns and not df["volume"].isna().all() and df["volume"].var() > 0:
             features.append("volume")
+        # Agregar indicadores si existen
         for col in ["rsi", "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9",
                     "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0"]:
             if col in df.columns:
@@ -243,7 +350,6 @@ def train_and_predict(
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
-    # Predicción futura iterativa
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -261,7 +367,7 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Análisis de Sentimiento en X (Twitter)
+# Módulo de Sentimiento en X (Twitter)
 ##############################################
 def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     """
@@ -293,16 +399,16 @@ def analyze_twitter_sentiment(crypto_name, max_tweets=50):
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
-    st.markdown("**Fuente de Datos:** CoinCap")
+    st.markdown("**Fuente de Datos:** CoinCap + CoinGecko")
 
     st.sidebar.header("Configuración de la predicción")
-
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
-        list(coincap_ids.keys()),
+        list(crypto_ids.keys()),
         help="Elige la criptomoneda para la predicción."
     )
-    coin_id = coincap_ids[crypto_name]
+    coin_id_cap = crypto_ids[crypto_name]["coincap"]
+    coin_id_cg = crypto_ids[crypto_name]["coingecko"]
 
     st.sidebar.subheader("Rango de Fechas")
     use_custom_range = st.sidebar.checkbox(
@@ -359,8 +465,8 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Visualización del histórico
-    df_prices = load_coincap_data(coin_id, start_ms, end_ms)
+    # Cargar datos combinados
+    df_prices = load_combined_data(coin_id_cap, coin_id_cg, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
@@ -394,7 +500,8 @@ def main_app():
         if st.button("Entrenar Modelo y Predecir", key="train_test"):
             with st.spinner("Entrenando el modelo, por favor espera..."):
                 result = train_and_predict(
-                    coin_id=coin_id,
+                    coin_id=coin_id_cap,
+                    coin_id_cg=coin_id_cg,
                     use_custom_range=use_custom_range,
                     start_ms=start_ms,
                     end_ms=end_ms,
@@ -472,8 +579,6 @@ def main_app():
         try:
             import snscrape.modules.twitter as sntwitter
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
-            # Usamos "X" (antes Twitter) para obtener tweets
             keyword = crypto_name.split(" ")[0]
             tweets = []
             max_tweets = 50
