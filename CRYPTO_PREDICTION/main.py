@@ -19,7 +19,7 @@ import time
 
 def robust_mape(y_true, y_pred, eps=1e-9):
     """
-    Cálculo robusto de MAPE evitando divisiones por cero.
+    Calcula el MAPE evitando divisiones por cero.
     """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
@@ -42,14 +42,14 @@ coincap_ids = {
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap con intervalo diario (d1).
-    Intenta además extraer 'volumeUsd' si está disponible.
+    Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
+    se descarga el rango correspondiente; de lo contrario, se descarga todo el histórico.
+    Devuelve un DataFrame con las columnas 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
         url += f"&start={start_ms}&end={end_ms}"
     headers = {"User-Agent": "Mozilla/5.0"}
-
     for attempt in range(max_retries):
         resp = requests.get(url, headers=headers)
         if resp.status_code == 200:
@@ -61,32 +61,26 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
             if df.empty:
                 st.info("CoinCap devolvió datos vacíos. Reajusta el rango de fechas.")
                 return None
-            # Verificamos columnas disponibles
             if "time" not in df.columns or "priceUsd" not in df.columns:
                 st.warning("CoinCap: Columnas 'time' o 'priceUsd' no encontradas.")
                 st.write(df.head())
                 return None
-
-            # Convertimos a datetime y float
             df["ds"] = pd.to_datetime(df["time"], unit="ms")
             df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-
-            # Intentamos extraer volumen (si existe)
+            # Si la API devuelve volumen, se intenta extraer; de lo contrario se fija en 0.
             if "volumeUsd" in df.columns:
                 df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce")
             else:
-                # Si no existe, creamos una columna de volumen con NaN o 0
-                df["volume"] = np.nan  # o df["volume"] = 0.0
-
-            # Ajustamos el DataFrame final
+                df["volume"] = 0.0
             df = df[["ds", "close_price", "volume"]]
             df.dropna(subset=["ds", "close_price"], inplace=True)
             df.sort_values(by="ds", ascending=True, inplace=True)
             df.reset_index(drop=True, inplace=True)
+            # Rellenar faltantes en volumen y forzar valores positivos
+            if "volume" in df.columns:
+                df["volume"] = df["volume"].fillna(0)
             df = df[df["close_price"] > 0].copy()
-
             return df
-
         elif resp.status_code == 429:
             st.warning(f"CoinCap: Error 429 en intento {attempt+1}. Esperando {15*(attempt+1)}s...")
             time.sleep(15*(attempt+1))
@@ -96,24 +90,16 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
         else:
             st.info(f"CoinCap: status code {resp.status_code}. Revisa parámetros.")
             return None
-
     st.info("CoinCap: Máx reintentos alcanzado.")
     return None
 
 def add_indicators(df):
     """
-    Añade indicadores técnicos usando precio de cierre y volumen si está disponible.
+    Calcula indicadores técnicos (RSI, MACD, Bollinger Bands) a partir de 'close_price'.
     """
-    # RSI, MACD y Bollinger Bands a partir de 'close_price'
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
     bbands_df = ta.bbands(df["close_price"], length=20, std=2)
-
-    # Si la columna 'volume' existe y no es NaN, podemos calcular OBV u otros indicadores
-    if "volume" in df.columns:
-        # Ejemplo: On Balance Volume
-        df["obv"] = ta.obv(df["close_price"], df["volume"])
-
     df = pd.concat([df, macd_df, bbands_df], axis=1)
     df.ffill(inplace=True)
     return df
@@ -124,7 +110,6 @@ def add_all_indicators(df):
 def create_sequences(data, window_size=30):
     """
     Crea secuencias de tamaño 'window_size' para entrenar el modelo LSTM.
-    data es un array 2D (n_samples, n_features).
     """
     if len(data) <= window_size:
         st.warning(f"No hay datos suficientes para ventana de {window_size} días.")
@@ -132,16 +117,12 @@ def create_sequences(data, window_size=30):
     X, y = [], []
     for i in range(window_size, len(data)):
         X.append(data[i - window_size : i])
-        # y se basa en la primera columna (close_price)
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina:
-    - Conv1D
-    - 3 capas Bidirectional LSTM con Dropout
-    - Dense final
+    Construye un modelo secuencial que combina Conv1D y tres capas Bidirectional LSTM con Dropout.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -171,11 +152,10 @@ def train_and_predict(
     use_multivariable=False
 ):
     """
-    Descarga datos de CoinCap, añade indicadores si se desea,
-    entrena un modelo LSTM (multivariable si use_multivariable=True),
-    y realiza predicciones (en test y a futuro).
+    Descarga datos de CoinCap, añade indicadores si se desea, 
+    y entrena un modelo LSTM. Se usa un modelo multivariable si se activa (precio + volumen + indicadores).
+    Realiza predicciones en el set de test y predicción futura iterativa.
     """
-    # Descarga datos usando rango o histórico completo
     if use_custom_range:
         df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     else:
@@ -184,52 +164,38 @@ def train_and_predict(
         st.warning("No se pudo descargar datos suficientes. Reajusta el rango de fechas.")
         return None
 
-    # Añadir indicadores
     if use_indicators:
         df_prices = add_all_indicators(df_prices)
 
-    # Definir las columnas de features
-    # La primera columna debe ser 'close_price' para que sea el target principal
+    # Definir las features a usar
     if use_multivariable:
-        # Ejemplo: usaremos close_price y volume
-        # (además de indicadores si existen)
-        # Verificamos si existe la columna 'volume'
         features = ["close_price"]
-        if "volume" in df_prices.columns:
-            # si no está vacía, la añadimos
-            if df_prices["volume"].notna().sum() > 0:
-                features.append("volume")
-
-        # Buscamos también las columnas de indicadores que existan
+        # Solo se añade volumen si tiene variación (varianza > 0)
+        if "volume" in df_prices.columns and df_prices["volume"].var() > 0:
+            features.append("volume")
         for col in ["rsi", "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9",
                     "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0", "obv"]:
             if col in df_prices.columns:
                 features.append(col)
-        # Eliminamos duplicados en caso de colisiones
         features = list(dict.fromkeys(features))
     else:
-        # Solo univariado: close_price
         features = ["close_price"]
 
-    # Nos aseguramos de que exista la columna 'close_price'
     if "close_price" not in features:
         st.warning("No se encontró 'close_price' para el entrenamiento.")
         return None
 
-    # Filtramos el DataFrame con las features
     df_model = df_prices[["ds"] + features].copy()
     data_for_model = df_model[features].values
 
-    # Escalado
-    # 1) Escalado de todas las features
+    # Escalado de todas las features
     scaler_features = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_features.fit_transform(data_for_model)
 
-    # 2) Escalado específico de la columna 'close_price' para la predicción final
+    # Escalado específico de close_price (target)
     scaler_target = MinMaxScaler(feature_range=(0, 1))
     scaler_target.fit(df_model[["close_price"]])
 
-    # Split en train/test
     split_index = int(len(scaled_data) * (1 - test_size))
     if split_index <= window_size:
         st.warning("Datos insuficientes para entrenar. Reajusta parámetros.")
@@ -237,8 +203,6 @@ def train_and_predict(
 
     train_data = scaled_data[:split_index]
     test_data = scaled_data[split_index:]
-
-    # Creación de secuencias
     X_train, y_train = create_sequences(train_data, window_size=window_size)
     if X_train is None:
         return None
@@ -246,16 +210,12 @@ def train_and_predict(
     if X_test is None:
         return None
 
-    # División en train/val
     val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Limpiar la sesión para evitar errores internos de TF
     tf.keras.backend.clear_session()
-
-    # Construir y entrenar el modelo
-    input_shape = (X_train.shape[1], X_train.shape[2])  # (window_size, num_features)
+    input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
         X_train, y_train,
@@ -265,9 +225,8 @@ def train_and_predict(
         verbose=1
     )
 
-    # Predicción en test
     test_preds_scaled = lstm_model.predict(X_test)
-    test_preds = scaler_target.inverse_transform(test_preds_scaled)  # inverso de la columna close_price
+    test_preds = scaler_target.inverse_transform(test_preds_scaled)
     y_test_deserialized = scaler_target.inverse_transform(y_test.reshape(-1, 1))
 
     valid_mask = ~np.isnan(test_preds) & ~np.isnan(y_test_deserialized)
@@ -277,8 +236,6 @@ def train_and_predict(
         rmse = np.sqrt(np.mean((y_test_deserialized[valid_mask] - test_preds[valid_mask]) ** 2))
         mape = robust_mape(y_test_deserialized[valid_mask], test_preds[valid_mask])
 
-    # Predicción futura iterativa
-    # Tomamos la última ventana y predecimos iterativamente la primera columna (close_price)
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
@@ -290,24 +247,47 @@ def train_and_predict(
     for _ in range(horizon_days):
         future_pred = predict_model(current_input)[0][0]
         future_preds_scaled.append(future_pred)
-
-        # En multivariable, solo estamos prediciendo la primera columna (close_price).
-        # Podemos dejar el resto de features fijos o en 0.
-        new_feature = np.copy(current_input[:, -1:, :])  # copiamos la última fila
-        # Sustituimos la columna 0 (close_price) con la predicción
+        new_feature = np.copy(current_input[:, -1:, :])
         new_feature[0, 0, 0] = future_pred
-
-        # El resto de columnas (volumen, indicadores) se podrían dejar igual, 
-        # o estimar, o simplemente poner 0
+        # Para el resto de features, dejamos el valor de la última fila actual
         for c in range(1, X_train.shape[2]):
-            new_feature[0, 0, c] = current_input[0, -1, c]  # dejamos fijo
-
+            new_feature[0, 0, c] = current_input[0, -1, c]
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
+##############################################
+# Función para obtener tweets y analizar sentimiento
+##############################################
+def get_tweets(keyword, max_tweets=50):
+    """
+    Extrae hasta 'max_tweets' tweets que contengan 'keyword' usando snscrape.
+    """
+    tweets = []
+    import snscrape.modules.twitter as sntwitter
+    for i, tweet in enumerate(sntwitter.TwitterSearchScraper(keyword).get_items()):
+        if i >= max_tweets:
+            break
+        tweets.append(tweet.content)
+    return tweets
+
+def analyze_tweets(tweets):
+    """
+    Analiza el sentimiento de una lista de tweets usando VaderSentiment.
+    Retorna el promedio de sentimiento y la lista de scores.
+    """
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+    analyzer = SentimentIntensityAnalyzer()
+    scores = [analyzer.polarity_scores(t)['compound'] for t in tweets if t]
+    if scores:
+        return np.mean(scores), scores
+    return None, None
+
+##############################################
+# Función principal de la app
+##############################################
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
@@ -347,24 +327,20 @@ def main_app():
     )
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
-
     use_indicators = st.sidebar.checkbox(
         "Incluir indicadores técnicos (RSI, MACD, BBANDS)",
         value=True,
         help="Calcula indicadores técnicos para enriquecer los datos."
     )
-
-    # Nuevo: permitir multivariable (close_price + volumen + indicadores)
-    use_multivariable = st.sidebar.checkbox(
-        "Usar multivariable (precio y volumen)",
-        value=False,
-        help="Incluye volumen y cualquier indicador adicional como features."
-    )
-
     show_stats = st.sidebar.checkbox(
         "Ver estadísticas descriptivas",
         value=False,
         help="Muestra un resumen estadístico del precio."
+    )
+    use_multivariable = st.sidebar.checkbox(
+        "Usar multivariable (precio + volumen + indicadores)",
+        value=False,
+        help="Incluye volumen y otros indicadores como features adicionales."
     )
 
     st.sidebar.subheader("Escenario del Modelo")
@@ -388,6 +364,7 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
+    # Visualización del histórico
     df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
@@ -400,7 +377,6 @@ def main_app():
         fig_hist.update_yaxes(tickformat=",.2f")
         fig_hist.update_layout(xaxis=dict(type="category", tickangle=45, nticks=10))
         st.plotly_chart(fig_hist, use_container_width=True)
-
         if show_stats:
             st.subheader("Estadísticas Descriptivas")
             st.write(df_prices["close_price"].describe().rename({
@@ -416,7 +392,7 @@ def main_app():
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
-    tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
+    tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}", "💬 Sentimiento en Twitter"])
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
@@ -442,7 +418,6 @@ def main_app():
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
-
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
@@ -467,7 +442,7 @@ def main_app():
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
                 st.info("No se pudo entrenar el modelo con los parámetros seleccionados.")
-
+    
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_name}")
         if 'result' in locals() and result is not None:
@@ -476,7 +451,6 @@ def main_app():
             current_price = df_model["close_price"].iloc[-1]
             future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
             pred_series = np.concatenate(([current_price], future_preds))
-
             fig_future = go.Figure()
             fig_future.add_trace(go.Scatter(
                 x=future_dates,
@@ -491,12 +465,39 @@ def main_app():
             )
             fig_future.update_yaxes(tickformat=",.2f")
             st.plotly_chart(fig_future, use_container_width=True)
-
             st.subheader("Valores Numéricos de la Predicción Futura")
             future_df = pd.DataFrame({"Fecha": future_dates, "Predicción": pred_series})
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
+
+    with tabs[2]:
+        st.header("Sentimiento en Twitter")
+        # Extraer tweets usando snscrape y analizar sentimiento con VaderSentiment
+        st.markdown("Analizando sentimiento de tweets sobre la criptomoneda...")
+        try:
+            import snscrape.modules.twitter as sntwitter
+            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+            tweets = []
+            max_tweets = 50
+            # Usamos la primera palabra del nombre (por ejemplo, "Bitcoin", "Ripple", etc.)
+            keyword = crypto_name.split(" ")[0]
+            for i, tweet in enumerate(sntwitter.TwitterSearchScraper(keyword).get_items()):
+                if i >= max_tweets:
+                    break
+                tweets.append(tweet.content)
+            if tweets:
+                analyzer = SentimentIntensityAnalyzer()
+                scores = [analyzer.polarity_scores(t)['compound'] for t in tweets if t]
+                avg_sentiment = np.mean(scores)
+                st.metric("Sentimiento Promedio", f"{avg_sentiment:.2f}")
+                st.write("Ejemplos de tweets analizados:")
+                for t in tweets[:5]:
+                    st.write(f"- {t}")
+            else:
+                st.info("No se encontraron tweets para analizar.")
+        except Exception as e:
+            st.error("Error al analizar tweets. Revisa la conexión o la disponibilidad de datos.")
 
 if __name__ == "__main__":
     main_app()
