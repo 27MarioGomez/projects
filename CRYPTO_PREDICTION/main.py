@@ -10,11 +10,14 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime, date
 from sklearn.preprocessing import MinMaxScaler
+import pandas_ta as ta
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import time
+import snscrape.modules.twitter as sntwitter
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 ##############################################
 # Funciones de apoyo
@@ -45,8 +48,8 @@ coincap_ids = {
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap con intervalo diario (d1). Si se definen start_ms y end_ms,
-    se descarga el rango correspondiente; de lo contrario, se descarga todo el histórico.
+    Descarga datos de CoinCap en intervalo diario (d1). Si se definen start_ms y end_ms,
+    se descarga el rango indicado; de lo contrario, se descarga todo el histórico.
     Retorna un DataFrame con las columnas 'ds', 'close_price' y 'volume'.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
@@ -111,7 +114,7 @@ def create_sequences(data, window_size=30):
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Construye un modelo secuencial que combina Conv1D y tres capas Bidirectional LSTM con Dropout.
+    Construye un modelo secuencial que combina una capa Conv1D y tres capas Bidirectional LSTM con Dropout.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -144,8 +147,8 @@ def train_and_predict(
 ):
     """
     Descarga datos de CoinCap, entrena un modelo LSTM usando 'close_price'
-    y realiza predicciones en test y a futuro. Además, ajusta la predicción
-    según el sentimiento extraído de X.
+    y realiza predicciones en el conjunto de test y a futuro.
+    Ajusta las predicciones en función del sentimiento extraído de X.
     """
     temp_df = load_coincap_data(coin_id, start_ms, end_ms)
     if temp_df is None or temp_df.empty:
@@ -186,6 +189,9 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+    # Para evitar el error "pop from empty list", forzamos la ejecución en modo eager
+    tf.config.run_functions_eagerly(True)
+
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
@@ -222,7 +228,7 @@ def train_and_predict(
 
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Análisis de sentimiento: extrae tweets para la criptomoneda y para "crypto"
+    # Análisis de sentimiento: se extraen tweets para la criptomoneda y para "crypto"
     coin_sentiment, _ = analyze_twitter_sentiment(crypto_name, max_tweets=50)
     industry_sentiment, _ = analyze_twitter_sentiment("crypto", max_tweets=50)
     if coin_sentiment is not None and industry_sentiment is not None:
@@ -233,20 +239,15 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Análisis de sentimiento en X (Twitter)
+# Análisis de sentimiento en X
 ##############################################
 def analyze_twitter_sentiment(keyword, max_tweets=50):
     """
-    Extrae hasta max_tweets tweets relacionados con la keyword y calcula el sentimiento
-    promedio utilizando VaderSentiment. Se configura snscrape para usar "x.com" como base.
+    Extrae hasta max_tweets tweets relacionados con la keyword y calcula
+    el sentimiento promedio utilizando VaderSentiment. Se configura snscrape para usar "x.com".
     Solo se consideran tweets con al menos 5 likes.
     """
-    import snscrape.modules.twitter as sntwitter
-    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
-    # Forzamos el uso del dominio "x.com" para la búsqueda
-    sntwitter.TWITTER_BASE_URL = "https://x.com"
-    
+    sntwitter.TWITTER_BASE_URL = "https://x.com"  # Forzar el uso de x.com
     tweets = []
     threshold = 5
     search_url = f"https://x.com/search?f=live&lang=en&q={keyword}&src=typed_query"
@@ -277,6 +278,7 @@ def main_app():
     st.markdown("**Fuente de Datos:** CoinCap")
 
     st.sidebar.header("Configuración de la predicción")
+
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
@@ -450,12 +452,10 @@ def main_app():
             max_tweets = 50
             threshold = 5
             search_url_coin = f"https://x.com/search?f=live&lang=en&q={coin_keyword}&src=typed_query"
-            # Forzamos el uso de x.com en snscrape
-            import snscrape.modules.twitter as sntwitter
             sntwitter.TWITTER_BASE_URL = "https://x.com"
             for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url_coin).get_items()):
                 try:
-                    if tweet.likeCount is not None and tweet.likeCount >= threshold:
+                    if hasattr(tweet, 'likeCount') and tweet.likeCount is not None and tweet.likeCount >= threshold:
                         tweets_coin.append(tweet.content)
                 except Exception:
                     tweets_coin.append(tweet.content)
@@ -465,13 +465,12 @@ def main_app():
             search_url_industry = "https://x.com/search?f=live&lang=en&q=crypto&src=typed_query"
             for i, tweet in enumerate(sntwitter.TwitterSearchScraper(search_url_industry).get_items()):
                 try:
-                    if tweet.likeCount is not None and tweet.likeCount >= threshold:
+                    if hasattr(tweet, 'likeCount') and tweet.likeCount is not None and tweet.likeCount >= threshold:
                         tweets_industry.append(tweet.content)
                 except Exception:
                     tweets_industry.append(tweet.content)
                 if i >= max_tweets:
                     break
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
             analyzer = SentimentIntensityAnalyzer()
             coin_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_coin if t]
             industry_scores = [analyzer.polarity_scores(t)['compound'] for t in tweets_industry if t]
