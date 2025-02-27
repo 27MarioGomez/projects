@@ -23,6 +23,7 @@ def robust_mape(y_true, y_pred, eps=1e-9):
     """
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
+# Diccionario con IDs de criptomonedas para CoinCap
 coincap_ids = {
     "Bitcoin (BTC)":       "bitcoin",
     "Ethereum (ETH)":      "ethereum",
@@ -41,7 +42,8 @@ coincap_ids = {
 @st.cache_data
 def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     """
-    Descarga datos de CoinCap en intervalo diario (d1).
+    Descarga datos de CoinCap con intervalo diario (d1).
+    start_ms y end_ms definen el rango de fechas en milisegundos, si se usan.
     """
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
     if start_ms is not None and end_ms is not None:
@@ -84,7 +86,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
 
 def add_indicators(df):
     """
-    Añade RSI, MACD y Bollinger Bands.
+    Añade RSI, MACD y Bollinger Bands a partir de la columna 'close_price'.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -98,7 +100,7 @@ def add_all_indicators(df):
 
 def create_sequences(data, window_size=30):
     """
-    Crea secuencias de longitud 'window_size'.
+    Crea secuencias de tamaño 'window_size' para entrenar el modelo LSTM.
     """
     if len(data) <= window_size:
         st.warning(f"No hay datos suficientes para ventana de {window_size} días.")
@@ -111,7 +113,7 @@ def create_sequences(data, window_size=30):
 
 def build_lstm_model(input_shape, learning_rate=0.001):
     """
-    Modelo LSTM + Conv1D + Bidirectional LSTM.
+    Modelo con Conv1D + LSTM bidireccional en varias capas.
     """
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=3, activation="relu", input_shape=input_shape))
@@ -140,7 +142,7 @@ def train_and_predict(
     learning_rate=0.001
 ):
     """
-    Entrena y predice con LSTM. 
+    Descarga, entrena y predice usando LSTM. 
     """
     if use_custom_range:
         df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
@@ -226,6 +228,7 @@ def main_app():
     st.markdown("**Fuente de Datos:** CoinCap")
 
     st.sidebar.header("Configuración de la predicción")
+
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
         list(coincap_ids.keys()),
@@ -233,7 +236,8 @@ def main_app():
     )
     coin_id = coincap_ids[crypto_name]
 
-    st.sidebar.subheader("Rango de Fechas (Diario)")
+    # Rango de Fechas
+    st.sidebar.subheader("Rango de Fechas")
     use_custom_range = st.sidebar.checkbox(
         "Habilitar rango de fechas",
         value=True,
@@ -242,14 +246,15 @@ def main_app():
     default_start = datetime(2021, 1, 1)
     default_end = datetime.now()
     if use_custom_range:
-        start_date = st.sidebar.date_input("Fecha de inicio (DD/MM/AAAA)", default_start)
-        end_date = st.sidebar.date_input("Fecha de fin (DD/MM/AAAA)", default_end)
+        start_date = st.sidebar.date_input("Fecha de inicio", default_start)
+        end_date = st.sidebar.date_input("Fecha de fin", default_end)
         start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
         end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
     else:
         start_ms = None
         end_ms = None
 
+    # Parámetros de Predicción
     st.sidebar.subheader("Parámetros de Predicción")
     horizon = st.sidebar.slider(
         "Días a predecir:",
@@ -258,6 +263,7 @@ def main_app():
     )
     auto_window = min(60, max(5, horizon * 2))
     st.sidebar.markdown(f"**Tamaño de ventana (auto): {auto_window} días**")
+
     use_indicators = st.sidebar.checkbox(
         "Incluir indicadores técnicos (RSI, MACD, BBANDS)",
         value=True,
@@ -269,11 +275,12 @@ def main_app():
         help="Muestra un resumen estadístico del precio."
     )
 
+    # Escenario del modelo
     st.sidebar.subheader("Escenario del Modelo")
     scenario = st.sidebar.selectbox(
         "Elige un escenario:",
         ["Pesimista", "Neutro", "Optimista"],
-        index=0,  # Por defecto selecciona "Pesimista"
+        index=0,  # Por defecto "Pesimista"
         help=("Pesimista: Predicciones conservadoras. Neutro: Balance. "
               "Optimista: Predicciones agresivas con mayor potencial.")
     )
@@ -290,9 +297,11 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
+    # Descarga y visualización del gráfico histórico
     df_prices = load_coincap_data(coin_id, start_ms=start_ms, end_ms=end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
+        # Fechas en formato DD/MM/YYYY
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
         fig_hist = px.line(
             df_chart, x="ds_str", y="close_price",
@@ -305,11 +314,11 @@ def main_app():
 
         if show_stats:
             st.subheader("Estadísticas Descriptivas")
-            # Solo la columna de precios
+            # Solo estadísticas de la columna de precios
             st.write(df_prices["close_price"].describe().rename({
                 "count": "Cuenta",
                 "mean": "Media",
-                "std": "Desv.",
+                "std": "Desv. Estándar",
                 "min": "Mínimo",
                 "25%": "Percentil 25",
                 "50%": "Mediana",
@@ -319,6 +328,7 @@ def main_app():
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
+    # Pestañas: Entrenamiento/Test y Predicción
     tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}"])
 
     with tabs[0]:
@@ -344,6 +354,7 @@ def main_app():
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{rmse:.2f}")
                 col2.metric("MAPE (Test)", f"{mape:.2f}%")
+
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
