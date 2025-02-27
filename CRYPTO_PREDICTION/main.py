@@ -22,25 +22,23 @@ import time
 ##############################################
 
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """
-    Calcula el MAPE evitando divisiones por cero.
-    """
+    """Calcula el MAPE evitando divisiones por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionario con IDs de criptomonedas para CoinCap
-coincap_ids = {
-    "Bitcoin (BTC)":       "bitcoin",
-    "Ethereum (ETH)":      "ethereum",
-    "Ripple (XRP)":        "xrp",
-    "Binance Coin (BNB)":  "binance-coin",
-    "Cardano (ADA)":       "cardano",
-    "Solana (SOL)":        "solana",
-    "Dogecoin (DOGE)":     "dogecoin",
-    "Polkadot (DOT)":      "polkadot",
-    "Polygon (MATIC)":     "polygon",
-    "Litecoin (LTC)":      "litecoin",
-    "TRON (TRX)":          "tron",
-    "Stellar (XLM)":       "stellar"
+# Diccionario con IDs de criptomonedas para CoinCap y CoinPaprika
+crypto_ids = {
+    "Bitcoin (BTC)":       {"coincap": "bitcoin",       "coinpaprika": "btc-bitcoin"},
+    "Ethereum (ETH)":      {"coincap": "ethereum",      "coinpaprika": "eth-ethereum"},
+    "Ripple (XRP)":        {"coincap": "xrp",           "coinpaprika": "xrp-ripple"},
+    "Binance Coin (BNB)":  {"coincap": "binance-coin",  "coinpaprika": "bnb-binance-coin"},
+    "Cardano (ADA)":       {"coincap": "cardano",       "coinpaprika": "ada-cardano"},
+    "Solana (SOL)":        {"coincap": "solana",        "coinpaprika": "sol-solana"},
+    "Dogecoin (DOGE)":     {"coincap": "dogecoin",      "coinpaprika": "doge-dogecoin"},
+    "Polkadot (DOT)":      {"coincap": "polkadot",      "coinpaprika": "dot-polkadot"},
+    "Polygon (MATIC)":     {"coincap": "polygon",       "coinpaprika": "matic-polygon"},
+    "Litecoin (LTC)":      {"coincap": "litecoin",      "coinpaprika": "ltc-litecoin"},
+    "TRON (TRX)":          {"coincap": "tron",          "coinpaprika": "trx-tron"},
+    "Stellar (XLM)":       {"coincap": "stellar",       "coinpaprika": "xlm-stellar"}
 }
 
 ##############################################
@@ -95,11 +93,88 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     return None
 
 ##############################################
+# Descarga de datos desde CoinPaprika
+##############################################
+@st.cache_data
+def load_coinpaprika_data(coin_id, start_date="2021-01-01", end_date=None):
+    """
+    Descarga datos históricos de CoinPaprika usando el endpoint OHLCV/historical.
+    Los parámetros 'start_date' y 'end_date' son cadenas en formato YYYY-MM-DD.
+    Retorna un DataFrame con 'ds', 'close_price', 'volume' y 'market_cap'.
+    """
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    url = f"https://api.coinpaprika.com/v1/coins/{coin_id}/ohlcv/historical?start={start_date}&end={end_date}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 402:
+        st.error("Error 402 en CoinPaprika: Se ha excedido el límite o se requiere suscripción.")
+        return None
+    if resp.status_code != 200:
+        st.error(f"Error al obtener datos de CoinPaprika (status code {resp.status_code}).")
+        return None
+    df = pd.DataFrame(resp.json())
+    if df.empty:
+        st.info("CoinPaprika devolvió datos vacíos. Reajusta el rango de fechas.")
+        return None
+    df.rename(columns={
+        "time_open": "ds",
+        "close": "close_price",
+        "volume": "volume",
+        "market_cap": "market_cap"
+    }, inplace=True)
+    df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+    df = df[["ds", "close_price", "volume", "market_cap"]].dropna(subset=["ds", "close_price"])
+    df.sort_values(by="ds", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    df["close_price"] = pd.to_numeric(df["close_price"], errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+    df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce").fillna(0)
+    df = df[df["close_price"] > 0].copy()
+    return df
+
+##############################################
+# Combinar datos de CoinCap y CoinPaprika
+##############################################
+@st.cache_data
+def load_combined_data(coin_id_cap, coin_id_cp, start_ms=None, end_ms=None):
+    """
+    Combina datos de CoinCap y CoinPaprika mediante merge outer por 'ds'.
+    Se promedian los valores si ambos están disponibles.
+    """
+    df_cap = load_coincap_data(coin_id_cap, start_ms, end_ms)
+    start_date = datetime.fromtimestamp(start_ms/1000).strftime("%Y-%m-%d") if start_ms else "2021-01-01"
+    df_cp = load_coinpaprika_data(coin_id_cp, start_date=start_date)
+    if (df_cap is None or df_cap.empty) and (df_cp is None or df_cp.empty):
+        st.error("No se pudieron descargar datos de ninguna fuente.")
+        return None
+    if df_cap is None or df_cap.empty:
+        return df_cp
+    if df_cp is None or df_cp.empty:
+        return df_cap
+    df_comb = pd.merge(df_cap, df_cp, on="ds", how="outer", suffixes=("_cap", "_cp"))
+    df_comb.sort_values(by="ds", inplace=True)
+    df_comb.reset_index(drop=True, inplace=True)
+    def avg_field(row, field):
+        val1 = row.get(f"{field}_cap")
+        val2 = row.get(f"{field}_cp")
+        if pd.notna(val1) and pd.notna(val2):
+            return (val1 + val2) / 2
+        elif pd.notna(val1):
+            return val1
+        else:
+            return val2
+    for field in ["close_price", "volume", "market_cap"]:
+        df_comb[field] = df_comb.apply(lambda row: avg_field(row, field), axis=1)
+    df_final = df_comb[["ds", "close_price", "volume", "market_cap"]].copy()
+    return df_final
+
+##############################################
 # Indicadores técnicos
 ##############################################
 def add_indicators(df):
     """
-    Calcula RSI, MACD y Bollinger Bands a partir de 'close_price'.
+    Calcula indicadores técnicos (RSI, MACD, Bollinger Bands) a partir de 'close_price'.
     """
     df["rsi"] = ta.rsi(df["close_price"], length=14)
     macd_df = ta.macd(df["close_price"])
@@ -152,6 +227,7 @@ def build_lstm_model(input_shape, learning_rate=0.001):
 ##############################################
 def train_and_predict(
     coin_id,
+    coin_id_cp,
     use_custom_range,
     start_ms,
     end_ms,
@@ -165,22 +241,19 @@ def train_and_predict(
     use_multivariable=False
 ):
     """
-    Descarga datos de CoinCap, añade indicadores (y volumen si se usa multivariable),
-    entrena un modelo LSTM y realiza predicciones en test y a futuro.
+    Combina datos de CoinCap y CoinPaprika, añade indicadores (opcional) y entrena un modelo LSTM.
+    Realiza predicciones en test y de forma iterativa para el horizonte futuro.
     """
-    temp_df = load_coincap_data(coin_id, start_ms, end_ms)
-    if temp_df is None or temp_df.empty:
-        st.warning("No se pudieron descargar datos suficientes. Reajusta el rango de fechas.")
+    df_combined = load_combined_data(coin_id, coin_id_cp, start_ms, end_ms)
+    if df_combined is None or df_combined.empty:
+        st.warning("No se pudieron descargar datos suficientes de ambas fuentes. Reajusta el rango de fechas.")
         return None
-    df = temp_df.copy()
-
+    df = df_combined.copy()
     if use_indicators:
         df = add_all_indicators(df)
-
-    # Definir las features
     if use_multivariable:
         features = ["close_price"]
-        if "volume" in df.columns and df["volume"].var() > 0:
+        if "volume" in df.columns and not df["volume"].isna().all() and df["volume"].var() > 0:
             features.append("volume")
         for col in ["rsi", "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9",
                     "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0"]:
@@ -197,7 +270,6 @@ def train_and_predict(
     df_model = df[["ds"] + features].copy()
     data_for_model = df_model[features].values
 
-    # Escalado
     scaler_features = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler_features.fit_transform(data_for_model)
     scaler_target = MinMaxScaler(feature_range=(0, 1))
@@ -221,7 +293,6 @@ def train_and_predict(
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    tf.keras.backend.clear_session()
     input_shape = (X_train.shape[1], X_train.shape[2])
     lstm_model = build_lstm_model(input_shape, learning_rate=learning_rate)
     lstm_model.fit(
@@ -246,8 +317,6 @@ def train_and_predict(
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = last_window.reshape(1, window_size, X_train.shape[2])
-
-    # Predicción futura iterativa (sin tf.function para evitar errores de retracing)
     for _ in range(horizon_days):
         future_pred = lstm_model.predict(current_input)[0][0]
         future_preds_scaled.append(future_pred)
@@ -262,16 +331,15 @@ def train_and_predict(
     return df_model, test_preds, y_test_deserialized, future_preds, rmse, mape
 
 ##############################################
-# Módulo de análisis de sentimiento en Twitter
+# Análisis de sentimiento en Twitter (X)
 ##############################################
 def analyze_twitter_sentiment(crypto_name, max_tweets=50):
     """
-    Extrae hasta max_tweets tweets relacionados con la criptomoneda (usando la primera palabra)
-    y calcula el sentimiento promedio usando VaderSentiment.
+    Extrae hasta max_tweets tweets relacionados con la criptomoneda (por su primera palabra)
+    y calcula el sentimiento promedio utilizando VaderSentiment.
     """
     import snscrape.modules.twitter as sntwitter
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
     keyword = crypto_name.split(" ")[0]
     tweets = []
     for i, tweet in enumerate(sntwitter.TwitterSearchScraper(keyword).get_items()):
@@ -294,16 +362,16 @@ def analyze_twitter_sentiment(crypto_name, max_tweets=50):
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
-    st.markdown("**Fuente de Datos:** CoinCap")
+    st.markdown("**Fuente de Datos:** CoinCap + CoinPaprika")
 
     st.sidebar.header("Configuración de la predicción")
-
     crypto_name = st.sidebar.selectbox(
         "Selecciona una criptomoneda:",
-        list(coincap_ids.keys()),
+        list(crypto_ids.keys()),
         help="Elige la criptomoneda para la predicción."
     )
-    coin_id = coincap_ids[crypto_name]
+    coin_id_cap = crypto_ids[crypto_name]["coincap"]
+    coin_id_cp = crypto_ids[crypto_name]["coinpaprika"]
 
     st.sidebar.subheader("Rango de Fechas")
     use_custom_range = st.sidebar.checkbox(
@@ -361,8 +429,8 @@ def main_app():
         batch_size_val = 16
         learning_rate_val = 0.0005
 
-    # Visualización del histórico
-    df_prices = load_coincap_data(coin_id, start_ms, end_ms)
+    # Cargar datos combinados de CoinCap y CoinPaprika
+    df_prices = load_combined_data(coin_id_cap, coin_id_cp, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
@@ -389,15 +457,15 @@ def main_app():
     else:
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
-    # Pestañas: Entrenamiento/Test, Predicción y Sentimiento en Twitter
-    tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}", "💬 Sentimiento en Twitter"])
+    tabs = st.tabs(["🤖 Entrenamiento y Test", f"🔮 Predicción de Precios - {crypto_name}", "💬 Sentimiento en X"])
 
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir", key="train_test"):
             with st.spinner("Entrenando el modelo, por favor espera..."):
                 result = train_and_predict(
-                    coin_id=coin_id,
+                    coin_id=coin_id_cap,
+                    coin_id_cp=coin_id_cp,
                     use_custom_range=use_custom_range,
                     start_ms=start_ms,
                     end_ms=end_ms,
@@ -470,12 +538,11 @@ def main_app():
             st.info("Primero entrena el modelo en la pestaña 'Entrenamiento y Test' para generar las predicciones futuras.")
 
     with tabs[2]:
-        st.header("Sentimiento en Twitter")
+        st.header("Sentimiento en X")
         st.markdown("Analizando tweets recientes sobre la criptomoneda seleccionada...")
         try:
             import snscrape.modules.twitter as sntwitter
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
             keyword = crypto_name.split(" ")[0]
             tweets = []
             max_tweets = 50
