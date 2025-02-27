@@ -415,10 +415,9 @@ def main_app():
             st.info("Primero entrena el modelo para generar predicciones futuras.")
     
     with tabs[2]:
-        st.header("Noticias Recientes (LunarCrush)")
+        st.header("Noticias recientes de {symbol}")
         if 'result' in locals() and result is not None:
             symbol = result[-1]
-            st.subheader(f"Noticias recientes de {symbol}")
             news_items = get_lunarcrush_news(symbol, limit=5)
             if news_items:
                 for i, item in enumerate(news_items, start=1):
