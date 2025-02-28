@@ -64,8 +64,8 @@ def load_coincap_data(coin_id):
             return None
         df["ds"] = pd.to_datetime(df["time"], unit="ms", errors="coerce")
         df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-        # Asegurarse de que "volumeUsd" sea una serie de pandas
-        if "volumeUsd" in df.columns:
+        # Manejo robusto de "volumeUsd" como serie de pandas
+        if "volumeUsd" in df.columns and not df["volumeUsd"].empty:
             df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce").fillna(0.0)
         else:
             df["volume"] = pd.Series(0.0, index=df.index)
@@ -152,7 +152,7 @@ def get_crypto_sentiment_combined(coin_id):
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days):
-    """Entrena y predice combinando modelos y sentimiento."""
+    """Entrena y predice combinando modelos y sentimiento, devolviendo un diccionario."""
     df = load_coincap_data(coin_id)
     if df is None:
         return None
@@ -295,38 +295,46 @@ def main_app():
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_name}")
         if "result" in st.session_state:
-            result = st.session_state["result"]
-            last_date = result["df"]["ds"].iloc[-1]
-            current_price = result["df"]["close_price"].iloc[-1]
-            pred_series = np.concatenate(([current_price], result["future_preds"]))
-            fig_future = go.Figure()
-            future_dates_display = [last_date] + result["future_dates"]
-            fig_future.add_trace(go.Scatter(x=future_dates_display, y=pred_series, mode="lines+markers", name="Predicción"))
-            fig_future.update_layout(title=f"Predicción a Futuro ({horizon} días) - {result['symbol']}", template="plotly_dark")
-            st.plotly_chart(fig_future, use_container_width=True)
-            st.subheader("Valores Numéricos")
-            st.dataframe(pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series}))
+            # Verificar si result es un diccionario
+            if isinstance(st.session_state["result"], dict):
+                result = st.session_state["result"]
+                last_date = result["df"]["ds"].iloc[-1]
+                current_price = result["df"]["close_price"].iloc[-1]
+                pred_series = np.concatenate(([current_price], result["future_preds"]))
+                fig_future = go.Figure()
+                future_dates_display = [last_date] + result["future_dates"]
+                fig_future.add_trace(go.Scatter(x=future_dates_display, y=pred_series, mode="lines+markers", name="Predicción"))
+                fig_future.update_layout(title=f"Predicción a Futuro ({horizon} días) - {result['symbol']}", template="plotly_dark")
+                st.plotly_chart(fig_future, use_container_width=True)
+                st.subheader("Valores Numéricos")
+                st.dataframe(pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series}))
+            else:
+                st.error("El resultado almacenado no es un diccionario válido. Por favor, entrena el modelo nuevamente.")
         else:
             st.info("Entrena el modelo primero.")
 
     with tabs[2]:
         st.header("Análisis de Sentimientos")
         if "result" in st.session_state:
-            result = st.session_state["result"]
-            sentiment_texts = {
-                "BTC": f"El sentimiento de Bitcoin está en {result['crypto_sent']:.2f}, lo que muestra cierta cautela entre los inversores, aunque su comunidad sigue activa. El mercado en general está en {result['market_sent']:.2f}, indicando miedo. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que Bitcoin podría mantenerse estable, pero no esperes grandes subidas pronto. ¡Ojo con las noticias!",
-                "ETH": f"Ethereum tiene un sentimiento de {result['crypto_sent']:.2f}, reflejando dudas, pero su tecnología sigue siendo un punto fuerte. El mercado está en {result['market_sent']:.2f}, con miedo dominando. El factor combinado de {result['sentiment_factor']:.2f} sugiere que podría haber oportunidades si el ánimo mejora. Estate atento a sus actualizaciones.",
-                "XRP": f"XRP está en {result['crypto_sent']:.2f}, mostrando pesimismo en su comunidad, y el mercado en {result['market_sent']:.2f} no ayuda mucho. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que XRP podría seguir moviéndose poco a menos que haya noticias grandes, como su caso legal. Cuidado con la volatilidad."
-            }
-            sentiment_text = sentiment_texts.get(result['symbol'], f"El sentimiento de {result['symbol']} está en {result['crypto_sent']:.2f}, lo que indica {'optimismo' if result['crypto_sent'] > 50 else 'pesimismo'} entre sus seguidores. El mercado general está en {result['market_sent']:.2f}. Con un factor combinado de {result['sentiment_factor']:.2f}, hay {'potencial' if result['sentiment_factor'] > 0.5 else 'cautela'} a corto plazo.")
-            st.write(sentiment_text)
-            fig_sentiment = go.Figure(data=[
-                go.Bar(name="Sentimiento Combinado", x=[result['symbol']], y=[result['crypto_sent']], marker_color="#1f77b4"),
-                go.Bar(name="Sentimiento Global", x=[result['symbol']], y=[result['market_sent']], marker_color="#ff7f0e")
-            ])
-            fig_sentiment.update_layout(barmode="group", title=f"Análisis de Sentimiento de {result['symbol']}", template="plotly_dark")
-            st.plotly_chart(fig_sentiment, use_container_width=True)
-            st.write("**NFA (Not Financial Advice):** Esto es solo información educativa, no un consejo financiero. Consulta a un experto antes de invertir.")
+            # Verificar si result es un diccionario
+            if isinstance(st.session_state["result"], dict):
+                result = st.session_state["result"]
+                sentiment_texts = {
+                    "BTC": f"El sentimiento de Bitcoin está en {result['crypto_sent']:.2f}, lo que muestra cierta cautela entre los inversores, aunque su comunidad sigue activa. El mercado en general está en {result['market_sent']:.2f}, indicando miedo. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que Bitcoin podría mantenerse estable, pero no esperes grandes subidas pronto. ¡Ojo con las noticias!",
+                    "ETH": f"Ethereum tiene un sentimiento de {result['crypto_sent']:.2f}, reflejando dudas, pero su tecnología sigue siendo un punto fuerte. El mercado está en {result['market_sent']:.2f}, con miedo dominando. El factor combinado de {result['sentiment_factor']:.2f} sugiere que podría haber oportunidades si el ánimo mejora. Estate atento a sus actualizaciones.",
+                    "XRP": f"XRP está en {result['crypto_sent']:.2f}, mostrando pesimismo en su comunidad, y el mercado en {result['market_sent']:.2f} no ayuda mucho. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que XRP podría seguir moviéndose poco a menos que haya noticias grandes, como su caso legal. Cuidado con la volatilidad."
+                }
+                sentiment_text = sentiment_texts.get(result['symbol'], f"El sentimiento de {result['symbol']} está en {result['crypto_sent']:.2f}, lo que indica {'optimismo' if result['crypto_sent'] > 50 else 'pesimismo'} entre sus seguidores. El mercado general está en {result['market_sent']:.2f}. Con un factor combinado de {result['sentiment_factor']:.2f}, hay {'potencial' if result['sentiment_factor'] > 0.5 else 'cautela'} a corto plazo.")
+                st.write(sentiment_text)
+                fig_sentiment = go.Figure(data=[
+                    go.Bar(name="Sentimiento Combinado", x=[result['symbol']], y=[result['crypto_sent']], marker_color="#1f77b4"),
+                    go.Bar(name="Sentimiento Global", x=[result['symbol']], y=[result['market_sent']], marker_color="#ff7f0e")
+                ])
+                fig_sentiment.update_layout(barmode="group", title=f"Análisis de Sentimiento de {result['symbol']}", template="plotly_dark")
+                st.plotly_chart(fig_sentiment, use_container_width=True)
+                st.write("**NFA (Not Financial Advice):** Esto es solo información educativa, no un consejo financiero. Consulta a un experto antes de invertir.")
+            else:
+                st.error("El resultado almacenado no es un diccionario válido. Por favor, entrena el modelo nuevamente.")
         else:
             st.info("Entrena el modelo para ver el análisis.")
 
