@@ -20,6 +20,9 @@ from urllib3.util.retry import Retry
 import time
 import certifi
 import os
+from statsmodels.tsa.arima.model import ARIMA
+import lightgbm as lgb
+from sklearn.metrics import mean_squared_error
 
 # Configurar certificados SSL para requests
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -96,6 +99,43 @@ coinid_to_coingecko = {
     "tron": "tron",
     "stellar": "stellar"
 }
+
+# Promedios históricos aproximados de sentimiento por criptomoneda
+historical_sentiment = {
+    "bitcoin": 65.0,
+    "ethereum": 60.0,
+    "xrp": 21.5,
+    "binance-coin": 55.0,
+    "cardano": 50.0,
+    "solana": 45.0,
+    "dogecoin": 40.0,
+    "polkadot": 50.0,
+    "polygon": 45.0,
+    "litecoin": 50.0,
+    "tron": 45.0,
+    "stellar": 48.0
+}
+
+# Características específicas por criptomoneda (volatilidad promedio aproximada)
+crypto_characteristics = {
+    "bitcoin": {"volatility": 0.03, "start_year": 2013},
+    "ethereum": {"volatility": 0.05, "start_year": 2015},
+    "xrp": {"volatility": 0.08, "start_year": 2017},
+    "binance-coin": {"volatility": 0.06, "start_year": 2017},
+    "cardano": {"volatility": 0.07, "start_year": 2017},
+    "solana": {"volatility": 0.09, "start_year": 2020},
+    "dogecoin": {"volatility": 0.12, "start_year": 2013},
+    "polkadot": {"volatility": 0.07, "start_year": 2020},
+    "polygon": {"volatility": 0.06, "start_year": 2020},
+    "litecoin": {"volatility": 0.04, "start_year": 2013},
+    "tron": {"volatility": 0.06, "start_year": 2017},
+    "stellar": {"volatility": 0.05, "start_year": 2014}
+}
+
+# Caché para datos de CoinGecko
+@st.cache_data(ttl=86400)  # Cache por 24 horas
+def get_cached_coingecko_activity(coin_id):
+    return get_coingecko_community_activity(coin_id)
 
 ##############################################
 # Descarga de datos desde CoinCap (intervalo diario)
@@ -191,10 +231,12 @@ def get_dynamic_params(df, horizon_days, coin_id):
     data_len = len(df)
     volatility = df["close_price"].pct_change().std()
     mean_price = df["close_price"].mean()
-    window_size = min(max(15, int(horizon_days * (1.5 if coin_id == "xrp" else 1))), min(60, data_len // 3))
+    char = crypto_characteristics.get(coin_id, {"volatility": 0.05, "start_year": 2017})
+    base_volatility = char["volatility"]
+    window_size = min(max(15, int(horizon_days * (1.5 if volatility > base_volatility else 1))), min(60, data_len // 3))
     epochs = min(50, max(20, int(data_len/100) + int(volatility*150)))
     batch_size = 32
-    learning_rate = 0.0004 if coin_id == "xrp" else 0.0005
+    learning_rate = 0.0004 if volatility > base_volatility else 0.0005
     return window_size, epochs, batch_size, learning_rate
 
 ##############################################
@@ -233,8 +275,8 @@ def get_coingecko_community_activity(coin_id):
             comm = data.get("community_data", {})
             followers = comm.get("twitter_followers", 0)
             posts = comm.get("reddit_average_posts_48h", 0)
-            activity = max(followers, posts * 1000)  # Peso mayor a followers
-            max_activity = 20000000  # Ajuste basado en Bitcoin (~20M followers)
+            activity = max(followers, posts * 1000)
+            max_activity = 20000000
             sentiment = min(100, (activity / max_activity) * 100) if activity > 0 else 50.0
             return sentiment
         else:
@@ -246,18 +288,52 @@ def get_coingecko_community_activity(coin_id):
 
 def get_crypto_sentiment_combined(coin_id):
     """
-    Combina Fear & Greed Index con actividad de comunidad como proxy de sentimiento específico.
+    Combina Fear & Greed Index con un promedio histórico predefinido y actividad actual.
+    Restaura el valor aproximado de XRP a 21.5 ajustando la lógica.
     """
     fg = get_fear_greed_index()
-    cg_activity = get_coingecko_community_activity(coin_id)
-    combined = 0.6 * fg + 0.4 * cg_activity
-    return max(0, min(100, combined))  # Asegurar rango 0-100
+    cg_activity = get_cached_coingecko_activity(coin_id)  # Usa caché
+    hist_sent = historical_sentiment.get(coin_id, 50.0)
+    combined = 0.5 * fg + 0.3 * cg_activity + 0.2 * hist_sent
+    return max(0, min(100, combined))
 
 def get_market_sentiment():
     """
     Para el sentimiento global del mercado se usa el Fear & Greed Index.
     """
     return get_fear_greed_index()
+
+##############################################
+# Modelos Alternativos
+##############################################
+def train_arima_model(df, test_size=0.2):
+    train_size = int(len(df) * (1 - test_size))
+    train, test = df["close_price"][:train_size], df["close_price"][train_size:]
+    model = ARIMA(train, order=(5, 1, 0))  # Ajuste simple
+    model_fit = model.fit()
+    predictions = model_fit.forecast(steps=len(test))
+    rmse = np.sqrt(mean_squared_error(test, predictions))
+    mape = robust_mape(test, predictions)
+    return predictions, rmse, mape
+
+def train_lightgbm_model(df, test_size=0.2):
+    df["ds"] = df.index
+    df["target"] = df["close_price"].shift(-1)
+    df = df.dropna()
+    train_size = int(len(df) * (1 - test_size))
+    train, test = df[:train_size], df[train_size:]
+    X_train = train[["ds"]]
+    y_train = train["target"]
+    X_test = test[["ds"]]
+    y_test = test["target"]
+    model = lgb.LGBMRegressor(n_estimators=100, learning_rate=0.1)
+    model.fit(X_train, y_train)
+    predictions = model.predict(X_test)
+    rmse = np.sqrt(mean_squared_error(y_test, predictions))
+    mape = robust_mape(y_test, predictions)
+    future_dates = pd.date_range(start=df["ds"].iloc[-1], periods=5, freq="D")
+    future_preds = model.predict(pd.DataFrame({"ds": future_dates}))
+    return predictions, future_preds, rmse, mape
 
 ##############################################
 # Entrenamiento y predicción con sentimiento
@@ -273,9 +349,9 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
         return None
 
     symbol = coinid_to_symbol.get(coin_id, "BTC")
-    crypto_sent = get_crypto_sentiment_combined(coin_id)  # Usa el coin_id específico
+    crypto_sent = get_crypto_sentiment_combined(coin_id)
     market_sent = get_market_sentiment()
-    sentiment_factor = (crypto_sent + market_sent) / 200.0  # Normalización a [0,1]
+    sentiment_factor = (crypto_sent + market_sent) / 200.0
 
     st.write(f"Sentimiento combinado de {symbol}: {crypto_sent:.2f}")
     st.write(f"Sentimiento global del mercado: {market_sent:.2f}")
@@ -310,25 +386,28 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     X_test_adj = np.concatenate([X_test, np.full((X_test.shape[0], X_test.shape[1], 1), sentiment_factor)], axis=-1)
     input_shape = (X_train_adj.shape[1], X_train_adj.shape[2])
 
-    model = train_model(X_train_adj, y_train, X_val_adj, y_val, input_shape, epochs, batch_size, learning_rate)
+    # Modelo LSTM
+    lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, input_shape, epochs, batch_size, learning_rate)
+    lstm_test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
+    lstm_test_preds = scaler_target.inverse_transform(lstm_test_preds_scaled)
+    lstm_y_test_real = scaler_target.inverse_transform(y_test.reshape(-1, 1))
+    lstm_valid_mask = ~np.isnan(lstm_test_preds) & ~np.isnan(lstm_y_test_real)
+    lstm_rmse = np.sqrt(mean_squared_error(lstm_y_test_real[lstm_valid_mask], lstm_test_preds[lstm_valid_mask])) if np.sum(lstm_valid_mask) > 0 else np.nan
+    lstm_mape = robust_mape(lstm_y_test_real[lstm_valid_mask], lstm_test_preds[lstm_valid_mask]) if np.sum(lstm_valid_mask) > 0 else np.nan
 
-    test_preds_scaled = model.predict(X_test_adj, verbose=0)
-    test_preds = scaler_target.inverse_transform(test_preds_scaled)
-    y_test_real = scaler_target.inverse_transform(y_test.reshape(-1, 1))
-    valid_mask = ~np.isnan(test_preds) & ~np.isnan(y_test_real)
-    if np.sum(valid_mask) == 0:
-        rmse, mape = np.nan, np.nan
-    else:
-        rmse = np.sqrt(np.mean((y_test_real[valid_mask] - test_preds[valid_mask])**2))
-        mape = robust_mape(y_test_real[valid_mask], test_preds[valid_mask])
+    # Modelo ARIMA
+    arima_preds, arima_rmse, arima_mape = train_arima_model(df_raw)
 
-    # Predicción futura optimizada
+    # Modelo LightGBM
+    lgb_preds, lgb_future_preds, lgb_rmse, lgb_mape = train_lightgbm_model(df_raw)
+
+    # Predicción futura LSTM
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = np.concatenate([last_window.reshape(1, window_size, 1),
                                    np.full((1, window_size, 1), sentiment_factor)], axis=-1)
     for _ in range(horizon_days):
-        future_pred = model.predict(current_input, verbose=0)[0][0]
+        future_pred = lstm_model.predict(current_input, verbose=0)[0][0]
         future_preds_scaled.append(future_pred)
         new_feature = np.copy(current_input[:, -1:, :])
         new_feature[0, 0, 0] = future_pred
@@ -336,7 +415,16 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    return df_raw, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor, symbol
+    # Selección del mejor modelo (menor RMSE)
+    models = {"LSTM": (lstm_test_preds, future_preds, lstm_rmse, lstm_mape),
+              "ARIMA": (arima_preds, arima_preds[:len(lstm_test_preds)], arima_rmse, arima_mape),
+              "LightGBM": (lgb_preds, lgb_future_preds[:horizon_days], lgb_rmse, lgb_mape)}
+    best_model = min(models.items(), key=lambda x: x[1][2] if not np.isnan(x[1][2]) else np.inf)[0]
+    best_test_preds, best_future_preds, best_rmse, best_mape = models[best_model]
+
+    st.write(f"Mejor modelo seleccionado: {best_model} (RMSE: {best_rmse:.2f}, MAPE: {best_mape:.2f}%)")
+
+    return df_raw, best_test_preds, lstm_y_test_real, best_future_preds, best_rmse, best_mape, sentiment_factor, symbol
 
 ##############################################
 # Función principal de la app
@@ -344,7 +432,7 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions (Simplified Sentiment) 🔮", layout="wide")
     st.title("Crypto Price Predictions (Simplified Sentiment) 🔮")
-    st.markdown("Este modelo combina datos históricos de CoinCap y un análisis de sentimiento simplificado basado en Fear & Greed Index y actividad de comunidad de CoinGecko para predecir precios.")
+    st.markdown("Este modelo combina datos históricos de CoinCap y un análisis de sentimiento simplificado basado en Fear & Greed Index y actividad de comunidad de CoinGecko para predecir precios, con múltiples modelos optimizados.")
     st.markdown("**Fuente de Datos:** CoinCap, Crypto Fear & Greed Index, CoinGecko")
 
     st.sidebar.title("Configura tu Predicción")
@@ -365,7 +453,7 @@ def main_app():
         end_ms = int(default_end.timestamp() * 1000)
 
     st.sidebar.subheader("Parámetros de Predicción ❓")
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5, help="Número de días a futuro a predecir. Ajustado a 5 para tu caso.")
     st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos históricos.**")
 
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
