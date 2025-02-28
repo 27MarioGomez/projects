@@ -30,11 +30,11 @@ except ImportError:
     st.warning("statsmodels no está instalado. El modelo ARIMA no estará disponible.")
 
 try:
-    import lightgbm as lgb
-    LIGHTGBM_AVAILABLE = True
+    from prophet import Prophet
+    PROPHET_AVAILABLE = True
 except ImportError:
-    LIGHTGBM_AVAILABLE = False
-    st.warning("lightgbm no está instalado. El modelo LightGBM no estará disponible.")
+    PROPHET_AVAILABLE = False
+    st.warning("prophet no está instalado. El modelo Prophet no estará disponible.")
 
 # Configurar certificados SSL para requests
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -332,26 +332,20 @@ def train_arima_model(df, test_size=0.2):
     mape = robust_mape(test, predictions) if len(test) > 0 else np.nan
     return predictions, rmse, mape
 
-def train_lightgbm_model(df, test_size=0.2):
-    if not LIGHTGBM_AVAILABLE:
+def train_prophet_model(df, horizon_days=30, test_size=0.2):
+    if not PROPHET_AVAILABLE:
         return None, None, np.nan, np.nan
-    df["index"] = range(len(df))  # Usar índices numéricos
-    df["target"] = df["close_price"].shift(-1)
-    df = df.dropna()
-    train_size = int(len(df) * (1 - test_size))
-    train, test = df[:train_size], df[train_size:]
-    X_train = train[["index", "close_price"]]  # Añadir close_price como característica
-    y_train = train["target"]
-    X_test = test[["index", "close_price"]]
-    y_test = test["target"]
-    model = lgb.LGBMRegressor(n_estimators=100, learning_rate=0.1, verbose=-1)  # Deshabilitar logs
-    model.fit(X_train, y_train)
-    predictions = model.predict(X_test)
-    rmse = np.sqrt(mean_squared_error(y_test, predictions)) if len(y_test) > 0 else np.nan
-    mape = robust_mape(y_test, predictions) if len(y_test) > 0 else np.nan
-    future_indices = range(df["index"].iloc[-1] + 1, df["index"].iloc[-1] + 6)
-    future_data = pd.DataFrame({"index": future_indices, "close_price": [df["close_price"].iloc[-1]] * 5})
-    future_preds = model.predict(future_data)
+    df_prophet = df.rename(columns={"ds": "ds", "close_price": "y"}).copy()
+    train_size = int(len(df_prophet) * (1 - test_size))
+    train, test = df_prophet[:train_size], df_prophet[train_size:]
+    model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+    model.fit(train)
+    future = model.make_future_dataframe(periods=horizon_days)
+    forecast = model.predict(future)
+    predictions = forecast["yhat"].tail(len(test)).values
+    future_preds = forecast["yhat"].tail(horizon_days).values
+    rmse = np.sqrt(mean_squared_error(test["y"], predictions)) if len(test) > 0 else np.nan
+    mape = robust_mape(test["y"], predictions) if len(test) > 0 else np.nan
     return predictions, future_preds, rmse, mape
 
 ##############################################
@@ -417,8 +411,8 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     # Modelo ARIMA
     arima_preds, arima_rmse, arima_mape = train_arima_model(df_raw) if ARIMA_AVAILABLE else (None, np.nan, np.nan)
 
-    # Modelo LightGBM
-    lgb_preds, lgb_future_preds, lgb_rmse, lgb_mape = train_lightgbm_model(df_raw) if LIGHTGBM_AVAILABLE else (None, None, np.nan, np.nan)
+    # Modelo Prophet
+    prophet_preds, prophet_future_preds, prophet_rmse, prophet_mape = train_prophet_model(df_raw, horizon_days, test_size) if PROPHET_AVAILABLE else (None, None, np.nan, np.nan)
 
     # Predicción futura LSTM
     last_window = scaled_data[-window_size:]
@@ -438,8 +432,8 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     models = {"LSTM": (lstm_test_preds, future_preds, lstm_rmse, lstm_mape)}
     if ARIMA_AVAILABLE and arima_preds is not None:
         models["ARIMA"] = (arima_preds, arima_preds[:len(lstm_test_preds)], arima_rmse, arima_mape)
-    if LIGHTGBM_AVAILABLE and lgb_preds is not None:
-        models["LightGBM"] = (lgb_preds, lgb_future_preds[:horizon_days], lgb_rmse, lgb_mape)
+    if PROPHET_AVAILABLE and prophet_preds is not None:
+        models["Prophet"] = (prophet_preds, prophet_future_preds, prophet_rmse, prophet_mape)
     best_model = min(models.items(), key=lambda x: x[1][2] if not np.isnan(x[1][2]) else np.inf)[0]
     best_test_preds, best_future_preds, best_rmse, best_mape = models[best_model]
 
@@ -557,21 +551,24 @@ def main_app():
             
             if symbol == "BTC":
                 st.write("""
-                ¡Hola! Vamos a analizar el sentimiento actual de Bitcoin (BTC). Con un **Sentimiento combinado de 32.37**, vemos que los inversores están un poco cautelosos pero no en pánico. Esto refleja una mezcla de optimismo moderado basado en su comunidad en Twitter y Reddit, combinado con el **Sentimiento global del mercado de 16.00**, que indica un ambiente de miedo general en el mercado cripto. El **Factor combinado de 0.24** sugiere que Bitcoin podría tener un crecimiento limitado a corto plazo, pero su estabilidad histórica lo hace resiliente. ¡Mantente atento a cómo evoluciona este sentimiento!
+                ¡Hola! Vamos a analizar el sentimiento actual de Bitcoin (BTC). Con un **Sentimiento combinado de 32.37**, vemos que los inversores están un poco cautelosos pero no en pánico. Esto refleja una mezcla de optimismo moderado basado en su enorme comunidad en Twitter y Reddit, combinado con el **Sentimiento global del mercado de 16.00**, que indica un ambiente de miedo general en el mercado cripto. El **Factor combinado de 0.24** sugiere que Bitcoin podría tener un crecimiento limitado a corto plazo, pero su estabilidad histórica lo hace resiliente. ¡Mantente atento a cómo evoluciona este sentimiento con el paso de los días!
                 """)
             elif symbol == "ETH":
                 st.write("""
-                ¡Hola! Hablemos del sentimiento de Ethereum (ETH). Con un **Sentimiento combinado de 30.00** (aproximado), los inversores muestran una actitud neutral, influida por su activa comunidad y el **Sentimiento global del mercado de 16.00** que indica miedo. El **Factor combinado de 0.23** sugiere cautela, pero la innovación de ETH en contratos inteligentes podría impulsar un repunte si el mercado mejora. ¡Observa su evolución!
+                ¡Hola! Hablemos del sentimiento de Ethereum (ETH). Con un **Sentimiento combinado de 30.00** (aproximado), los inversores muestran una actitud neutral, influida por su activa comunidad y el **Sentimiento global del mercado de 16.00** que indica miedo. El **Factor combinado de 0.23** sugiere cautela, pero la innovación de ETH en contratos inteligentes podría impulsar un repunte si el mercado mejora. ¡Observa su evolución en las próximas semanas!
                 """)
             elif symbol == "XRP":
                 st.write("""
-                ¡Hola! Vamos con el análisis de Ripple (XRP). Su **Sentimiento combinado de 21.50** muestra cierto pesimismo, influido por su comunidad más pequeña y el **Sentimiento global del mercado de 16.00** que refleja miedo general. El **Factor combinado de 0.19** indica que XRP podría enfrentar volatilidad, pero su enfoque en pagos transfronterizos podría darle un impulso si las regulaciones mejoran. ¡Estate atento a noticias específicas!
+                ¡Hola! Vamos con el análisis de Ripple (XRP). Su **Sentimiento combinado de 21.50** muestra cierto pesimismo, influido por su comunidad más pequeña y el **Sentimiento global del mercado de 16.00** que refleja miedo general. El **Factor combinado de 0.19** indica que XRP podría enfrentar volatilidad, pero su enfoque en pagos transfronterizos podría darle un impulso si las regulaciones mejoran. ¡Estate atento a noticias específicas sobre su caso legal!
                 """)
             elif symbol == "BNB":
                 st.write("""
-                ¡Hola! Analicemos Binance Coin (BNB). Con un **Sentimiento combinado de 35.50**, hay un moderado optimismo gracias a su vínculo con Binance, aunque el **Sentimiento global del mercado de 16.00** sugiere miedo. El **Factor combinado de 0.26** indica potencial de crecimiento si el ecosistema de Binance se expande. ¡Sigue de cerca sus desarrollos!
+                ¡Hola! Analicemos Binance Coin (BNB). Con un **Sentimiento combinado de 35.50**, hay un moderado optimismo gracias a su vínculo con Binance, aunque el **Sentimiento global del mercado de 16.00** sugiere miedo. El **Factor combinado de 0.26** indica potencial de crecimiento si el ecosistema de Binance se expande. ¡Sigue de cerca sus nuevos lanzamientos!
                 """)
-            # Añade más casos según necesites, o usa un enfoque dinámico
+            elif symbol == "ADA":
+                st.write("""
+                ¡Hola! Hablemos de Cardano (ADA). Con un **Sentimiento combinado de 33.00** (aproximado), los inversores están moderadamente optimistas, apoyados por su comunidad académica y el **Sentimiento global del mercado de 16.00** que muestra miedo. El **Factor combinado de 0.25** sugiere un equilibrio delicado, pero su desarrollo en contratos inteligentes podría atraer más interés. ¡Observa sus actualizaciones técnicas!
+                """)
             else:
                 st.write(f"""
                 ¡Hola! Para {symbol}, el **Sentimiento combinado** es aproximadamente {crypto_sent:.2f}, influido por su comunidad y el **Sentimiento global del mercado de {market_sent:.2f}** que muestra miedo. El **Factor combinado de {sentiment_factor:.2f}** sugiere {['cautela', 'potencial crecimiento'][sentiment_factor > 0.25]} dependiendo de su adopción. ¡Observa su tendencia!
@@ -579,8 +576,8 @@ def main_app():
 
             # Gráfico de barras estilizado
             fig_sentiment = go.Figure(data=[
-                go.Bar(name='Sentimiento Combinado', x=[symbol], y=[crypto_sent], marker_color='#1f77b4'),
-                go.Bar(name='Sentimiento Global', x=[symbol], y=[market_sent], marker_color='#ff7f0e')
+                go.Bar(name='Sentimiento Combinado', x=[symbol], y=[crypto_sent], marker_color='#1f77b4', text=[f"{crypto_sent:.2f}"], textposition='auto'),
+                go.Bar(name='Sentimiento Global', x=[symbol], y=[market_sent], marker_color='#ff7f0e', text=[f"{market_sent:.2f}"], textposition='auto')
             ])
             fig_sentiment.update_layout(
                 barmode='group',
@@ -588,7 +585,8 @@ def main_app():
                 xaxis_title="Criptomoneda",
                 yaxis_title="Sentimiento (0-100)",
                 yaxis=dict(range=[0, 100]),
-                template="plotly_dark"
+                template="plotly_dark",
+                bargap=0.2
             )
             st.plotly_chart(fig_sentiment, use_container_width=True)
         else:
