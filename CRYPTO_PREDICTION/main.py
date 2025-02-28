@@ -17,8 +17,8 @@ import os
 from sklearn.metrics import mean_squared_error
 from textblob import TextBlob
 import socket  # Para manejar errores de DNS
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry  # Importación para Retry
+from requests.adapters import HTTPAdapter  # Importación para HTTPAdapter
 
 # Configuración inicial de certificados SSL y solicitudes
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -213,16 +213,16 @@ def predict(coin_id, horizon, start_ms=None, end_ms=None):
     real = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
     rmse, mape = np.sqrt(mean_squared_error(real, preds)), mape(real, preds)
 
-    last, future = data[-window:], []
+    last, future_preds = data[-window:], []
     current = np.concatenate([last.reshape(1, window, 1), np.full((1, window, 1), sentiment)])
     for _ in range(horizon):
         pred = model.predict(current, verbose=0)[0][0]
-        future.append(pred)
+        future_preds.append(pred)
         current = np.append(current[:, 1:, :], [[[pred, sentiment]]], axis=1)
-    future = scaler.inverse_transform(np.array(future).reshape(-1, 1)).flatten()
+    future_preds = scaler.inverse_transform(np.array(future_preds).reshape(-1, 1)).flatten()
 
     return {
-        "df": df, "preds": preds, "future": future, "rmse": rmse, "mape": mape, "sentiment": sentiment,
+        "df": df, "preds": preds, "future_preds": future_preds, "rmse": rmse, "mape": mape, "sentiment": sentiment,
         "symbol": symbol, "crypto": crypto_sent, "market": market_sent,
         "future_dates": pd.date_range(df["ds"].iloc[-1] + timedelta(days=1), periods=horizon).tolist(),
         "test_dates": df["ds"].iloc[-len(preds):].values, "real": df["close_price"].iloc[-len(preds):].values
@@ -280,7 +280,7 @@ def main():
         if "result" in st.session_state and isinstance(st.session_state.result, dict):
             result = st.session_state.result
             last_date, price = result["df"]["ds"].iloc[-1], result["df"]["close_price"].iloc[-1]
-            preds = np.concatenate([np.array([price]), result["future"]])
+            preds = np.concatenate([np.array([price]), result["future_preds"]])  # Cambiado de "future" a "future_preds"
             fig_pred = go.Figure(go.Scatter(x=[last_date] + result["future_dates"], y=preds, mode="lines+markers", name="Predicción", line=dict(color="#ff7f0e", width=2)))
             fig_pred.update_layout(title=f"Predicción ({horizon} días) - {coin}", **DARK_THEME, xaxis_title="Fecha", yaxis_title="Precio (USD)")
             st.plotly_chart(fig_pred, use_container_width=True)
