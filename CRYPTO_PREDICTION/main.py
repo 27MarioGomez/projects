@@ -255,12 +255,12 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
     except Exception as e:
         return 50.0  # Valor por defecto para cualquier otro error, sin mensaje visible
 
-# Nueva función para obtener noticias recientes (usando NewsData.io, optimizada para crypto)
+# Nueva función para obtener noticias recientes (usando NewsData.io, optimizada para crypto según #crypto-news)
 @st.cache_data(ttl=3600)  # Cachear por hora para minimizar peticiones
 def get_recent_crypto_news(coin_symbol):
     """Obtiene las noticias más recientes y relevantes de criptomonedas usando NewsData.io."""
     end_date = datetime.now().date()
-    start_date = end_date - timedelta(days=7)  # Limitar a 7 días para eficiencia
+    start_date = end_date - timedelta(days=14)  # Aumentado a 14 días para capturar más noticias recientes
 
     # Obtener la API key desde Streamlit Secrets
     api_key = st.secrets.get("news_data_key", "pub_7227626d8277642d9399e67d37a74d463f7cc")
@@ -268,8 +268,8 @@ def get_recent_crypto_news(coin_symbol):
         st.error("No se encontró la API key de NewsData.io en Secrets. No se pueden mostrar noticias.")
         return []
 
-    # Construir la URL siguiendo la documentación de NewsData.io (#crypto-news)
-    query = f"{coin_symbol} AND (price OR market OR regulation)"  # Consulta específica para noticias cripto relevantes
+    # Construir la URL siguiendo la documentación de NewsData.io (#crypto-news), optimizada para noticias cripto recientes
+    query = f"crypto AND {coin_symbol}"  # Consulta simplificada para capturar más noticias relevantes
     url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
     
     try:
@@ -285,7 +285,8 @@ def get_recent_crypto_news(coin_symbol):
             data = resp.json()
             articles = data.get("results", [])
             if not articles:
-                return []
+                return []  # Sin noticias si no hay resultados, sin mensaje visible
+            
             # Ordenar por fecha de publicación (pubDate) y limitar a las 5 más recientes
             articles = sorted(articles, key=lambda x: x.get("pubDate", ""), reverse=True)[:5]
             return [
@@ -298,6 +299,25 @@ def get_recent_crypto_news(coin_symbol):
                 for article in articles
             ]
         elif resp.status_code == 422:
+            # Intentar con una consulta más genérica y rango reducido (7 días)
+            query_simple = f"crypto"  # Consulta genérica para capturar cualquier noticia cripto
+            start_date_simple = end_date - timedelta(days=7)
+            url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query_simple)}&language=en&from_date={start_date_simple.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
+            resp_retry = session.get(url_retry, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if resp_retry.status_code == 200:
+                data_retry = resp_retry.json()
+                articles_retry = data_retry.get("results", [])
+                if articles_retry:
+                    articles_retry = sorted(articles_retry, key=lambda x: x.get("pubDate", ""), reverse=True)[:5]
+                    return [
+                        {
+                            "title": article.get("title", "Sin título"),
+                            "description": article.get("description", "Sin descripción"),
+                            "pubDate": article.get("pubDate", "Fecha no disponible"),
+                            "link": article.get("link", "#")
+                        }
+                        for article in articles_retry
+                    ]
             return []  # Sin noticias si falla, sin mensaje visible
         elif resp.status_code == 429:
             st.error(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido.")
@@ -465,10 +485,10 @@ def main_app():
                 col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error promedio en dólares.")
                 col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error relativo promedio.")
 
-                # Verificación de dimensiones
-                if len(result["test_dates"]) != len(result["test_preds"]):
-                    st.warning(f"Advertencia: Longitud de test_dates ({len(result['test_dates'])}) no coincide con test_preds ({len(result['test_preds'])}). Ajustando...")
-                    min_len = min(len(result["test_dates"]), len(result["test_preds"]))
+                # Verificación estricta de dimensiones
+                if len(result["test_dates"]) != len(result["test_preds"]) or len(result["test_dates"]) != len(result["real_prices"]):
+                    st.error(f"Error en las dimensiones de los datos: test_dates ({len(result['test_dates'])}), test_preds ({len(result['test_preds'])}), real_prices ({len(result['real_prices'])}). Ajustando...")
+                    min_len = min(len(result["test_dates"]), len(result["test_preds"]), len(result["real_prices"]))
                     result["test_dates"] = result["test_dates"][:min_len]
                     result["test_preds"] = result["test_preds"][:min_len]
                     result["real_prices"] = result["real_prices"][:min_len]
@@ -480,14 +500,14 @@ def main_app():
                     y=result["real_prices"],
                     mode="lines",
                     name="Precio Real",
-                    line=dict(color="#1f77b4", width=2)  # Azul oscuro, más visible
+                    line=dict(color="#1f77b4", width=3)  # Azul oscuro, línea sólida más gruesa
                 ))
                 fig_test.add_trace(go.Scatter(
                     x=result["test_dates"],
                     y=result["test_preds"],
                     mode="lines",
                     name="Predicción",
-                    line=dict(color="#ff7f0e", width=2, dash="dash")  # Naranja, más visible con línea discontinua
+                    line=dict(color="#ff7f0e", width=3, dash="dash")  # Naranja, línea discontinua más gruesa
                 ))
                 fig_test.update_layout(
                     title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
@@ -496,7 +516,8 @@ def main_app():
                     yaxis_title="Precio en USD",
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                     plot_bgcolor="#1e1e2f",  # Fondo oscuro para consistencia con el dashboard
-                    paper_bgcolor="#1e1e2f"
+                    paper_bgcolor="#1e1e2f",
+                    hovermode="x unified"  # Mejorar la interacción al pasar el ratón
                 )
                 st.plotly_chart(fig_test, use_container_width=True)
                 st.session_state["result"] = result
@@ -523,7 +544,7 @@ def main_app():
             st.info("Entrena el modelo primero.")
 
     with tabs[2]:
-        st.header("Análisis de Sentimientos")
+        st.header("📊 Análisis de Sentimientos")
         if "result" in st.session_state:
             # Verificar si result es un diccionario
             if isinstance(st.session_state["result"], dict):
@@ -559,9 +580,9 @@ def main_app():
                         st.markdown(f"[Leer más]({article['link']})", unsafe_allow_html=True)
             # Mostrar en forma de tabla para mejor UX/UI
             news_df = pd.DataFrame(news)
-            st.dataframe(news_df[["title", "pubDate"]].style.format({"pubDate": "{:%Y-%m-%d %H:%M:%S}"})).style.set_properties(**{'background-color': '#2c2c3e', 'color': 'white', 'border-color': '#4a4a6a'})
+            st.dataframe(news_df[["title", "pubDate"]].style.format({"pubDate": "{:%Y-%m-%d %H:%M:%S}"}).set_properties(**{'background-color': '#2c2c3e', 'color': 'white', 'border-color': '#4a4a6a'}))
         else:
-            st.info("No se encontraron noticias recientes. Verifica tu conexión o los límites de la API.")
+            st.info("No se encontraron noticias recientes. Verifica tu conexión, los límites de la API, o intenta más tarde.")
 
 if __name__ == "__main__":
     main_app()
