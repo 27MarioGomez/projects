@@ -174,7 +174,7 @@ def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
 def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
     """Obtiene y analiza el sentimiento de noticias políticas y relevantes usando NewsData.io."""
     if start_date is None or end_date is None:
-        end_date = datetime.now()
+        end_date = datetime.now().date()
         start_date = end_date - timedelta(days=30)  # Rango por defecto de 30 días
     else:
         # Validar que el rango no exceda 30 días para evitar errores 422
@@ -271,8 +271,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
 
     # Asegurar que news_sent sea un número válido antes de usarlo
     news_sent = 50.0 if news_sent is None or pd.isna(news_sent) else float(news_sent)
-    if news_sent == 50.0 and start_date and end_date:  # Solo mostrar mensaje si hay fechas válidas
-        st.debug("No se pudo obtener el sentimiento de noticias. Usando valor por defecto de 50.0.")
+    # No mostrar mensaje visible aquí; el manejo de errores ya está en get_news_sentiment
 
     crypto_sent = get_crypto_sentiment_combined(coin_id, news_sent)
     market_sent = get_fear_greed_index()
@@ -352,7 +351,7 @@ def main_app():
     crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
-    default_end = datetime.now()
+    default_end = datetime.now().date()
     default_start = default_end - timedelta(days=30)  # Reducido a 30 días por defecto para evitar errores 422
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start)
