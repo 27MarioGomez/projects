@@ -243,8 +243,10 @@ def get_cryptocompare_social_sentiment(coin_id):
     """
     try:
         symbol = coinid_to_cryptocompare.get(coin_id, coin_id.upper())
+        st.write(f"Debug CryptoCompare: Solicitando datos para {symbol}")  # Depuración
         url = f"https://min-api.cryptocompare.com/data/social/coin/histo/day?fsym={symbol}&tsym=USD&limit=1"
         resp = session.get(url, timeout=10)
+        st.write(f"Debug CryptoCompare: Status {resp.status_code} para {symbol}")  # Depuración
         if resp.status_code == 200:
             data = resp.json()
             if data["Response"] == "Success" and data["Data"]:
@@ -252,6 +254,7 @@ def get_cryptocompare_social_sentiment(coin_id):
                 positive = latest.get("positive", 0)
                 negative = latest.get("negative", 0)
                 total = positive + negative
+                st.write(f"Debug CryptoCompare: Positive={positive}, Negative={negative}, Total={total} para {symbol}")  # Depuración
                 if total > 0:
                     sentiment = (positive - negative) / total  # Rango -1 a 1
                     return max(0, min(100, (sentiment + 1) * 50))  # Normalizar a 0-100
@@ -271,13 +274,16 @@ def get_coingecko_community_sentiment(coin_id):
     """
     try:
         cg_id = coinid_to_coingecko.get(coin_id, coin_id)
+        st.write(f"Debug CoinGecko: Solicitando datos para {cg_id}")  # Depuración
         url = f"https://api.coingecko.com/api/v3/coins/{cg_id}?localization=false&tickers=false&market_data=false&community_data=true&developer_data=false&sparkline=false"
         resp = session.get(url, timeout=10)
+        st.write(f"Debug CoinGecko: Status {resp.status_code} para {cg_id}")  # Depuración
         if resp.status_code == 200:
             data = resp.json()
             comm = data.get("community_data", {})
             up = comm.get("sentiment_votes_up_percentage", None)
             down = comm.get("sentiment_votes_down_percentage", None)
+            st.write(f"Debug CoinGecko: Up={up}, Down={down} para {cg_id}")  # Depuración
             if up is not None and down is not None:
                 return float(up)
             elif up is not None:
@@ -299,6 +305,7 @@ def get_crypto_sentiment_combined(coin_id):
     fg = get_fear_greed_index()
     cc = get_cryptocompare_social_sentiment(coin_id)
     cg = get_coingecko_community_sentiment(coin_id)
+    st.write(f"Debug Combined: FG={fg}, CC={cc}, CG={cg} para {coin_id}")  # Depuración
     # Ponderación optimizada: 40% Fear & Greed, 30% CryptoCompare, 30% CoinGecko
     combined = 0.4 * fg + 0.3 * cc + 0.3 * cg
     return max(0, min(100, combined))  # Asegurar rango 0-100
@@ -490,23 +497,8 @@ def main_app():
     
     with tabs[2]:
         st.header("Noticias Recientes")
-        st.markdown("Si hay problemas para cargar las noticias, por favor inténtalo más tarde.")
-        if 'result' in locals() and result is not None:
-            symbol = result[-1]
-            st.subheader(f"Noticias recientes de {symbol}")
-            news_items = get_lunarcrush_news(symbol, limit=5)
-            if news_items:
-                for i, item in enumerate(news_items, start=1):
-                    st.markdown(f"**{i}. {item['title']}**")
-                    st.markdown(f"[Ver noticia]({item['url']})")
-                    if item["description"]:
-                        st.write(item["description"])
-                    st.write(f"Publicado: {item['published_at']}")
-                    st.write("---")
-            else:
-                st.write("No se encontraron noticias o están limitadas en el plan Free.")
-        else:
-            st.info("Primero entrena el modelo para mostrar noticias.")
+        st.markdown("No hay una fuente gratuita de noticias disponible en este momento.")
+        
 
 if __name__ == "__main__":
     main_app()
