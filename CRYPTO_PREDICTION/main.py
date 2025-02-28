@@ -158,7 +158,7 @@ def get_coingecko_community_activity(coin_id):
         activity = max(data.get("twitter_followers", 0), data.get("reddit_average_posts_48h", 0) * 1000)
         return min(100, (activity / 20000000) * 100) if activity > 0 else 50.0
     except Exception:
-        st.warning(f"No se pudo obtener actividad de CoinGecko para {coin_id}. Usando valor por defecto.")
+        st.warning("Running get_coingecko_community_activity(...)")  # Mensaje cambiado según tu solicitud
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
@@ -473,7 +473,7 @@ def main_app():
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
-            with st.spinner("Procesando..."):
+            with st.spinner("Esto puede tardar un poco, por favor espera..."):  # Mensaje cambiado según tu solicitud
                 result = train_and_predict_with_sentiment(coin_id, horizon, start_ms, end_ms)
             if result:
                 st.success("Entrenamiento y predicción completados!")
@@ -492,7 +492,7 @@ def main_app():
                     result["test_preds"] = result["test_preds"][:min_len]
                     result["real_prices"] = result["real_prices"][:min_len]
 
-                # Crear el gráfico mejorado para precio real y predicción
+                # Crear el gráfico mejorado para precio real y predicción (solo líneas, sin fondo ni configuraciones adicionales)
                 if len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0:
                     fig_test = go.Figure()
                     fig_test.add_trace(go.Scatter(
@@ -510,15 +510,8 @@ def main_app():
                         line=dict(color="#ff7f0e", width=3, dash="dash")  # Naranja, línea discontinua más gruesa
                     ))
                     fig_test.update_layout(
-                        title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
-                        template="plotly_dark",
-                        xaxis_title="Fecha",
-                        yaxis_title="Precio en USD",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                        plot_bgcolor="#1e1e2f",  # Fondo oscuro para consistencia con el dashboard
-                        paper_bgcolor="#1e1e2f",
-                        hovermode="x unified"  # Mejorar la interacción al pasar el ratón
-                    )
+                        title=f"Comparación entre el precio real y la predicción: {result['symbol']}"
+                    )  # Solo título, sin fondo ni otras configuraciones
                     st.plotly_chart(fig_test, use_container_width=True)
                 else:
                     st.error("No hay suficientes datos para mostrar el gráfico de entrenamiento y test.")
