@@ -8,7 +8,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
@@ -20,9 +20,21 @@ from urllib3.util.retry import Retry
 import time
 import certifi
 import os
-from statsmodels.tsa.arima.model import ARIMA
-import lightgbm as lgb
-from sklearn.metrics import mean_squared_error
+
+try:
+    from statsmodels.tsa.arima.model import ARIMA
+    from sklearn.metrics import mean_squared_error
+    ARIMA_AVAILABLE = True
+except ImportError:
+    ARIMA_AVAILABLE = False
+    st.warning("statsmodels no está instalado. El modelo ARIMA no estará disponible.")
+
+try:
+    import lightgbm as lgb
+    LIGHTGBM_AVAILABLE = True
+except ImportError:
+    LIGHTGBM_AVAILABLE = False
+    st.warning("lightgbm no está instalado. El modelo LightGBM no estará disponible.")
 
 # Configurar certificados SSL para requests
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -133,7 +145,7 @@ crypto_characteristics = {
 }
 
 # Caché para datos de CoinGecko
-@st.cache_data(ttl=86400)  # Cache por 24 horas
+@st.cache_data(ttl=86400)
 def get_cached_coingecko_activity(coin_id):
     return get_coingecko_community_activity(coin_id)
 
@@ -141,10 +153,12 @@ def get_cached_coingecko_activity(coin_id):
 # Descarga de datos desde CoinCap (intervalo diario)
 ##############################################
 @st.cache_data
-def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
-    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
-    if start_ms and end_ms:
-        url += f"&start={start_ms}&end={end_ms}"
+def load_coincap_data(coin_id, max_retries=3):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=730)  # 2 años como máximo seguro
+    start_ms = int(start_date.timestamp() * 1000)
+    end_ms = int(end_date.timestamp() * 1000)
+    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1&start={start_ms}&end={end_ms}"
     headers = {"User-Agent": "Mozilla/5.0"}
     for attempt in range(max_retries):
         try:
@@ -177,7 +191,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
                 st.warning(f"CoinCap: Error 429 en intento {attempt+1}. Esperando {15*(attempt+1)}s...")
                 time.sleep(15*(attempt+1))
             elif resp.status_code == 400:
-                st.info("CoinCap: (400) Parámetros inválidos o rango excesivo.")
+                st.info("CoinCap: (400) Parámetros inválidos o rango excesivo. Usando rango de 2 años.")
                 return None
             else:
                 st.info(f"CoinCap: status code {resp.status_code}. Revisa parámetros.")
@@ -292,7 +306,7 @@ def get_crypto_sentiment_combined(coin_id):
     Restaura el valor aproximado de XRP a 21.5 ajustando la lógica.
     """
     fg = get_fear_greed_index()
-    cg_activity = get_cached_coingecko_activity(coin_id)  # Usa caché
+    cg_activity = get_cached_coingecko_activity(coin_id)
     hist_sent = historical_sentiment.get(coin_id, 50.0)
     combined = 0.5 * fg + 0.3 * cg_activity + 0.2 * hist_sent
     return max(0, min(100, combined))
@@ -307,32 +321,36 @@ def get_market_sentiment():
 # Modelos Alternativos
 ##############################################
 def train_arima_model(df, test_size=0.2):
+    if not ARIMA_AVAILABLE:
+        return None, np.nan, np.nan
     train_size = int(len(df) * (1 - test_size))
     train, test = df["close_price"][:train_size], df["close_price"][train_size:]
-    model = ARIMA(train, order=(5, 1, 0))  # Ajuste simple
+    model = ARIMA(train, order=(5, 1, 0))
     model_fit = model.fit()
     predictions = model_fit.forecast(steps=len(test))
-    rmse = np.sqrt(mean_squared_error(test, predictions))
-    mape = robust_mape(test, predictions)
+    rmse = np.sqrt(mean_squared_error(test, predictions)) if len(test) > 0 else np.nan
+    mape = robust_mape(test, predictions) if len(test) > 0 else np.nan
     return predictions, rmse, mape
 
 def train_lightgbm_model(df, test_size=0.2):
-    df["ds"] = df.index
+    if not LIGHTGBM_AVAILABLE:
+        return None, None, np.nan, np.nan
+    df["index"] = range(len(df))  # Usar índices numéricos en lugar de fechas
     df["target"] = df["close_price"].shift(-1)
     df = df.dropna()
     train_size = int(len(df) * (1 - test_size))
     train, test = df[:train_size], df[train_size:]
-    X_train = train[["ds"]]
+    X_train = train[["index"]]
     y_train = train["target"]
-    X_test = test[["ds"]]
+    X_test = test[["index"]]
     y_test = test["target"]
     model = lgb.LGBMRegressor(n_estimators=100, learning_rate=0.1)
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
-    rmse = np.sqrt(mean_squared_error(y_test, predictions))
-    mape = robust_mape(y_test, predictions)
-    future_dates = pd.date_range(start=df["ds"].iloc[-1], periods=5, freq="D")
-    future_preds = model.predict(pd.DataFrame({"ds": future_dates}))
+    rmse = np.sqrt(mean_squared_error(y_test, predictions)) if len(y_test) > 0 else np.nan
+    mape = robust_mape(y_test, predictions) if len(y_test) > 0 else np.nan
+    future_indices = range(df["index"].iloc[-1] + 1, df["index"].iloc[-1] + 6)
+    future_preds = model.predict(pd.DataFrame({"index": future_indices}))
     return predictions, future_preds, rmse, mape
 
 ##############################################
@@ -340,7 +358,7 @@ def train_lightgbm_model(df, test_size=0.2):
 ##############################################
 def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms,
                                      horizon_days=30, test_size=0.2):
-    df_raw = load_coincap_data(coin_id, start_ms, end_ms)
+    df_raw = load_coincap_data(coin_id)
     if df_raw is None or df_raw.empty:
         st.warning("No se pudieron descargar datos suficientes de CoinCap.")
         return None
@@ -396,10 +414,10 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     lstm_mape = robust_mape(lstm_y_test_real[lstm_valid_mask], lstm_test_preds[lstm_valid_mask]) if np.sum(lstm_valid_mask) > 0 else np.nan
 
     # Modelo ARIMA
-    arima_preds, arima_rmse, arima_mape = train_arima_model(df_raw)
+    arima_preds, arima_rmse, arima_mape = train_arima_model(df_raw) if ARIMA_AVAILABLE else (None, np.nan, np.nan)
 
     # Modelo LightGBM
-    lgb_preds, lgb_future_preds, lgb_rmse, lgb_mape = train_lightgbm_model(df_raw)
+    lgb_preds, lgb_future_preds, lgb_rmse, lgb_mape = train_lightgbm_model(df_raw) if LIGHTGBM_AVAILABLE else (None, None, np.nan, np.nan)
 
     # Predicción futura LSTM
     last_window = scaled_data[-window_size:]
@@ -416,9 +434,11 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
     # Selección del mejor modelo (menor RMSE)
-    models = {"LSTM": (lstm_test_preds, future_preds, lstm_rmse, lstm_mape),
-              "ARIMA": (arima_preds, arima_preds[:len(lstm_test_preds)], arima_rmse, arima_mape),
-              "LightGBM": (lgb_preds, lgb_future_preds[:horizon_days], lgb_rmse, lgb_mape)}
+    models = {"LSTM": (lstm_test_preds, future_preds, lstm_rmse, lstm_mape)}
+    if ARIMA_AVAILABLE and arima_preds is not None:
+        models["ARIMA"] = (arima_preds, arima_preds[:len(lstm_test_preds)], arima_rmse, arima_mape)
+    if LIGHTGBM_AVAILABLE and lgb_preds is not None:
+        models["LightGBM"] = (lgb_preds, lgb_future_preds[:horizon_days], lgb_rmse, lgb_mape)
     best_model = min(models.items(), key=lambda x: x[1][2] if not np.isnan(x[1][2]) else np.inf)[0]
     best_test_preds, best_future_preds, best_rmse, best_mape = models[best_model]
 
@@ -440,9 +460,9 @@ def main_app():
     coin_id = coincap_ids[st.session_state["crypto_name"]]
 
     st.sidebar.subheader("Rango de Fechas")
-    use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=True, help="Activa esto para elegir un período personalizado. Deja desmarcado para usar el rango por defecto.")
-    default_start = datetime(2021, 1, 1)
+    use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False, help="Activa esto para elegir un período personalizado. Deja desmarcado para usar el rango máximo seguro (2 años).")
     default_end = datetime.now()
+    default_start = default_end - timedelta(days=730)  # 2 años como máximo seguro
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start, help="Desde cuándo analizar datos.")
         end_date = st.sidebar.date_input("Fecha de fin", default_end, help="Hasta cuándo incluir datos.")
@@ -456,7 +476,7 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5, help="Número de días a futuro a predecir. Ajustado a 5 para tu caso.")
     st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos históricos.**")
 
-    df_prices = load_coincap_data(coin_id, start_ms, end_ms)
+    df_prices = load_coincap_data(coin_id)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
@@ -474,7 +494,7 @@ def main_app():
                 "75%": "Percentil 75", "max": "Máximo"
             }))
     else:
-        st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas o revisa la conexión.")
+        st.info("No se encontraron datos históricos válidos. Revisa la conexión o ajusta el rango si usas personalizado.")
 
     tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📰 Noticias"])
     
