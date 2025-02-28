@@ -17,7 +17,8 @@ import os
 from sklearn.metrics import mean_squared_error
 from textblob import TextBlob
 import socket  # Para manejar errores de DNS
-from urllib3.util.retry import Retry  # Importación corregida para Retry
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
 # Configuración inicial de certificados SSL y solicitudes
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
