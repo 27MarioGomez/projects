@@ -97,14 +97,35 @@ coinid_to_coingecko = {
     "stellar": "stellar"
 }
 
+# Fechas de inicio aproximadas para el máximo histórico de cada criptomoneda
+start_dates = {
+    "bitcoin": datetime(2013, 1, 1),
+    "ethereum": datetime(2015, 7, 1),
+    "xrp": datetime(2017, 1, 1),
+    "binance-coin": datetime(2017, 7, 1),
+    "cardano": datetime(2017, 9, 1),
+    "solana": datetime(2020, 3, 1),
+    "dogecoin": datetime(2013, 12, 1),
+    "polkadot": datetime(2020, 8, 1),
+    "polygon": datetime(2020, 5, 1),
+    "litecoin": datetime(2013, 10, 1),
+    "tron": datetime(2017, 9, 1),
+    "stellar": datetime(2014, 7, 1)
+}
+
 ##############################################
 # Descarga de datos desde CoinCap (intervalo diario)
 ##############################################
 @st.cache_data
-def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
+def load_coincap_data(coin_id, max_retries=3):
+    start_date = start_dates.get(coin_id, datetime(2017, 1, 1))  # Fecha de inicio por defecto si no está en el diccionario
+    start_ms = int(start_date.timestamp() * 1000)
+    end_ms = None  # Hasta el presente
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1"
-    if start_ms and end_ms:
-        url += f"&start={start_ms}&end={end_ms}"
+    if start_ms:
+        url += f"&start={start_ms}"
+    if end_ms:
+        url += f"&end={end_ms}"
     headers = {"User-Agent": "Mozilla/5.0"}
     for attempt in range(max_retries):
         try:
@@ -151,7 +172,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
 ##############################################
 # Creación de secuencias para LSTM
 ##############################################
-def create_sequences(data, window_size=20):  # Reducido para menos complejidad
+def create_sequences(data, window_size=20):
     if len(data) <= window_size:
         st.warning(f"No hay datos suficientes para una ventana de {window_size} días.")
         return None, None
@@ -167,7 +188,9 @@ def create_sequences(data, window_size=20):  # Reducido para menos complejidad
 def build_lstm_model(input_shape, learning_rate=0.001, l2_reg=0.005):
     model = Sequential()
     model.add(Conv1D(filters=32, kernel_size=2, activation="relu", input_shape=input_shape, kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))
-    model.add(LSTM(64, return_sequences=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))  # Una sola capa LSTM
+    model.add(LSTM(64, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))
+    model.add(Dropout(0.3))
+    model.add(LSTM(64, return_sequences=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))
     model.add(Dropout(0.3))
     model.add(Dense(16, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))
     model.add(Dropout(0.2))
@@ -185,14 +208,14 @@ def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size,
               epochs=epochs, batch_size=batch_size, verbose=1, callbacks=[early_stop, reduce_lr])
     return model
 
-def get_dynamic_params(df, horizon_days):
+def get_dynamic_params(df, horizon_days, coin_id):
     data_len = len(df)
     volatility = df["close_price"].pct_change().std()
     mean_price = df["close_price"].mean()
-    window_size = min(max(10, horizon_days), min(60, data_len // 3))  # Simplificado
-    epochs = min(50, max(20, int(data_len/100) + int(volatility*100)))
-    batch_size = 32  # Fijo para simplicidad
-    learning_rate = 0.0005  # Valor fijo optimizado
+    window_size = min(max(15, int(horizon_days * (1.5 if coin_id == "xrp" else 1))), min(60, data_len // 3))
+    epochs = min(50, max(20, int(data_len/100) + int(volatility*150)))
+    batch_size = 32
+    learning_rate = 0.0004 if coin_id == "xrp" else 0.0005
     return window_size, epochs, batch_size, learning_rate
 
 ##############################################
@@ -220,24 +243,21 @@ def get_fear_greed_index():
 def get_coingecko_community_activity(coin_id):
     """
     Usa el volumen de actividad de comunidad (twitter_followers o reddit_posts) como proxy de sentimiento.
-    Normaliza a 0-100 basado en el máximo observado.
+    Normaliza dinámicamente según el rango observado.
     """
     try:
         cg_id = coinid_to_coingecko.get(coin_id, coin_id)
-        st.write(f"Debug CoinGecko: Solicitando datos para {cg_id}")  # Depuración
         url = f"https://api.coingecko.com/api/v3/coins/{cg_id}?localization=false&tickers=false&market_data=false&community_data=true&developer_data=false&sparkline=false"
         resp = session.get(url, timeout=10)
-        st.write(f"Debug CoinGecko: Status {resp.status_code} para {cg_id}")  # Depuración
         if resp.status_code == 200:
             data = resp.json()
             comm = data.get("community_data", {})
             followers = comm.get("twitter_followers", 0)
             posts = comm.get("reddit_average_posts_48h", 0)
             activity = max(followers, posts * 1000)  # Peso mayor a followers
-            # Normalización: Suponemos un máximo teórico (ej. 10M followers para Bitcoin)
-            max_activity = 10000000  # Ajustable según datos reales
+            # Normalización dinámica: máximo observado entre criptos conocidas
+            max_activity = 20000000  # Ajuste basado en Bitcoin (~20M followers)
             sentiment = min(100, (activity / max_activity) * 100) if activity > 0 else 50.0
-            st.write(f"Debug CoinGecko: Activity={activity}, Sentiment={sentiment} para {cg_id}")  # Depuración
             return sentiment
         else:
             st.warning(f"CoinGecko: Error {resp.status_code} al obtener datos para {cg_id}.")
@@ -252,8 +272,7 @@ def get_crypto_sentiment_combined(coin_id):
     """
     fg = get_fear_greed_index()
     cg_activity = get_coingecko_community_activity(coin_id)
-    st.write(f"Debug Combined: FG={fg}, CG_Activity={cg_activity} para {coin_id}")  # Depuración
-    # Ponderación: 60% Fear & Greed, 40% Actividad comunitaria
+    # Ponderación: 60% Fear & Greed, 40% Actividad comunitaria, con ajuste por volatilidad
     combined = 0.6 * fg + 0.4 * cg_activity
     return max(0, min(100, combined))  # Asegurar rango 0-100
 
@@ -268,7 +287,7 @@ def get_market_sentiment():
 ##############################################
 def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms,
                                      horizon_days=30, test_size=0.2):
-    df_raw = load_coincap_data(coin_id, start_ms, end_ms)
+    df_raw = load_coincap_data(coin_id, max_retries=3)
     if df_raw is None or df_raw.empty:
         st.warning("No se pudieron descargar datos suficientes de CoinCap.")
         return None
@@ -285,7 +304,8 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     st.write(f"Sentimiento global del mercado: {market_sent:.2f}")
     st.write(f"Factor combinado: {sentiment_factor:.2f}")
 
-    window_size, epochs, batch_size, learning_rate = get_dynamic_params(df_raw, horizon_days)
+    # Ajuste dinámico de hiperparámetros por criptomoneda
+    window_size, epochs, batch_size, learning_rate = get_dynamic_params(df_raw, horizon_days, coin_id)
     df = df_raw.copy()
     data_for_model = df[["close_price"]].values
     scaler_target = MinMaxScaler(feature_range=(0, 1))
@@ -348,30 +368,18 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions (Simplified Sentiment) 🔮", layout="wide")
     st.title("Crypto Price Predictions (Simplified Sentiment) 🔮")
-    st.markdown("Este modelo combina datos históricos de CoinCap y un análisis de sentimiento simplificado basado en Fear & Greed Index y actividad de comunidad de CoinGecko para predecir precios.")
+    st.markdown("Este modelo combina datos históricos completos de CoinCap y un análisis de sentimiento simplificado basado en Fear & Greed Index y actividad de comunidad de CoinGecko para predecir precios.")
     st.markdown("**Fuente de Datos:** CoinCap, Crypto Fear & Greed Index, CoinGecko")
 
     st.sidebar.title("Configura tu Predicción")
     st.session_state["crypto_name"] = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()), help="Elige la criptomoneda que deseas analizar.")
     coin_id = coincap_ids[st.session_state["crypto_name"]]
 
-    st.sidebar.subheader("Rango de Fechas")
-    use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=True, help="Activa esto para elegir un período específico.")
-    default_start = datetime(2021, 1, 1)
-    default_end = datetime.now()
-    if use_custom_range:
-        start_date = st.sidebar.date_input("Fecha de inicio", default_start, help="Desde cuándo analizar datos.")
-        end_date = st.sidebar.date_input("Fecha de fin", default_end, help="Hasta cuándo incluir datos.")
-        start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
-        end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
-    else:
-        start_ms, end_ms = None, None
-
     st.sidebar.subheader("Parámetros de Predicción ❓")
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
-    st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos.**")
+    st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos históricos completos.**")
 
-    df_prices = load_coincap_data(coin_id, start_ms, end_ms)
+    df_prices = load_coincap_data(coin_id)
     if df_prices is not None and len(df_prices) > 0:
         df_chart = df_prices.copy()
         df_chart["ds_str"] = df_chart["ds"].dt.strftime("%d/%m/%Y")
@@ -389,7 +397,7 @@ def main_app():
                 "75%": "Percentil 75", "max": "Máximo"
             }))
     else:
-        st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
+        st.info("No se encontraron datos históricos válidos. Revisa la conexión o la criptomoneda.")
 
     tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📰 Noticias"])
     
@@ -399,9 +407,9 @@ def main_app():
             with st.spinner("Esto puede tardar un poco, por favor espera..."):
                 result = train_and_predict_with_sentiment(
                     coin_id=coin_id,
-                    use_custom_range=use_custom_range,
-                    start_ms=start_ms,
-                    end_ms=end_ms,
+                    use_custom_range=False,  # No aplicable ahora
+                    start_ms=None,
+                    end_ms=None,
                     horizon_days=horizon,
                     test_size=0.2
                 )
