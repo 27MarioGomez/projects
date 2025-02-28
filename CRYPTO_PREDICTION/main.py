@@ -165,7 +165,7 @@ def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
         news_weight = 0.2  # Menos peso a las noticias, ya que son menos críticas para estables
 
     # Sentimiento de noticias (si no hay datos o falla, usar 50.0 como valor por defecto)
-    news_sent = news_sent if news_sent is not None and not pd.isna(news_sent) else 50.0
+    news_sent = 50.0 if news_sent is None or pd.isna(news_sent) else float(news_sent)
     combined_sentiment = (fg * fg_weight + cg * cg_weight + news_sent * news_weight)
     return max(0, min(100, combined_sentiment))  # Asegurar rango 0-100
 
@@ -181,7 +181,7 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
     api_key = st.secrets.get("news_data_key", None)
     if not api_key:
         st.warning("No se encontró la API key de NewsData.io en Secrets. Usando valor por defecto para sentimiento.")
-        return 50.0
+        return None
 
     # Construir la URL siguiendo la documentación de NewsData.io
     query = f"{coin_symbol}+crypto+regulation+policy"
@@ -193,18 +193,18 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             socket.getaddrinfo('newsdata.io', 443)
         except socket.gaierror as dns_error:
             st.error(f"Error de resolución DNS para newsdata.io: {dns_error}. Verifica tu conexión de red o DNS.")
-            return 50.0
+            return None
 
         resp = session.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code == 200:
             data = resp.json()
             articles = data.get("results", [])
             if not articles:
-                return 50.0  # Valor por defecto si no hay noticias
+                return None  # Valor por defecto si no hay noticias
             
             sentiments = []
             for article in articles[:5]:  # Limitar a 5 artículos (1 crédito = 10 artículos, usamos 0.5 créditos por consulta)
-                title = article.get("title", "")
+                title = article.get("title", "").strip()
                 if title:
                     blob = TextBlob(title)
                     sentiment = blob.sentiment.polarity
@@ -212,22 +212,25 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
                     sentiment_score = 50 + (sentiment * 50)  # Normalizar a 0-100
                     sentiments.append(sentiment_score)
             
-            return np.mean(sentiments) if sentiments else 50.0
+            return np.mean(sentiments) if sentiments else None
         elif resp.status_code == 422:
             st.warning(f"Error 422 al obtener noticias de NewsData.io: Requiere parámetros válidos. Verifica el formato de fechas o consulta. Usando valor por defecto para sentimiento.")
-            return 50.0
+            return None
         elif resp.status_code == 429:
             st.warning(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido. Usando valor por defecto para sentimiento.")
-            return 50.0
+            return None
+        elif resp.status_code == 401:
+            st.error(f"Error 401: Clave de API inválida o no autorizada. Verifica tu clave en Secrets.")
+            return None
         else:
             st.warning(f"Error al obtener noticias de NewsData.io: {resp.status_code}. Verifica los límites de tu plan gratuito (200 créditos/día).")
-            return 50.0
+            return None
     except requests.exceptions.ConnectionError as conn_error:
         st.error(f"Error de conexión con NewsData.io: {conn_error}. Verifica tu conexión de red o los límites de la API.")
-        return 50.0
+        return None
     except Exception as e:
         st.warning(f"Error al obtener noticias: {e}")
-        return 50.0
+        return None
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None):
@@ -243,7 +246,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     news_sent = get_news_sentiment(symbol, start_date, end_date)
 
     # Asegurar que news_sent sea un número válido antes de usarlo
-    news_sent = 50.0 if news_sent is None or pd.isna(news_sent) else news_sent
+    news_sent = 50.0 if news_sent is None else float(news_sent)
     if news_sent == 50.0:
         st.warning("No se pudo obtener el sentimiento de noticias. Usando valor por defecto de 50.0.")
 
@@ -330,6 +333,10 @@ def main_app():
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start)
         end_date = st.sidebar.date_input("Fecha de fin", default_end)
+        # Validar que las fechas sean válidas y no excedan un rango razonable
+        if start_date > end_date:
+            st.sidebar.error("La fecha de inicio no puede ser posterior a la fecha de fin.")
+            return
         start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
         end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
     else:
