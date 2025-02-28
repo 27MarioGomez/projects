@@ -17,6 +17,7 @@ import time
 import certifi
 import os
 from sklearn.metrics import mean_squared_error
+from textblob import TextBlob
 
 # Configuración inicial de certificados SSL y sesión de requests
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -146,28 +147,83 @@ def get_coingecko_community_activity(coin_id):
         st.warning(f"No se pudo obtener actividad de CoinGecko para {coin_id}. Usando valor por defecto.")
         return 50.0
 
-def get_crypto_sentiment_combined(coin_id):
-    """Calcula el sentimiento combinado dinámico con pesos ajustados por volatilidad."""
+def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
+    """Calcula el sentimiento combinado dinámico con noticias políticas y pesos ajustados por volatilidad."""
     fg = get_fear_greed_index()
     cg = get_coingecko_community_activity(coin_id)
     volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-    # Ajustar pesos: más peso a CoinGecko para criptos volátiles, menos a Fear & Greed
+
+    # Ajustar pesos: más peso a CoinGecko y noticias para criptos volátiles, menos a Fear & Greed
     if volatility > 0.07:  # Criptos muy volátiles (e.g., XRP, DOGE)
-        fg_weight = 0.3  # Menos peso al mercado global
-        cg_weight = 0.7  # Más peso a la actividad comunitaria
+        fg_weight = 0.2  # Menos peso al mercado global
+        cg_weight = 0.5  # Peso moderado a la actividad comunitaria
+        news_weight = 0.3  # Más peso a las noticias políticas para capturar volatilidad
     else:  # Criptos más estables (e.g., BTC, ETH)
-        fg_weight = 0.6  # Más peso al mercado global
-        cg_weight = 0.4  # Menos peso a la actividad comunitaria
-    return max(0, min(100, fg * fg_weight + cg * cg_weight))  # Asegurar rango 0-100
+        fg_weight = 0.5  # Más peso al mercado global
+        cg_weight = 0.3  # Menos peso a la actividad comunitaria
+        news_weight = 0.2  # Menos peso a las noticias, ya que son menos críticas para estables
+
+    # Sentimiento de noticias (si no hay datos, usar 50.0 como valor por defecto)
+    news_sent = news_sent if news_sent is not None else 50.0
+    combined_sentiment = (fg * fg_weight + cg * cg_weight + news_sent * news_weight)
+    return max(0, min(100, combined_sentiment))  # Asegurar rango 0-100
+
+# Nueva función para análisis de noticias (usando NewsData.io con API key desde Secrets)
+@st.cache_data(ttl=86400)  # Cachear datos diarios para minimizar peticiones
+def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
+    """Obtiene y analiza el sentimiento de noticias políticas y relevantes usando NewsData.io."""
+    if start_date is None or end_date is None:
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=30)  # Rango por defecto de 30 días
+
+    # Obtener la API key desde Streamlit Secrets
+    api_key = st.secrets.get("news_data_key", None)
+    if not api_key:
+        st.warning("No se encontró la API key de NewsData.io en Secrets. Usando valor por defecto para sentimiento.")
+        return 50.0
+
+    url = f"https://api.newsdata.io/v1/news?q={coin_symbol}+crypto+regulation+policy&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&apiKey={api_key}"
+    
+    try:
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code == 200:
+            data = resp.json()
+            articles = data.get("results", [])
+            if not articles:
+                return 50.0  # Valor por defecto si no hay noticias
+            
+            sentiments = []
+            for article in articles[:5]:  # Limitar a 5 artículos (1 crédito = 10 artículos, usamos 0.5 créditos por consulta)
+                title = article.get("title", "")
+                if title:
+                    blob = TextBlob(title)
+                    sentiment = blob.sentiment.polarity
+                    # Convertir de -1 a 1 a 0 a 100
+                    sentiment_score = 50 + (sentiment * 50)  # Normalizar a 0-100
+                    sentiments.append(sentiment_score)
+            
+            return np.mean(sentiments) if sentiments else 50.0
+        else:
+            st.warning(f"Error al obtener noticias de NewsData.io: {resp.status_code}")
+            return 50.0
+    except Exception as e:
+        st.warning(f"Error al obtener noticias: {e}")
+        return 50.0
 
 # Predicción
-def train_and_predict_with_sentiment(coin_id, horizon_days):
-    """Entrena y predice combinando modelos y sentimiento."""
-    df = load_coincap_data(coin_id)
+def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None):
+    """Entrena y predice combinando modelos, sentimiento y noticias."""
+    df = load_coincap_data(coin_id, start_ms, end_ms)
     if df is None:
         return None
     symbol = coinid_to_symbol[coin_id]
-    crypto_sent = get_crypto_sentiment_combined(coin_id)
+
+    # Obtener sentimiento de noticias para el rango de fechas (si aplica)
+    start_date = datetime.fromtimestamp(start_ms / 1000) if start_ms else None
+    end_date = datetime.fromtimestamp(end_ms / 1000) if end_ms else None
+    news_sent = get_news_sentiment(symbol, start_date, end_date)
+
+    crypto_sent = get_crypto_sentiment_combined(coin_id, news_sent)
     market_sent = get_fear_greed_index()
     sentiment_factor = (crypto_sent + market_sent) / 200.0
 
@@ -235,9 +291,9 @@ def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Modelo:**  
-    Esta plataforma utiliza un modelo avanzado de aprendizaje automático basado en redes LSTM (Long Short-Term Memory) para predecir precios futuros de criptomonedas como Bitcoin, Ethereum, Ripple y otras. El modelo integra datos históricos de precios y volúmenes de CoinCap, abarcando hasta dos años de información diaria, ajustando dinámicamente sus hiperparámetros (como tamaño de ventana, épocas, tamaño de lote y tasa de aprendizaje) según la volatilidad específica de cada criptomoneda. Además, incorpora un análisis de sentimiento dinámico que combina el índice Fear & Greed para el mercado global con la actividad comunitaria en redes sociales (Twitter y Reddit) de CoinGecko para cada cripto, mejorando la precisión al considerar el estado de ánimo del mercado y los inversores. Las predicciones se complementan con métricas clave como RMSE y MAPE para evaluar la precisión, y se presentan en gráficos interactivos y tablas para una experiencia clara y detallada.
+    Esta plataforma utiliza un modelo avanzado de aprendizaje automático basado en redes LSTM (Long Short-Term Memory) para predecir precios futuros de criptomonedas como Bitcoin, Ethereum, Ripple y otras. El modelo integra datos históricos de precios y volúmenes de CoinCap, abarcando hasta dos años de información diaria, ajustando dinámicamente sus hiperparámetros (como tamaño de ventana, épocas, tamaño de lote y tasa de aprendizaje) según la volatilidad específica de cada criptomoneda. Además, incorpora un análisis de sentimiento dinámico que combina el índice Fear & Greed para el mercado global, la actividad comunitaria en redes sociales (Twitter y Reddit) de CoinGecko para cada cripto, y noticias políticas y económicas relevantes obtenidas a través de NewsData.io, mejorando la precisión al considerar el estado de ánimo del mercado, los inversores y eventos externos. Las predicciones se complementan con métricas clave como RMSE y MAPE para evaluar la precisión, y se presentan en gráficos interactivos y tablas para una experiencia clara y detallada.
 
-    Fuentes de datos: CoinCap, Fear & Greed Index, CoinGecko
+    Fuentes de datos: CoinCap, Fear & Greed Index, CoinGecko, NewsData.io
     """)
 
     # Sidebar
@@ -275,7 +331,7 @@ def main_app():
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
             with st.spinner("Procesando..."):
-                result = train_and_predict_with_sentiment(coin_id, horizon)
+                result = train_and_predict_with_sentiment(coin_id, horizon, start_ms, end_ms)
             if result:
                 st.success("Entrenamiento y predicción completados!")
                 st.write(f"Sentimiento combinado de {result['symbol']}: {result['crypto_sent']:.2f}")
