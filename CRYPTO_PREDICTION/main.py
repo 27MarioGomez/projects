@@ -169,7 +169,7 @@ def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
     combined_sentiment = (fg * fg_weight + cg * cg_weight + news_sent * news_weight)
     return max(0, min(100, combined_sentiment))  # Asegurar rango 0-100
 
-# Nueva función para análisis de noticias (usando NewsData.io con API key desde Secrets)
+# Nueva función para análisis de noticias (usando NewsData.io con API key desde Secrets, ajustada según documentación)
 @st.cache_data(ttl=86400)  # Cachear datos diarios para minimizar peticiones
 def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
     """Obtiene y analiza el sentimiento de noticias políticas y relevantes usando NewsData.io."""
@@ -184,7 +184,8 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
         return 50.0
 
     # Construir la URL siguiendo la documentación de NewsData.io
-    url = f"https://newsdata.io/api/1/news?q={coin_symbol}+crypto+regulation+policy&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&apikey={api_key}"
+    query = f"{coin_symbol}+crypto+regulation+policy"
+    url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
     
     try:
         # Verificar resolución DNS antes de la petición
@@ -212,6 +213,12 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
                     sentiments.append(sentiment_score)
             
             return np.mean(sentiments) if sentiments else 50.0
+        elif resp.status_code == 422:
+            st.warning(f"Error 422 al obtener noticias de NewsData.io: Requiere parámetros válidos. Verifica el formato de fechas o consulta. Usando valor por defecto para sentimiento.")
+            return 50.0
+        elif resp.status_code == 429:
+            st.warning(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido. Usando valor por defecto para sentimiento.")
+            return 50.0
         else:
             st.warning(f"Error al obtener noticias de NewsData.io: {resp.status_code}. Verifica los límites de tu plan gratuito (200 créditos/día).")
             return 50.0
@@ -236,8 +243,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     news_sent = get_news_sentiment(symbol, start_date, end_date)
 
     # Asegurar que news_sent sea un número válido antes de usarlo
-    if news_sent is None or pd.isna(news_sent):
-        news_sent = 50.0
+    news_sent = 50.0 if news_sent is None or pd.isna(news_sent) else news_sent
+    if news_sent == 50.0:
         st.warning("No se pudo obtener el sentimiento de noticias. Usando valor por defecto de 50.0.")
 
     crypto_sent = get_crypto_sentiment_combined(coin_id, news_sent)
