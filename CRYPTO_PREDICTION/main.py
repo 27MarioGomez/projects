@@ -158,8 +158,7 @@ def get_coingecko_community_activity(coin_id):
         activity = max(data.get("twitter_followers", 0), data.get("reddit_average_posts_48h", 0) * 1000)
         return min(100, (activity / 20000000) * 100) if activity > 0 else 50.0
     except Exception:
-        st.warning(f"No se pudo obtener actividad de CoinGecko para {coin_id}. Usando valor por defecto.")
-        return 50.0
+        return 50.0  # Eliminado el mensaje de advertencia según tu solicitud
 
 def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
     """Calcula el sentimiento combinado dinámico con noticias específicas de cripto y pesos ajustados por volatilidad."""
@@ -473,7 +472,7 @@ def main_app():
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
-            with st.spinner("Procesando..."):
+            with st.spinner("Esto puede tardar un poco, por favor espera..."):  # Mensaje cambiado según tu solicitud
                 result = train_and_predict_with_sentiment(coin_id, horizon, start_ms, end_ms)
             if result:
                 st.success("Entrenamiento y predicción completados!")
@@ -492,7 +491,7 @@ def main_app():
                     result["test_preds"] = result["test_preds"][:min_len]
                     result["real_prices"] = result["real_prices"][:min_len]
 
-                # Crear el gráfico mejorado para precio real y predicción
+                # Crear el gráfico mejorado para precio real y predicción (solo líneas, sin fondo ni configuraciones adicionales)
                 if len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0:
                     fig_test = go.Figure()
                     fig_test.add_trace(go.Scatter(
@@ -510,15 +509,8 @@ def main_app():
                         line=dict(color="#ff7f0e", width=3, dash="dash")  # Naranja, línea discontinua más gruesa
                     ))
                     fig_test.update_layout(
-                        title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
-                        template="plotly_dark",
-                        xaxis_title="Fecha",
-                        yaxis_title="Precio en USD",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                        plot_bgcolor="#1e1e2f",  # Fondo oscuro para consistencia con el dashboard
-                        paper_bgcolor="#1e1e2f",
-                        hovermode="x unified"  # Mejorar la interacción al pasar el ratón
-                    )
+                        title=f"Comparación entre el precio real y la predicción: {result['symbol']}"
+                    )  # Solo título, sin fondo ni otras configuraciones
                     st.plotly_chart(fig_test, use_container_width=True)
                 else:
                     st.error("No hay suficientes datos para mostrar el gráfico de entrenamiento y test.")
@@ -552,24 +544,61 @@ def main_app():
             if isinstance(st.session_state["result"], dict):
                 result = st.session_state["result"]
                 crypto_sent, market_sent = result["crypto_sent"], result["market_sent"]
-                level = (crypto_sent - 50) / 5  # Escala -10 a 10
-                sentiment_label = "Very Bearish" if level <= -5 else "Bearish" if level <= -2 else "Neutral" if -2 < level < 2 else "Bullish" if level <= 5 else "Very Bullish"
-                color = "#ff7f0e" if level < 0 else "#1f77b4"
+                level = (crypto_sent - 50) / 5  # Escala -10 a 10 para determinar el estado
+                sentiment_label = "Very Bearish" if level <= -5 else "Bearish" if level <= -2 else \
+                                 "Neutral" if -2 < level < 2 else "Bullish" if level <= 5 else "Very Bullish"
+                color = "#ff7f0e" if level < 0 else "#1f77b4"  # Naranja para bearish, azul para bullish
 
+                # Mejorar el diseño del gauge para hacerlo más amigable y dinámico
                 fig_sentiment = go.Figure(go.Indicator(
-                    mode="gauge+number+delta", value=crypto_sent, domain={"x": [0, 1], "y": [0, 1]},
-                    title={"text": f"Sentimiento - {result['symbol']}", "font": {"size": 20, "color": "white"}},
-                    gauge={"axis": {"range": [0, 100], "tickcolor": "white", "tickwidth": 2},
-                           "bar": {"color": color}, "bgcolor": "#1e1e2f", "borderwidth": 2, "bordercolor": "#4a4a6a",
-                           "steps": [
-                               {"range": [0, 25], "color": "#ff7f0e"}, {"range": [25, 40], "color": "#ffaa7f"},
-                               {"range": [40, 60], "color": "#666666"}, {"range": [60, 75], "color": "#7fb4ff"},
-                               {"range": [75, 100], "color": "#1f77b4"}
-                           ], "threshold": {"line": {"color": "white", "width": 4}, "thickness": 0.75, "value": 50}},
-                    delta={"reference": market_sent, "increasing": {"color": "#1f77b4"}, "decreasing": {"color": "#ff7f0e"}},
-                    number={"font": {"size": 40, "color": "white"}}
+                    mode="gauge+number+delta",
+                    value=crypto_sent,
+                    domain={"x": [0, 1], "y": [0, 1]},
+                    title={
+                        "text": f"Sentimiento - {result['symbol']}",
+                        "font": {"size": 24, "color": "#ffffff", "family": "Arial, sans-serif"}
+                    },
+                    gauge={
+                        "axis": {
+                            "range": [0, 100],
+                            "tickvals": [0, 25, 40, 50, 60, 75, 100],
+                            "ticktext": ["Very Bearish", "Bearish", "", "Neutral", "", "Bullish", "Very Bullish"],
+                            "tickcolor": "#ffffff",
+                            "tickwidth": 2,
+                            "tickfont": {"size": 14, "color": "#ffffff"}
+                        },
+                        "bar": {"color": color},
+                        "bgcolor": "#2c2c3e",
+                        "borderwidth": 2,
+                        "bordercolor": "#4a4a6a",
+                        "steps": [
+                            {"range": [0, 25], "color": "#ff7f0e"},  # Very Bearish, naranja oscuro
+                            {"range": [25, 40], "color": "#ffaa7f"},  # Bearish, naranja claro
+                            {"range": [40, 60], "color": "#666666"},  # Neutral, gris
+                            {"range": [60, 75], "color": "#7fb4ff"},  # Bullish, azul claro
+                            {"range": [75, 100], "color": "#1f77b4"}  # Very Bullish, azul oscuro
+                        ],
+                        "threshold": {
+                            "line": {"color": "#ffffff", "width": 4},
+                            "thickness": 0.75,
+                            "value": 50
+                        }
+                    },
+                    delta={
+                        "reference": market_sent,
+                        "increasing": {"color": "#1f77b4"},
+                        "decreasing": {"color": "#ff7f0e"}
+                    },
+                    number={"font": {"size": 48, "color": "#ffffff", "family": "Arial, sans-serif"}}
                 ))
-                fig_sentiment.update_layout(template="plotly_dark", plot_bgcolor="#1e1e2f", paper_bgcolor="#1e1e2f", height=400, width=600, margin=dict(l=20, r=20, t=50, b=20))
+                fig_sentiment.update_layout(
+                    template="plotly_dark",
+                    plot_bgcolor="#1e1e2f",
+                    paper_bgcolor="#1e1e2f",
+                    height=500,  # Aumentado para mayor visibilidad
+                    width=800,  # Aumentado para mayor visibilidad
+                    margin=dict(l=20, r=20, t=80, b=20)  # Ajuste de márgenes para mejor presentación
+                )
                 st.plotly_chart(fig_sentiment, use_container_width=True)
                 st.write(f"**Estado:** {sentiment_label} (Mercado: {market_sent:.2f})")
                 st.write("**NFA (Not Financial Advice):** Esto es solo información educativa, no un consejo financiero. Consulta a un experto antes de invertir.")
