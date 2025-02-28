@@ -18,6 +18,7 @@ import certifi
 import os
 from sklearn.metrics import mean_squared_error
 from textblob import TextBlob
+import socket  # Para manejar errores de DNS
 
 # Configuración inicial de certificados SSL y sesión de requests
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -163,8 +164,8 @@ def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
         cg_weight = 0.3  # Menos peso a la actividad comunitaria
         news_weight = 0.2  # Menos peso a las noticias, ya que son menos críticas para estables
 
-    # Sentimiento de noticias (si no hay datos, usar 50.0 como valor por defecto)
-    news_sent = news_sent if news_sent is not None else 50.0
+    # Sentimiento de noticias (si no hay datos o falla, usar 50.0 como valor por defecto)
+    news_sent = news_sent if news_sent is not None and not pd.isna(news_sent) else 50.0
     combined_sentiment = (fg * fg_weight + cg * cg_weight + news_sent * news_weight)
     return max(0, min(100, combined_sentiment))  # Asegurar rango 0-100
 
@@ -182,10 +183,18 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
         st.warning("No se encontró la API key de NewsData.io en Secrets. Usando valor por defecto para sentimiento.")
         return 50.0
 
-    url = f"https://api.newsdata.io/v1/news?q={coin_symbol}+crypto+regulation+policy&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&apiKey={api_key}"
+    # Construir la URL siguiendo la documentación de NewsData.io
+    url = f"https://newsdata.io/api/1/news?q={coin_symbol}+crypto+regulation+policy&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&apikey={api_key}"
     
     try:
-        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        # Verificar resolución DNS antes de la petición
+        try:
+            socket.getaddrinfo('newsdata.io', 443)
+        except socket.gaierror as dns_error:
+            st.error(f"Error de resolución DNS para newsdata.io: {dns_error}. Verifica tu conexión de red o DNS.")
+            return 50.0
+
+        resp = session.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code == 200:
             data = resp.json()
             articles = data.get("results", [])
@@ -204,8 +213,11 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             
             return np.mean(sentiments) if sentiments else 50.0
         else:
-            st.warning(f"Error al obtener noticias de NewsData.io: {resp.status_code}")
+            st.warning(f"Error al obtener noticias de NewsData.io: {resp.status_code}. Verifica los límites de tu plan gratuito (200 créditos/día).")
             return 50.0
+    except requests.exceptions.ConnectionError as conn_error:
+        st.error(f"Error de conexión con NewsData.io: {conn_error}. Verifica tu conexión de red o los límites de la API.")
+        return 50.0
     except Exception as e:
         st.warning(f"Error al obtener noticias: {e}")
         return 50.0
@@ -218,10 +230,15 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
         return None
     symbol = coinid_to_symbol[coin_id]
 
-    # Obtener sentimiento de noticias para el rango de fechas (si aplica)
+    # Obtener sentimiento de noticias para el rango de fechas (si aplica), con manejo de errores
     start_date = datetime.fromtimestamp(start_ms / 1000) if start_ms else None
     end_date = datetime.fromtimestamp(end_ms / 1000) if end_ms else None
     news_sent = get_news_sentiment(symbol, start_date, end_date)
+
+    # Asegurar que news_sent sea un número válido antes de usarlo
+    if news_sent is None or pd.isna(news_sent):
+        news_sent = 50.0
+        st.warning("No se pudo obtener el sentimiento de noticias. Usando valor por defecto de 50.0.")
 
     crypto_sent = get_crypto_sentiment_combined(coin_id, news_sent)
     market_sent = get_fear_greed_index()
