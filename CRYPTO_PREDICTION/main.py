@@ -17,6 +17,7 @@ import time
 import certifi
 import os
 
+# Verificación de dependencias opcionales
 try:
     from statsmodels.tsa.arima.model import ARIMA
     from sklearn.metrics import mean_squared_error
@@ -40,24 +41,30 @@ adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
 # Diccionarios
-coincap_ids = {"Bitcoin (BTC)": "bitcoin", "Ethereum (ETH)": "ethereum", "Ripple (XRP)": "xrp",
-               "Binance Coin (BNB)": "binance-coin", "Cardano (ADA)": "cardano", "Solana (SOL)": "solana",
-               "Dogecoin (DOGE)": "dogecoin", "Polkadot (DOT)": "polkadot", "Polygon (MATIC)": "polygon",
-               "Litecoin (LTC)": "litecoin", "TRON (TRX)": "tron", "Stellar (XLM)": "stellar"}
+coincap_ids = {
+    "Bitcoin (BTC)": "bitcoin", "Ethereum (ETH)": "ethereum", "Ripple (XRP)": "xrp",
+    "Binance Coin (BNB)": "binance-coin", "Cardano (ADA)": "cardano", "Solana (SOL)": "solana",
+    "Dogecoin (DOGE)": "dogecoin", "Polkadot (DOT)": "polkadot", "Polygon (MATIC)": "polygon",
+    "Litecoin (LTC)": "litecoin", "TRON (TRX)": "tron", "Stellar (XLM)": "stellar"
+}
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 coinid_to_coingecko = {v: v if v != "xrp" else "ripple" for v in coincap_ids.values()}
-crypto_characteristics = {"bitcoin": {"volatility": 0.03}, "ethereum": {"volatility": 0.05}, "xrp": {"volatility": 0.08},
-                         "binance-coin": {"volatility": 0.06}, "cardano": {"volatility": 0.07}, "solana": {"volatility": 0.09},
-                         "dogecoin": {"volatility": 0.12}, "polkadot": {"volatility": 0.07}, "polygon": {"volatility": 0.06},
-                         "litecoin": {"volatility": 0.04}, "tron": {"volatility": 0.06}, "stellar": {"volatility": 0.05}}
+crypto_characteristics = {
+    "bitcoin": {"volatility": 0.03}, "ethereum": {"volatility": 0.05}, "xrp": {"volatility": 0.08},
+    "binance-coin": {"volatility": 0.06}, "cardano": {"volatility": 0.07}, "solana": {"volatility": 0.09},
+    "dogecoin": {"volatility": 0.12}, "polkadot": {"volatility": 0.07}, "polygon": {"volatility": 0.06},
+    "litecoin": {"volatility": 0.04}, "tron": {"volatility": 0.06}, "stellar": {"volatility": 0.05}
+}
 
 # Funciones de apoyo
 def robust_mape(y_true, y_pred, eps=1e-9):
+    """Calcula el MAPE de manera robusta evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
 # Carga de datos
 @st.cache_data
 def load_coincap_data(coin_id):
+    """Carga datos históricos de CoinCap para una criptomoneda específica."""
     end_date = datetime.now()
     start_date = end_date - timedelta(days=730)
     url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1&start={int(start_date.timestamp()*1000)}&end={int(end_date.timestamp()*1000)}"
@@ -80,27 +87,41 @@ def load_coincap_data(coin_id):
 
 # Secuencias y modelo LSTM
 def create_sequences(data, window_size):
-    if len(data) <= window_size: return None, None
+    """Crea secuencias para el modelo LSTM."""
+    if len(data) <= window_size:
+        return None, None
     X, y = [], []
     for i in range(window_size, len(data)):
-        X.append(data[i-window_size:i])
+        X.append(data[i - window_size:i])
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
 def build_lstm_model(input_shape, learning_rate=0.001):
-    model = Sequential([LSTM(50, return_sequences=True, input_shape=input_shape),
-                        Dropout(0.2), LSTM(50), Dropout(0.2), Dense(20, activation="relu"), Dense(1)])
+    """Construye el modelo LSTM."""
+    model = Sequential([
+        LSTM(50, return_sequences=True, input_shape=input_shape),
+        Dropout(0.2),
+        LSTM(50),
+        Dropout(0.2),
+        Dense(20, activation="relu"),
+        Dense(1)
+    ])
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
 def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size):
+    """Entrena el modelo LSTM."""
     tf.keras.backend.clear_session()
     model = build_lstm_model(input_shape)
-    callbacks = [EarlyStopping(patience=5, restore_best_weights=True), ReduceLROnPlateau(patience=3, factor=0.5, min_lr=1e-6)]
+    callbacks = [
+        EarlyStopping(patience=5, restore_best_weights=True),
+        ReduceLROnPlateau(patience=3, factor=0.5, min_lr=1e-6)
+    ]
     model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
     return model
 
 def get_dynamic_params(df, horizon_days, coin_id):
+    """Ajusta parámetros dinámicos según volatilidad y datos."""
     volatility = df["close_price"].pct_change().std()
     base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
     window_size = min(max(15, int(horizon_days * (1.5 if volatility > base_volatility else 1))), len(df) // 3)
@@ -112,6 +133,7 @@ def get_dynamic_params(df, horizon_days, coin_id):
 # Sentimiento dinámico
 @st.cache_data(ttl=3600)  # Actualiza cada hora
 def get_fear_greed_index():
+    """Obtiene el índice Fear & Greed."""
     try:
         return float(session.get("https://api.alternative.me/fng/?format=json", timeout=10).json()["data"][0]["value"])
     except Exception:
@@ -120,6 +142,7 @@ def get_fear_greed_index():
 
 @st.cache_data(ttl=3600)
 def get_coingecko_community_activity(coin_id):
+    """Obtiene actividad comunitaria de CoinGecko."""
     try:
         cg_id = coinid_to_coingecko.get(coin_id, coin_id)
         data = session.get(f"https://api.coingecko.com/api/v3/coins/{cg_id}?community_data=true", timeout=10).json()["community_data"]
@@ -130,18 +153,20 @@ def get_coingecko_community_activity(coin_id):
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id):
+    """Calcula el sentimiento combinado dinámico."""
     fg = get_fear_greed_index()
     cg = get_coingecko_community_activity(coin_id)
-    # Pesos dinámicos según volatilidad
     volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-    fg_weight = 0.6 if volatility > 0.07 else 0.5  # Más peso al mercado en criptos volátiles
+    fg_weight = 0.6 if volatility > 0.07 else 0.5
     cg_weight = 1 - fg_weight
     return fg * fg_weight + cg * cg_weight
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days):
+    """Entrena y predice combinando modelos y sentimiento."""
     df = load_coincap_data(coin_id)
-    if df is None: return None
+    if df is None:
+        return None
     symbol = coinid_to_symbol[coin_id]
     crypto_sent = get_crypto_sentiment_combined(coin_id)
     market_sent = get_fear_greed_index()
@@ -151,7 +176,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days):
     scaled_data = scaler.fit_transform(df[["close_price"]])
     window_size, epochs, batch_size, learning_rate = get_dynamic_params(df, horizon_days, coin_id)
     X, y = create_sequences(scaled_data, window_size)
-    if X is None: return None
+    if X is None:
+        return None
 
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
@@ -171,7 +197,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days):
     lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
     lstm_mape = robust_mape(y_test_real, lstm_test_preds)
 
-    # Predicción futura LSTM
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = np.concatenate([last_window.reshape(1, window_size, 1), np.full((1, window_size, 1), sentiment_factor)], axis=-1)
@@ -184,7 +209,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days):
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     lstm_future_preds = scaler.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    # Modelos alternativos
     arima_preds, arima_rmse, arima_mape = train_arima_model(df) if ARIMA_AVAILABLE else (None, np.inf, np.inf)
     prophet_results = train_prophet_model(df, horizon_days) if PROPHET_AVAILABLE else (None, None, np.inf, np.inf)
     prophet_preds, prophet_future_preds, prophet_rmse, prophet_mape = prophet_results if prophet_results else (None, None, np.inf, np.inf)
@@ -195,37 +219,63 @@ def train_and_predict_with_sentiment(coin_id, horizon_days):
     if PROPHET_AVAILABLE and prophet_preds is not None:
         models["Prophet"] = (prophet_preds, prophet_future_preds, prophet_rmse, prophet_mape)
 
-    # Selección combinando RMSE y MAPE
     best_model = min(models.items(), key=lambda x: (x[1][2] + x[1][3]) / 2 if not (np.isnan(x[1][2]) or np.isnan(x[1][3])) else np.inf)[0]
     return df, *models[best_model], sentiment_factor, symbol, crypto_sent, market_sent
 
 def train_arima_model(df):
-    if not ARIMA_AVAILABLE: return None, np.inf, np.inf
+    """Entrena un modelo ARIMA."""
+    if not ARIMA_AVAILABLE:
+        return None, np.inf, np.inf
     train_size = int(len(df) * 0.8)
     train, test = df["close_price"][:train_size], df["close_price"][train_size:]
     model = ARIMA(train, order=(5, 1, 0)).fit()
     preds = model.forecast(steps=len(test))
     return preds, np.sqrt(mean_squared_error(test, preds)), robust_mape(test, preds)
 
-def train_prophet_model(df, horizon_days):
-    if not PROPHET_AVAILABLE: return None, None, np.inf, np.inf
-    df_prophet = df.rename(columns={"ds": "ds", "close_price": "y"})
-    train_size = int(len(df_prophet) * 0.8)
-    train, test = df_prophet[:train_size], df_prophet[train_size:]
+def train_prophet_model(df, horizon_days, test_size=0.2):
+    """Entrena un modelo Prophet con corrección para evitar errores de fechas."""
+    if not PROPHET_AVAILABLE:
+        return None, None, np.nan, np.nan
+    
+    # Renombrar columnas para Prophet
+    df_prophet = df.rename(columns={"ds": "ds", "close_price": "y"}).copy()
+    
+    # Calcular tamaños de entrenamiento y prueba
+    train_size = int(len(df_prophet) * (1 - test_size))
+    if train_size <= 0 or len(df_prophet) - train_size <= 0:
+        st.warning("El conjunto de datos es demasiado pequeño para dividir en entrenamiento y prueba.")
+        return None, None, np.nan, np.nan
+    
+    train = df_prophet[:train_size]
+    test = df_prophet[train_size:]
+    
+    # Entrenar el modelo Prophet
     model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
     model.fit(train)
-    future = model.make_future_dataframe(periods=horizon_days + len(test) - train_size)
+    
+    # Generar fechas futuras para cubrir prueba y horizonte
+    future = model.make_future_dataframe(periods=len(test) + horizon_days)
     forecast = model.predict(future)
-    preds = forecast["yhat"].iloc[train_size:train_size + len(test)].values
-    future_preds = forecast["yhat"].tail(horizon_days).values
-    return preds, future_preds, np.sqrt(mean_squared_error(test["y"], preds)), robust_mape(test["y"], preds)
+    
+    # Extraer predicciones para el conjunto de prueba
+    predictions = forecast["yhat"].iloc[train_size:train_size + len(test)].values
+    
+    # Extraer predicciones para el horizonte futuro
+    future_preds = forecast["yhat"].iloc[-horizon_days:].values
+    
+    # Calcular métricas
+    rmse = np.sqrt(mean_squared_error(test["y"], predictions)) if len(test) > 0 else np.nan
+    mape = robust_mape(test["y"], predictions) if len(test) > 0 else np.nan
+    
+    return predictions, future_preds, rmse, mape
 
-# App
+# Aplicación principal
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions (Simplified Sentiment) 🔮", layout="wide")
     st.title("Crypto Price Predictions (Simplified Sentiment) 🔮")
     st.markdown("Este modelo combina datos históricos de CoinCap y un análisis de sentimiento dinámico basado en Fear & Greed Index y actividad de CoinGecko para predecir precios.")
 
+    # Sidebar
     st.sidebar.title("Configura tu Predicción")
     crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
@@ -244,6 +294,7 @@ def main_app():
     st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos históricos.**")
     show_stats = st.sidebar.checkbox("Ver estadísticas descriptivas", value=False)
 
+    # Gráfico histórico
     df_prices = load_coincap_data(coin_id)
     if df_prices is not None:
         fig_hist = px.line(df_prices, x="ds", y="close_price", title=f"Histórico de {crypto_name}", labels={"ds": "Fecha", "close_price": "Precio en USD"})
@@ -253,6 +304,7 @@ def main_app():
             st.subheader("Estadísticas Descriptivas")
             st.write(df_prices["close_price"].describe())
 
+    # Pestañas
     tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos"])
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
@@ -266,13 +318,13 @@ def main_app():
                 st.write(f"Sentimiento global del mercado: {market_sent:.2f}")
                 st.write(f"Factor combinado: {sentiment_factor:.2f}")
                 col1, col2 = st.columns(2)
-                col1.metric("RMSE (Test)", f"{rmse:.2f}", help=f"Error promedio en dólares.")
-                col2.metric("MAPE (Test)", f"{mape:.2f}%", help=f"Error relativo promedio.")
+                col1.metric("RMSE (Test)", f"{rmse:.2f}", help="Error promedio en dólares.")
+                col2.metric("MAPE (Test)", f"{mape:.2f}%", help="Error relativo promedio.")
                 fig_test = go.Figure()
                 test_dates = df["ds"].iloc[-len(test_preds):]
-                fig_test.add_trace(go.Scatter(x=test_dates, y=df["close_price"].iloc[-len(test_preds):], mode="lines", name="Real"))
-                fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds, mode="lines", name="Predicción"))
-                fig_test.update_layout(title=f"Comparación en Test: {symbol}", template="plotly_dark")
+                fig_test.add_trace(go.Scatter(x=test_dates, y=df["close_price"].iloc[-len(test_preds):], mode="lines", name="Precio (Real)"))
+                fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds, mode="lines", name="Predicción (Test)", line=dict(dash="dash")))
+                fig_test.update_layout(title=f"Comparación en el set de Test: {symbol}", template="plotly_dark")
                 st.plotly_chart(fig_test, use_container_width=True)
                 st.session_state["result"] = result
 
@@ -298,16 +350,16 @@ def main_app():
         if "result" in st.session_state:
             df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent = st.session_state["result"]
             sentiment_texts = {
-                "BTC": f"Sentimiento combinado de  {crypto_sent:.2f} refleja cautela con optimismo moderado. Mercado: {market_sent:.2f}.",
-                "ETH": f"Sentimiento combinado de  {crypto_sent:.2f} sugiere neutralidad. Mercado: {market_sent:.2f}.",
-                "XRP": f"Sentimiento combinado de  {crypto_sent:.2f} indica pesimismo leve. Mercado: {market_sent:.2f}.",
+                "BTC": f"Sentimiento combinado de {crypto_sent:.2f} refleja cautela con optimismo moderado. Mercado: {market_sent:.2f}.",
+                "ETH": f"Sentimiento combinado de {crypto_sent:.2f} sugiere neutralidad. Mercado: {market_sent:.2f}.",
+                "XRP": f"Sentimiento combinado de {crypto_sent:.2f} indica pesimismo leve. Mercado: {market_sent:.2f}.",
             }
             st.write(sentiment_texts.get(symbol, f"Sentimiento combinado: {crypto_sent:.2f}, Mercado: {market_sent:.2f}"))
             fig_sentiment = go.Figure(data=[
-                go.Bar(name='Sentimiento Combinado', x=[symbol], y=[crypto_sent], marker_color='#1f77b4'),
-                go.Bar(name='Sentimiento Global', x=[symbol], y=[market_sent], marker_color='#ff7f0e')
+                go.Bar(name="Sentimiento Combinado", x=[symbol], y=[crypto_sent], marker_color="#1f77b4"),
+                go.Bar(name="Sentimiento Global", x=[symbol], y=[market_sent], marker_color="#ff7f0e")
             ])
-            fig_sentiment.update_layout(barmode='group', title=f"Análisis de Sentimiento de {symbol}", template="plotly_dark")
+            fig_sentiment.update_layout(barmode="group", title=f"Análisis de Sentimiento de {symbol}", template="plotly_dark")
             st.plotly_chart(fig_sentiment, use_container_width=True)
         else:
             st.info("Entrena el modelo para ver el análisis.")
