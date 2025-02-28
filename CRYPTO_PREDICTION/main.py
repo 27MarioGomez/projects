@@ -491,7 +491,7 @@ def main_app():
                     result["test_preds"] = result["test_preds"][:min_len]
                     result["real_prices"] = result["real_prices"][:min_len]
 
-                # Crear el gráfico mejorado para precio real y predicción (solo líneas, sin fondo ni configuraciones adicionales)
+                # Crear el gráfico mejorado para precio real y predicción (solo líneas, sin fondo ni configuraciones adicionales, con días en el eje X)
                 if len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0:
                     fig_test = go.Figure()
                     fig_test.add_trace(go.Scatter(
@@ -509,8 +509,9 @@ def main_app():
                         line=dict(color="#ff7f0e", width=3, dash="dash")  # Naranja, línea discontinua más gruesa
                     ))
                     fig_test.update_layout(
-                        title=f"Comparación entre el precio real y la predicción: {result['symbol']}"
-                    )  # Solo título, sin fondo ni otras configuraciones
+                        title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
+                        xaxis=dict(tickformat="%Y-%m-%d")  # Mostrar solo días en el eje X
+                    )  # Solo título y formato de días, sin fondo ni otras configuraciones
                     st.plotly_chart(fig_test, use_container_width=True)
                 else:
                     st.error("No hay suficientes datos para mostrar el gráfico de entrenamiento y test.")
@@ -549,6 +550,9 @@ def main_app():
                                  "Neutral" if -2 < level < 2 else "Bullish" if level <= 5 else "Very Bullish"
                 color = "#ff7f0e" if level < 0 else "#1f77b4"  # Naranja para bearish, azul para bullish
 
+                # Ajustar el threshold para que esté en el valor exacto de crypto_sent
+                threshold_value = crypto_sent  # Colocar la línea blanca en el valor exacto de crypto_sent
+
                 # Mejorar el diseño del gauge para hacerlo más amigable y dinámico
                 fig_sentiment = go.Figure(go.Indicator(
                     mode="gauge+number+delta",
@@ -581,7 +585,7 @@ def main_app():
                         "threshold": {
                             "line": {"color": "#ffffff", "width": 4},
                             "thickness": 0.75,
-                            "value": 50
+                            "value": threshold_value  # Ajustado dinámicamente al valor de crypto_sent
                         }
                     },
                     delta={
