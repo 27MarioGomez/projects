@@ -46,13 +46,17 @@ def robust_mape(y_true, y_pred, eps=1e-9):
     """Calcula el MAPE de manera robusta evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Carga de datos corregida
+# Carga de datos corregida con soporte para rango personalizado
 @st.cache_data
-def load_coincap_data(coin_id):
-    """Carga datos históricos de CoinCap para una criptomoneda específica."""
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=730)
-    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1&start={int(start_date.timestamp()*1000)}&end={int(end_date.timestamp()*1000)}"
+def load_coincap_data(coin_id, start_ms=None, end_ms=None):
+    """Carga datos históricos de CoinCap para una criptomoneda específica con rango personalizado."""
+    if start_ms is None or end_ms is None:
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=730)  # Rango por defecto de 2 años
+        start_ms = int(start_date.timestamp() * 1000)
+        end_ms = int(end_date.timestamp() * 1000)
+    
+    url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1&start={start_ms}&end={end_ms}"
     try:
         resp = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, verify=certifi.where(), timeout=10)
         if resp.status_code != 200:
@@ -113,10 +117,11 @@ def get_dynamic_params(df, horizon_days, coin_id):
     """Ajusta parámetros dinámicos según volatilidad y datos."""
     volatility = df["close_price"].pct_change().std()
     base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-    window_size = min(max(15, int(horizon_days * (1.5 if volatility > base_volatility else 1))), len(df) // 3)
-    epochs = min(50, max(20, int(len(df) / 100) + int(volatility * 150)))
-    batch_size = 32
-    learning_rate = 0.0004 if volatility > base_volatility else 0.0005
+    # Ajustes más agresivos para criptos volátiles como XRP
+    window_size = min(max(10, int(horizon_days * (1.2 if volatility > base_volatility else 1.5))), len(df) // 4)
+    epochs = min(100, max(30, int(len(df) / 80) + int(volatility * 200)))  # Más épocas para datos complejos
+    batch_size = 16 if volatility > base_volatility else 32  # Batch menor para volátiles
+    learning_rate = 0.0003 if volatility > base_volatility else 0.0005  # LR menor para volátiles
     return window_size, epochs, batch_size, learning_rate
 
 # Sentimiento dinámico
@@ -142,13 +147,18 @@ def get_coingecko_community_activity(coin_id):
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id):
-    """Calcula el sentimiento combinado dinámico."""
+    """Calcula el sentimiento combinado dinámico con pesos ajustados por volatilidad."""
     fg = get_fear_greed_index()
     cg = get_coingecko_community_activity(coin_id)
     volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-    fg_weight = 0.6 if volatility > 0.07 else 0.5
-    cg_weight = 1 - fg_weight
-    return fg * fg_weight + cg * cg_weight
+    # Ajustar pesos: más peso a CoinGecko para criptos volátiles, menos a Fear & Greed
+    if volatility > 0.07:  # Criptos muy volátiles (e.g., XRP, DOGE)
+        fg_weight = 0.3  # Menos peso al mercado global
+        cg_weight = 0.7  # Más peso a la actividad comunitaria
+    else:  # Criptos más estables (e.g., BTC, ETH)
+        fg_weight = 0.6  # Más peso al mercado global
+        cg_weight = 0.4  # Menos peso a la actividad comunitaria
+    return max(0, min(100, fg * fg_weight + cg * cg_weight))  # Asegurar rango 0-100
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days):
@@ -235,12 +245,23 @@ def main_app():
     st.sidebar.title("Configura tu Predicción")
     crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
+    use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
+    default_end = datetime.now()
+    default_start = default_end - timedelta(days=730)
+    if use_custom_range:
+        start_date = st.sidebar.date_input("Fecha de inicio", default_start)
+        end_date = st.sidebar.date_input("Fecha de fin", default_end)
+        start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
+        end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
+    else:
+        start_ms = int(default_start.timestamp() * 1000)
+        end_ms = int(default_end.timestamp() * 1000)
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
     st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos.**")
     show_stats = st.sidebar.checkbox("Ver estadísticas descriptivas", value=False)
 
     # Gráfico histórico
-    df_prices = load_coincap_data(coin_id)
+    df_prices = load_coincap_data(coin_id, start_ms, end_ms)
     if df_prices is not None:
         fig_hist = px.line(df_prices, x="ds", y="close_price", title=f"Histórico de {crypto_name}", labels={"ds": "Fecha", "close_price": "Precio en USD"})
         fig_hist.update_layout(template="plotly_dark")
