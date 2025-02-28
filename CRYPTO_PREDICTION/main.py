@@ -165,7 +165,7 @@ def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
         news_weight = 0.2  # Menos peso a las noticias, ya que son menos críticas para estables
 
     # Sentimiento de noticias (si no hay datos o falla, usar 50.0 como valor por defecto)
-    news_sent = 50.0 if news_sent is None or pd.isna(news_sent) else float(news_sent)
+    news_sent = 50.0 if news_sentiment is None or pd.isna(news_sentiment) else float(news_sentiment)
     combined_sentiment = (fg * fg_weight + cg * cg_weight + news_sent * news_weight)
     return max(0, min(100, combined_sentiment))  # Asegurar rango 0-100
 
@@ -200,7 +200,8 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             data = resp.json()
             articles = data.get("results", [])
             if not articles:
-                return None  # Valor por defecto si no hay noticias
+                st.warning("No se encontraron noticias. Usando valor por defecto para sentimiento.")
+                return None
             
             sentiments = []
             for article in articles[:5]:  # Limitar a 5 artículos (1 crédito = 10 artículos, usamos 0.5 créditos por consulta)
@@ -246,7 +247,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     news_sent = get_news_sentiment(symbol, start_date, end_date)
 
     # Asegurar que news_sent sea un número válido antes de usarlo
-    news_sent = 50.0 if news_sent is None else float(news_sent)
+    news_sent = 50.0 if news_sent is None or pd.isna(news_sent) else float(news_sent)
     if news_sent == 50.0:
         st.warning("No se pudo obtener el sentimiento de noticias. Usando valor por defecto de 50.0.")
 
