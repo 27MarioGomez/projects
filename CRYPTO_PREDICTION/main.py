@@ -124,10 +124,11 @@ def get_dynamic_params(df, horizon_days, coin_id):
     """Ajusta parámetros dinámicos según volatilidad y datos."""
     volatility = df["close_price"].pct_change().std()
     base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-    window_size = min(max(15, int(horizon_days * (1.5 if volatility > base_volatility else 1))), len(df) // 3)
-    epochs = min(50, max(20, int(len(df) / 100) + int(volatility * 150)))
-    batch_size = 32
-    learning_rate = 0.0004 if volatility > base_volatility else 0.0005
+    # Ajustes dinámicos para mejorar RMSE y MAPE
+    window_size = min(max(10, int(horizon_days * (1.2 if volatility > base_volatility else 0.8))), len(df) // 4)  # Ventana más pequeña para volátiles
+    epochs = min(100, max(30, int(len(df) / 80) + int(volatility * 200)))  # Más épocas para datos complejos
+    batch_size = 16 if volatility > base_volatility else 32  # Batch menor para volátiles
+    learning_rate = 0.0003 if volatility > base_volatility else 0.0005  # LR menor para volátiles
     return window_size, epochs, batch_size, learning_rate
 
 # Sentimiento dinámico
@@ -153,17 +154,18 @@ def get_coingecko_community_activity(coin_id):
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id):
-    """Calcula el sentimiento combinado dinámico."""
+    """Calcula el sentimiento combinado dinámico con pesos ajustados por volatilidad."""
     fg = get_fear_greed_index()
     cg = get_coingecko_community_activity(coin_id)
     volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-    fg_weight = 0.6 if volatility > 0.07 else 0.5
+    # Mayor peso a CoinGecko para criptos volátiles, Fear & Greed para estables
+    fg_weight = 0.4 if volatility > 0.07 else 0.6
     cg_weight = 1 - fg_weight
     return fg * fg_weight + cg * cg_weight
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days):
-    """Entrena y predice combinando modelos y sentimiento."""
+    """Entrena y predice combinando modelos y sentimiento, devolviendo 10 valores."""
     df = load_coincap_data(coin_id)
     if df is None:
         return None
@@ -209,6 +211,10 @@ def train_and_predict_with_sentiment(coin_id, horizon_days):
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     lstm_future_preds = scaler.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
+    # Generar future_dates para las predicciones futuras
+    last_date = df["ds"].iloc[-1]
+    future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=horizon_days, freq="D").to_pydatetime().tolist()
+
     arima_preds, arima_rmse, arima_mape = train_arima_model(df) if ARIMA_AVAILABLE else (None, np.inf, np.inf)
     prophet_results = train_prophet_model(df, horizon_days) if PROPHET_AVAILABLE else (None, None, np.inf, np.inf)
     prophet_preds, prophet_future_preds, prophet_rmse, prophet_mape = prophet_results if prophet_results else (None, None, np.inf, np.inf)
@@ -220,7 +226,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days):
         models["Prophet"] = (prophet_preds, prophet_future_preds, prophet_rmse, prophet_mape)
 
     best_model = min(models.items(), key=lambda x: (x[1][2] + x[1][3]) / 2 if not (np.isnan(x[1][2]) or np.isnan(x[1][3])) else np.inf)[0]
-    return df, *models[best_model], sentiment_factor, symbol, crypto_sent, market_sent
+    return df, *models[best_model], sentiment_factor, symbol, crypto_sent, market_sent, future_dates
 
 def train_arima_model(df):
     """Entrena un modelo ARIMA."""
@@ -312,7 +318,7 @@ def main_app():
             with st.spinner("Procesando..."):
                 result = train_and_predict_with_sentiment(coin_id, horizon)
             if result:
-                df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent = result
+                df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent, future_dates = result
                 st.success("Entrenamiento y predicción completados!")
                 st.write(f"Sentimiento combinado de {symbol}: {crypto_sent:.2f}")
                 st.write(f"Sentimiento global del mercado: {market_sent:.2f}")
@@ -331,24 +337,25 @@ def main_app():
     with tabs[1]:
         st.header(f"Predicción de Precios - {crypto_name}")
         if "result" in st.session_state:
-            df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent = st.session_state["result"]
+            df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent, future_dates = st.session_state["result"]
             last_date = df["ds"].iloc[-1]
             current_price = df["close_price"].iloc[-1]
-            future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
             pred_series = np.concatenate(([current_price], future_preds))
             fig_future = go.Figure()
-            fig_future.add_trace(go.Scatter(x=future_dates, y=pred_series, mode="lines+markers", name="Predicción"))
+            # Usar future_dates del resultado en lugar de regenerarlas
+            future_dates_display = [last_date] + future_dates
+            fig_future.add_trace(go.Scatter(x=future_dates_display, y=pred_series, mode="lines+markers", name="Predicción"))
             fig_future.update_layout(title=f"Predicción a Futuro ({horizon} días) - {symbol}", template="plotly_dark")
             st.plotly_chart(fig_future, use_container_width=True)
             st.subheader("Valores Numéricos")
-            st.dataframe(pd.DataFrame({"Fecha": future_dates, "Predicción": pred_series}))
+            st.dataframe(pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series}))
         else:
             st.info("Entrena el modelo primero.")
 
     with tabs[2]:
         st.header("Análisis de Sentimientos")
         if "result" in st.session_state:
-            df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent = st.session_state["result"]
+            df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent, future_dates = st.session_state["result"]
             sentiment_texts = {
                 "BTC": f"Sentimiento combinado de {crypto_sent:.2f} refleja cautela con optimismo moderado. Mercado: {market_sent:.2f}.",
                 "ETH": f"Sentimiento combinado de {crypto_sent:.2f} sugiere neutralidad. Mercado: {market_sent:.2f}.",
