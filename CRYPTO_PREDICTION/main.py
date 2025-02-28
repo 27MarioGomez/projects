@@ -163,7 +163,7 @@ def get_coingecko_community_activity(coin_id):
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
-    """Calcula el sentimiento combinado dinámico con noticias políticas y pesos ajustados por volatilidad."""
+    """Calcula el sentimiento combinado dinámico con noticias específicas de cripto y pesos ajustados por volatilidad."""
     fg = get_fear_greed_index()
     cg = get_coingecko_community_activity(coin_id)
     volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
@@ -172,7 +172,7 @@ def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
     if volatility > 0.07:  # Criptos muy volátiles (e.g., XRP, DOGE)
         fg_weight = 0.15  # Menos peso al mercado global
         cg_weight = 0.45  # Más peso a la actividad comunitaria
-        news_weight = 0.40  # Más peso a las noticias para capturar volatilidad
+        news_weight = 0.40  # Más peso a las noticias cripto para capturar volatilidad
     else:  # Criptos más estables (e.g., BTC, ETH)
         fg_weight = 0.50  # Más peso al mercado global
         cg_weight = 0.30  # Menos peso a la actividad comunitaria
@@ -183,13 +183,13 @@ def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
     combined_sentiment = (fg * fg_weight + cg * cg_weight + news_sent * news_weight)
     return max(0, min(100, combined_sentiment))  # Asegurar rango 0-100
 
-# Nueva función para análisis de noticias (usando NewsData.io con API key desde Secrets, optimizada)
+# Nueva función para análisis de noticias de criptomonedas (usando NewsData.io con API key desde Secrets, optimizada según #crypto-news)
 @st.cache_data(ttl=86400)  # Cachear datos diarios para minimizar peticiones
 def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
-    """Obtiene y analiza el sentimiento de noticias relevantes usando NewsData.io, optimizado para criptomonedas."""
+    """Obtiene y analiza el sentimiento de noticias específicas de criptomonedas usando NewsData.io, optimizado para el sector crypto."""
     if start_date is None or end_date is None:
         end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=7)  # Reducido a 7 días por defecto para mayor eficiencia y evitar errores 422
+        start_date = end_date - timedelta(days=7)  # Reducido a 7 días por defecto para mayor eficiencia
     else:
         # Validar que el rango no exceda 7 días para optimizar y evitar errores 422
         if (end_date - start_date).days > 7:
@@ -206,8 +206,8 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
         st.error("No se encontró la API key de NewsData.io en Secrets. Usando valor por defecto para sentimiento.")
         return 50.0
 
-    # Construir la URL siguiendo la documentación de NewsData.io, optimizada para criptomonedas
-    query = f"{coin_symbol} AND crypto"  # Simplificada para minimizar resultados y optimizar
+    # Construir la URL siguiendo la documentación de NewsData.io (#crypto-news), optimizada para noticias cripto
+    query = f"{coin_symbol} AND (price OR market OR regulation)"  # Consulta específica para noticias cripto relevantes
     url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
     
     try:
@@ -228,12 +228,15 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             sentiments = []
             for article in articles[:5]:  # Limitar a 5 artículos (0.5 créditos por consulta)
                 title = article.get("title", "").strip()
-                if title and ("crypto" in title.lower() or "regulation" in title.lower() or "policy" in title.lower()):
-                    blob = TextBlob(title)
-                    sentiment = blob.sentiment.polarity
-                    # Convertir de -1 a 1 a 0 a 100
-                    sentiment_score = 50 + (sentiment * 50)  # Normalizar a 0-100
-                    sentiments.append(sentiment_score)
+                description = article.get("description", "").strip()
+                if title or description:
+                    text = title if title else description
+                    if ("price" in text.lower() or "market" in text.lower() or "regulation" in text.lower()):
+                        blob = TextBlob(text)
+                        sentiment = blob.sentiment.polarity
+                        # Convertir de -1 a 1 a 0 a 100
+                        sentiment_score = 50 + (sentiment * 50)  # Normalizar a 0-100
+                        sentiments.append(sentiment_score)
             
             return np.mean(sentiments) if sentiments else 50.0
         elif resp.status_code == 422:
@@ -254,7 +257,7 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None):
-    """Entrena y predice combinando modelos, sentimiento y noticias."""
+    """Entrena y predice combinando modelos, sentimiento y noticias específicas de cripto."""
     df = load_coincap_data(coin_id, start_ms, end_ms)
     if df is None:
         return None
@@ -340,7 +343,7 @@ def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Modelo:**  
-    Esta plataforma utiliza un modelo avanzado de aprendizaje automático basado en redes LSTM (Long Short-Term Memory) para predecir precios futuros de criptomonedas como Bitcoin, Ethereum, Ripple y otras. El modelo integra datos históricos de precios y volúmenes de CoinCap, abarcando hasta dos años de información diaria, ajustando dinámicamente sus hiperparámetros (como tamaño de ventana, épocas, tamaño de lote y tasa de aprendizaje) según la volatilidad específica de cada criptomoneda. Además, incorpora un análisis de sentimiento dinámico que combina el índice Fear & Greed para el mercado global, la actividad comunitaria en redes sociales (Twitter y Reddit) de CoinGecko para cada cripto, y noticias políticas y económicas relevantes obtenidas a través de NewsData.io, mejorando la precisión al considerar el estado de ánimo del mercado, los inversores y eventos externos. Las predicciones se complementan con métricas clave como RMSE y MAPE para evaluar la precisión, y se presentan en gráficos interactivos y tablas para una experiencia clara y detallada.
+    Esta plataforma utiliza un modelo avanzado de aprendizaje automático basado en redes LSTM (Long Short-Term Memory) para predecir precios futuros de criptomonedas como Bitcoin, Ethereum, Ripple y otras. El modelo integra datos históricos de precios y volúmenes de CoinCap, abarcando hasta dos años de información diaria, ajustando dinámicamente sus hiperparámetros (como tamaño de ventana, épocas, tamaño de lote y tasa de aprendizaje) según la volatilidad específica de cada criptomoneda. Además, incorpora un análisis de sentimiento dinámico que combina el índice Fear & Greed para el mercado global, la actividad comunitaria en redes sociales (Twitter y Reddit) de CoinGecko para cada cripto, y noticias específicas de criptomonedas obtenidas a través de NewsData.io, mejorando la precisión al considerar el estado de ánimo del mercado, los inversores y eventos externos. Las predicciones se complementan con métricas clave como RMSE y MAPE para evaluar la precisión, y se presentan en gráficos interactivos y tablas para una experiencia clara y detallada.
 
     Fuentes de datos: CoinCap, Fear & Greed Index, CoinGecko, NewsData.io
     """)
@@ -465,9 +468,9 @@ def main_app():
             if isinstance(st.session_state["result"], dict):
                 result = st.session_state["result"]
                 sentiment_texts = {
-                    "BTC": f"El sentimiento de Bitcoin está en {result['crypto_sent']:.2f}, lo que muestra cierta cautela entre los inversores, aunque su comunidad sigue activa. El mercado en general está en {result['market_sent']:.2f}, indicando miedo. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que Bitcoin podría mantenerse estable, pero no esperes grandes subidas pronto. ¡Ojo con las noticias!",
-                    "ETH": f"Ethereum tiene un sentimiento de {result['crypto_sent']:.2f}, reflejando dudas, pero su tecnología sigue siendo un punto fuerte. El mercado está en {result['market_sent']:.2f}, con miedo dominando. El factor combinado de {result['sentiment_factor']:.2f} sugiere que podría haber oportunidades si el ánimo mejora. Estate atento a sus actualizaciones.",
-                    "XRP": f"XRP está en {result['crypto_sent']:.2f}, mostrando pesimismo en su comunidad, y el mercado en {result['market_sent']:.2f} no ayuda mucho. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que XRP podría seguir moviéndose poco a menos que haya noticias grandes, como su caso legal. Cuidado con la volatilidad."
+                    "BTC": f"El sentimiento de Bitcoin está en {result['crypto_sent']:.2f}, lo que muestra cierta cautela entre los inversores, aunque su comunidad sigue activa. El mercado en general está en {result['market_sent']:.2f}, indicando miedo. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que Bitcoin podría mantenerse estable, pero no esperes grandes subidas pronto. ¡Ojo con las noticias cripto!",
+                    "ETH": f"Ethereum tiene un sentimiento de {result['crypto_sent']:.2f}, reflejando dudas, pero su tecnología sigue siendo un punto fuerte. El mercado está en {result['market_sent']:.2f}, con miedo dominando. El factor combinado de {result['sentiment_factor']:.2f} sugiere que podría haber oportunidades si el ánimo mejora. Estate atento a sus actualizaciones cripto.",
+                    "XRP": f"XRP está en {result['crypto_sent']:.2f}, mostrando pesimismo en su comunidad, y el mercado en {result['market_sent']:.2f} no ayuda mucho. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que XRP podría seguir moviéndose poco a menos que haya noticias cripto grandes, como su caso legal. Cuidado con la volatilidad."
                 }
                 sentiment_text = sentiment_texts.get(result['symbol'], f"El sentimiento de {result['symbol']} está en {result['crypto_sent']:.2f}, lo que indica {'optimismo' if result['crypto_sent'] > 50 else 'pesimismo'} entre sus seguidores. El mercado general está en {result['market_sent']:.2f}. Con un factor combinado de {result['sentiment_factor']:.2f}, hay {'potencial' if result['sentiment_factor'] > 0.5 else 'cautela'} a corto plazo.")
                 st.write(sentiment_text)
