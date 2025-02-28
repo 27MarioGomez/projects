@@ -51,7 +51,7 @@ session = get_requests_session()
 def robust_mape(y_true, y_pred, eps=1e-9):
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionarios para CoinCap y mapeo a símbolo para CoinGecko
+# Diccionarios para CoinCap y mapeo a símbolo para CoinGecko y CryptoCompare
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -68,6 +68,36 @@ coincap_ids = {
 }
 
 coinid_to_symbol = {
+    "bitcoin": "BTC",
+    "ethereum": "ETH",
+    "xrp": "XRP",
+    "binance-coin": "BNB",
+    "cardano": "ADA",
+    "solana": "SOL",
+    "dogecoin": "DOGE",
+    "polkadot": "DOT",
+    "polygon": "MATIC",
+    "litecoin": "LTC",
+    "tron": "TRX",
+    "stellar": "XLM"
+}
+
+coinid_to_cryptocompare = {
+    "bitcoin": "BTC",
+    "ethereum": "ETH",
+    "xrp": "XRP",
+    "binance-coin": "BNB",
+    "cardano": "ADA",
+    "solana": "SOL",
+    "dogecoin": "DOGE",
+    "polkadot": "DOT",
+    "polygon": "MATIC",
+    "litecoin": "LTC",
+    "tron": "TRX",
+    "stellar": "XLM"
+}
+
+coinid_to_coingecko = {
     "bitcoin": "bitcoin",
     "ethereum": "ethereum",
     "xrp": "ripple",
@@ -178,10 +208,10 @@ def get_dynamic_params(df, horizon_days):
     data_len = len(df)
     volatility = df["close_price"].pct_change().std()
     mean_price = df["close_price"].mean()
-    window_size = min(max(15, int(horizon_days * 1.5)), min(90, data_len // 2))  # Ajuste optimizado
-    epochs = min(100, max(30, int(data_len/50) + int(volatility*200)))  # Más epochs para convergencia
-    batch_size = 32 if volatility > 0.03 or data_len < 1000 else 64  # Ajuste basado en volatilidad
-    learning_rate = 0.0003 if mean_price > 500 or volatility > 0.05 else 0.0007  # Tasa ajustada
+    window_size = min(max(15, int(horizon_days * 1.5)), min(90, data_len // 2))
+    epochs = min(100, max(30, int(data_len/50) + int(volatility*200)))
+    batch_size = 32 if volatility > 0.03 or data_len < 1000 else 64
+    learning_rate = 0.0003 if mean_price > 500 or volatility > 0.05 else 0.0007
     return window_size, epochs, batch_size, learning_rate
 
 ##############################################
@@ -212,7 +242,8 @@ def get_cryptocompare_social_sentiment(coin_id):
     Escala: -1 (negativo) a 1 (positivo), normalizado a 0-100.
     """
     try:
-        url = f"https://min-api.cryptocompare.com/data/social/coin/histo/day?fsym={coin_id.upper()}&tsym=USD&limit=1"
+        symbol = coinid_to_cryptocompare.get(coin_id, coin_id.upper())
+        url = f"https://min-api.cryptocompare.com/data/social/coin/histo/day?fsym={symbol}&tsym=USD&limit=1"
         resp = session.get(url, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
@@ -227,10 +258,10 @@ def get_cryptocompare_social_sentiment(coin_id):
                 return 50.0
             return 50.0
         else:
-            st.warning(f"CryptoCompare: Error {resp.status_code} para {coin_id}.")
+            st.warning(f"CryptoCompare: Error {resp.status_code} para {symbol}.")
             return 50.0
     except Exception as e:
-        st.error(f"Error obteniendo sentimiento de CryptoCompare para {coin_id}: {e}")
+        st.error(f"Error obteniendo sentimiento de CryptoCompare para {symbol}: {e}")
         return 50.0
 
 def get_coingecko_community_sentiment(coin_id):
@@ -239,7 +270,8 @@ def get_coingecko_community_sentiment(coin_id):
     Escala: % de votos positivos (0-100).
     """
     try:
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&market_data=false&community_data=true&developer_data=false&sparkline=false"
+        cg_id = coinid_to_coingecko.get(coin_id, coin_id)
+        url = f"https://api.coingecko.com/api/v3/coins/{cg_id}?localization=false&tickers=false&market_data=false&community_data=true&developer_data=false&sparkline=false"
         resp = session.get(url, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
@@ -253,20 +285,21 @@ def get_coingecko_community_sentiment(coin_id):
             else:
                 return 50.0
         else:
-            st.warning(f"CoinGecko: Error {resp.status_code} al obtener datos para {coin_id}.")
+            st.warning(f"CoinGecko: Error {resp.status_code} al obtener datos para {cg_id}.")
             return 50.0
     except Exception as e:
-        st.error(f"Error obteniendo sentimiento de CoinGecko para {coin_id}: {e}")
+        st.error(f"Error obteniendo sentimiento de CoinGecko para {cg_id}: {e}")
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id):
     """
     Combina el sentimiento de CryptoCompare y CoinGecko, ponderado con Fear & Greed Index.
+    Asegura que el sentimiento varíe por criptomoneda.
     """
     fg = get_fear_greed_index()
-    cc = get_cryptocompare_social_sentiment(coin_id.upper())
-    cg = get_coingecko_community_sentiment(coinid_to_symbol.get(coin_id, coin_id))
-    # Ponderación: 40% Fear & Greed, 30% CryptoCompare, 30% CoinGecko
+    cc = get_cryptocompare_social_sentiment(coin_id)
+    cg = get_coingecko_community_sentiment(coin_id)
+    # Ponderación optimizada: 40% Fear & Greed, 30% CryptoCompare, 30% CoinGecko
     combined = 0.4 * fg + 0.3 * cc + 0.3 * cg
     return max(0, min(100, combined))  # Asegurar rango 0-100
 
@@ -290,7 +323,7 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
         return None
 
     symbol = coinid_to_symbol.get(coin_id, "BTC")
-    crypto_sent = get_crypto_sentiment_combined(coin_id)
+    crypto_sent = get_crypto_sentiment_combined(coin_id)  # Usa el coin_id específico
     market_sent = get_market_sentiment()
     sentiment_factor = (crypto_sent + market_sent) / 200.0  # Normalización a [0,1]
 
@@ -329,7 +362,7 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
 
     model = train_model(X_train_adj, y_train, X_val_adj, y_val, input_shape, epochs, batch_size, learning_rate)
 
-    test_preds_scaled = model.predict(X_test_adj)
+    test_preds_scaled = model.predict(X_test_adj, verbose=0)
     test_preds = scaler_target.inverse_transform(test_preds_scaled)
     y_test_real = scaler_target.inverse_transform(y_test.reshape(-1, 1))
     valid_mask = ~np.isnan(test_preds) & ~np.isnan(y_test_real)
@@ -349,7 +382,7 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
         future_preds_scaled.append(future_pred)
         new_feature = np.copy(current_input[:, -1:, :])
         new_feature[0, 0, 0] = future_pred
-        new_feature[0, 0, 1] = sentiment_factor  # Mantener el mismo factor
+        new_feature[0, 0, 1] = sentiment_factor
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
