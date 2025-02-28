@@ -285,6 +285,25 @@ def get_recent_crypto_news(coin_symbol):
             data = resp.json()
             articles = data.get("results", [])
             if not articles:
+                # Intentar con una consulta más genérica y rango reducido (7 días)
+                query_simple = "crypto"  # Consulta genérica para capturar cualquier noticia cripto
+                start_date_simple = end_date - timedelta(days=7)
+                url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query_simple)}&language=en&from_date={start_date_simple.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
+                resp_retry = session.get(url_retry, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                if resp_retry.status_code == 200:
+                    data_retry = resp_retry.json()
+                    articles_retry = data_retry.get("results", [])
+                    if articles_retry:
+                        articles_retry = sorted(articles_retry, key=lambda x: x.get("pubDate", ""), reverse=True)[:5]
+                        return [
+                            {
+                                "title": article.get("title", "Sin título"),
+                                "description": article.get("description", "Sin descripción"),
+                                "pubDate": article.get("pubDate", "Fecha no disponible"),
+                                "link": article.get("link", "#")
+                            }
+                            for article in articles_retry
+                        ]
                 return []  # Sin noticias si no hay resultados, sin mensaje visible
             
             # Ordenar por fecha de publicación (pubDate) y limitar a las 5 más recientes
@@ -299,25 +318,6 @@ def get_recent_crypto_news(coin_symbol):
                 for article in articles
             ]
         elif resp.status_code == 422:
-            # Intentar con una consulta más genérica y rango reducido (7 días)
-            query_simple = f"crypto"  # Consulta genérica para capturar cualquier noticia cripto
-            start_date_simple = end_date - timedelta(days=7)
-            url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query_simple)}&language=en&from_date={start_date_simple.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
-            resp_retry = session.get(url_retry, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if resp_retry.status_code == 200:
-                data_retry = resp_retry.json()
-                articles_retry = data_retry.get("results", [])
-                if articles_retry:
-                    articles_retry = sorted(articles_retry, key=lambda x: x.get("pubDate", ""), reverse=True)[:5]
-                    return [
-                        {
-                            "title": article.get("title", "Sin título"),
-                            "description": article.get("description", "Sin descripción"),
-                            "pubDate": article.get("pubDate", "Fecha no disponible"),
-                            "link": article.get("link", "#")
-                        }
-                        for article in articles_retry
-                    ]
             return []  # Sin noticias si falla, sin mensaje visible
         elif resp.status_code == 429:
             st.error(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido.")
@@ -494,32 +494,35 @@ def main_app():
                     result["real_prices"] = result["real_prices"][:min_len]
 
                 # Crear el gráfico mejorado para precio real y predicción
-                fig_test = go.Figure()
-                fig_test.add_trace(go.Scatter(
-                    x=result["test_dates"],
-                    y=result["real_prices"],
-                    mode="lines",
-                    name="Precio Real",
-                    line=dict(color="#1f77b4", width=3)  # Azul oscuro, línea sólida más gruesa
-                ))
-                fig_test.add_trace(go.Scatter(
-                    x=result["test_dates"],
-                    y=result["test_preds"],
-                    mode="lines",
-                    name="Predicción",
-                    line=dict(color="#ff7f0e", width=3, dash="dash")  # Naranja, línea discontinua más gruesa
-                ))
-                fig_test.update_layout(
-                    title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
-                    template="plotly_dark",
-                    xaxis_title="Fecha",
-                    yaxis_title="Precio en USD",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                    plot_bgcolor="#1e1e2f",  # Fondo oscuro para consistencia con el dashboard
-                    paper_bgcolor="#1e1e2f",
-                    hovermode="x unified"  # Mejorar la interacción al pasar el ratón
-                )
-                st.plotly_chart(fig_test, use_container_width=True)
+                if len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0:
+                    fig_test = go.Figure()
+                    fig_test.add_trace(go.Scatter(
+                        x=result["test_dates"],
+                        y=result["real_prices"],
+                        mode="lines",
+                        name="Precio Real",
+                        line=dict(color="#1f77b4", width=3)  # Azul oscuro, línea sólida más gruesa
+                    ))
+                    fig_test.add_trace(go.Scatter(
+                        x=result["test_dates"],
+                        y=result["test_preds"],
+                        mode="lines",
+                        name="Predicción",
+                        line=dict(color="#ff7f0e", width=3, dash="dash")  # Naranja, línea discontinua más gruesa
+                    ))
+                    fig_test.update_layout(
+                        title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
+                        template="plotly_dark",
+                        xaxis_title="Fecha",
+                        yaxis_title="Precio en USD",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        plot_bgcolor="#1e1e2f",  # Fondo oscuro para consistencia con el dashboard
+                        paper_bgcolor="#1e1e2f",
+                        hovermode="x unified"  # Mejorar la interacción al pasar el ratón
+                    )
+                    st.plotly_chart(fig_test, use_container_width=True)
+                else:
+                    st.error("No hay suficientes datos para mostrar el gráfico de entrenamiento y test.")
                 st.session_state["result"] = result
 
     with tabs[1]:
@@ -549,12 +552,34 @@ def main_app():
             # Verificar si result es un diccionario
             if isinstance(st.session_state["result"], dict):
                 result = st.session_state["result"]
+                crypto_sent = result['crypto_sent']
+                market_sent = result['market_sent']
+                sentiment_diff = crypto_sent - market_sent
+
+                # Análisis dinámico basado en el sentimiento combinado y la diferencia con el mercado
+                if crypto_sent > 50:
+                    sentiment_tone = "optimismo"
+                    if sentiment_diff > 10:
+                        sentiment_strength = "fuerte"
+                    elif sentiment_diff > 0:
+                        sentiment_strength = "moderado"
+                    else:
+                        sentiment_strength = "ligero"
+                else:
+                    sentiment_tone = "pesimismo"
+                    if sentiment_diff < -10:
+                        sentiment_strength = "fuerte"
+                    elif sentiment_diff < 0:
+                        sentiment_strength = "moderado"
+                    else:
+                        sentiment_strength = "ligero"
+
                 sentiment_texts = {
-                    "BTC": f"El sentimiento de Bitcoin está en {result['crypto_sent']:.2f}, lo que muestra cierta cautela entre los inversores, aunque su comunidad sigue activa. El mercado en general está en {result['market_sent']:.2f}, indicando miedo. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que Bitcoin podría mantenerse estable, pero no esperes grandes subidas pronto. ¡Ojo con las noticias cripto!",
-                    "ETH": f"Ethereum tiene un sentimiento de {result['crypto_sent']:.2f}, reflejando dudas, pero su tecnología sigue siendo un punto fuerte. El mercado está en {result['market_sent']:.2f}, con miedo dominando. El factor combinado de {result['sentiment_factor']:.2f} sugiere que podría haber oportunidades si el ánimo mejora. Estate atento a sus actualizaciones cripto.",
-                    "XRP": f"XRP está en {result['crypto_sent']:.2f}, mostrando pesimismo en su comunidad, y el mercado en {result['market_sent']:.2f} no ayuda mucho. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que XRP podría seguir moviéndose poco a menos que haya noticias cripto grandes, como su caso legal. Cuidado con la volatilidad."
+                    "BTC": f"El sentimiento de Bitcoin está en {crypto_sent:.2f}, mostrando {sentiment_strength} {sentiment_tone} entre los inversores, aunque su comunidad sigue activa. El mercado en general está en {market_sent:.2f}, indicando {'miedo' if market_sent < 50 else 'euforia' if market_sent > 50 else 'neutralidad'}. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que Bitcoin podría {'mantenerse estable' if crypto_sent < 60 else 'tener potencial de subida'} pronto, dependiendo de las noticias cripto.",
+                    "ETH": f"Ethereum tiene un sentimiento de {crypto_sent:.2f}, reflejando {sentiment_strength} {sentiment_tone}, pero su tecnología sigue siendo un punto fuerte. El mercado está en {market_sent:.2f}, con {'miedo' if market_sent < 50 else 'euforia' if market_sent > 50 else 'neutralidad'} dominando. El factor combinado de {result['sentiment_factor']:.2f} sugiere que podría haber {'oportunidades de subida' if crypto_sent > 50 else 'cautela'} si el ánimo mejora, estate atento a sus actualizaciones cripto.",
+                    "XRP": f"XRP está en {crypto_sent:.2f}, mostrando {sentiment_strength} {sentiment_tone} en su comunidad, y el mercado en {market_sent:.2f} no ayuda mucho. Con un factor combinado de {result['sentiment_factor']:.2f}, parece que XRP podría {'seguir moviéndose poco' if crypto_sent < 50 else 'tener potencial de movimiento'} a menos que haya noticias cripto grandes, como su caso legal. Cuidado con la volatilidad."
                 }
-                sentiment_text = sentiment_texts.get(result['symbol'], f"El sentimiento de {result['symbol']} está en {result['crypto_sent']:.2f}, lo que indica {'optimismo' if result['crypto_sent'] > 50 else 'pesimismo'} entre sus seguidores. El mercado general está en {result['market_sent']:.2f}. Con un factor combinado de {result['sentiment_factor']:.2f}, hay {'potencial' if result['sentiment_factor'] > 0.5 else 'cautela'} a corto plazo.")
+                sentiment_text = sentiment_texts.get(result['symbol'], f"El sentimiento de {result['symbol']} está en {crypto_sent:.2f}, lo que indica {sentiment_strength} {sentiment_tone} entre sus seguidores. El mercado general está en {market_sent:.2f}. Con un factor combinado de {result['sentiment_factor']:.2f}, hay {'potencial' if result['sentiment_factor'] > 0.5 else 'cautela'} a corto plazo.")
                 st.write(sentiment_text)
                 fig_sentiment = go.Figure(data=[
                     go.Bar(name="Sentimiento Combinado", x=[result['symbol']], y=[result['crypto_sent']], marker_color="#1f77b4"),
