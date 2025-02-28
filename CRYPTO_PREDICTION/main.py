@@ -18,19 +18,40 @@ from tensorflow.keras.callbacks import EarlyStopping
 import time
 import certifi
 import os
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Configurar certificados SSL para requests
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 os.environ["SSL_CERT_FILE"] = certifi.where()
 
 ##############################################
+# Configurar sesión requests con reintentos
+##############################################
+def get_requests_session(retries=5, backoff_factor=1, status_forcelist=(429, 500, 502, 503, 504)):
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        raise_on_status=False
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+session = get_requests_session()
+
+##############################################
 # Funciones de apoyo
 ##############################################
-
 def robust_mape(y_true, y_pred, eps=1e-9):
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionarios para CoinCap y mapeo a símbolo para LunarCrush
+# Diccionarios para CoinCap y mapeo a símbolo para CoinGecko
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -46,19 +67,20 @@ coincap_ids = {
     "Stellar (XLM)": "stellar"
 }
 
+# Para CoinGecko, normalmente los IDs son iguales a los de CoinCap (en minúsculas)
 coinid_to_symbol = {
-    "bitcoin": "BTC",
-    "ethereum": "ETH",
-    "xrp": "XRP",
-    "binance-coin": "BNB",
-    "cardano": "ADA",
-    "solana": "SOL",
-    "dogecoin": "DOGE",
-    "polkadot": "DOT",
-    "polygon": "MATIC",
-    "litecoin": "LTC",
-    "tron": "TRX",
-    "stellar": "XLM"
+    "bitcoin": "bitcoin",
+    "ethereum": "ethereum",
+    "xrp": "ripple",
+    "binance-coin": "binancecoin",
+    "cardano": "cardano",
+    "solana": "solana",
+    "dogecoin": "dogecoin",
+    "polkadot": "polkadot",
+    "polygon": "polygon",
+    "litecoin": "litecoin",
+    "tron": "tron",
+    "stellar": "stellar"
 }
 
 ##############################################
@@ -72,7 +94,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
     headers = {"User-Agent": "Mozilla/5.0"}
     for attempt in range(max_retries):
         try:
-            resp = requests.get(url, headers=headers, verify=certifi.where(), timeout=10)
+            resp = session.get(url, headers=headers, verify=certifi.where(), timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 if "data" not in data:
@@ -126,7 +148,7 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 ##############################################
-# Modelo LSTM
+# Modelo LSTM y entrenamiento
 ##############################################
 def build_lstm_model(input_shape, learning_rate=0.001):
     model = Sequential()
@@ -161,75 +183,67 @@ def get_dynamic_params(df, horizon_days):
     return window_size, epochs, batch_size, learning_rate
 
 ##############################################
-# Llamadas a la API de LunarCrush (versión Free)
+# Integración con APIs alternativas para Sentimiento
 ##############################################
-def get_crypto_sentiment_lunarcrush(symbol):
-    api_key = st.secrets["lunarcrush_api_key"]
-    base = "https://api.lunarcrush.com/v2"
-    url = (f"{base}?data=assets&symbol={symbol}&key={api_key}"
-           "&metrics=galaxy_score,alt_rank,average_sentiment,bullish_sentiment,bearish_sentiment")
+def get_fear_greed_index():
+    """
+    Obtiene el Crypto Fear & Greed Index desde alternative.me.
+    """
     try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            st.warning(f"LunarCrush (assets): Error {resp.status_code} para {symbol}.")
-            return 50.0
-        assets = resp.json().get("data", [])
-        if not assets:
-            return 50.0
-        asset = assets[0]
-        galaxy = asset.get("galaxy_score", 50)
-        alt_rank = asset.get("alt_rank", 2000)
-        avg_sent = asset.get("average_sentiment", 0.5) * 100
-        bull = asset.get("bullish_sentiment", 0)
-        bear = asset.get("bearish_sentiment", 0)
-        alt_score = max(0, min(100, (2000 - alt_rank)/2000*100))
-        raw = 0.4 * galaxy + 0.1 * alt_score + 0.2 * avg_sent + 0.15 * bull - 0.15 * bear
-        final = max(0, min(100, raw))
-        return final
-    except Exception as e:
-        st.warning("Streamlit está experimentando algunos problemas. Usamos un valor neutro para el sentimiento.")
-        return 50.0
-
-def get_market_crypto_sentiment_lunarcrush():
-    api_key = st.secrets["lunarcrush_api_key"]
-    url = f"https://api.lunarcrush.com/v2?data=market&key={api_key}"
-    try:
-        resp = requests.get(url, timeout=10)
+        url = "https://api.alternative.me/fng/?format=json"
+        resp = session.get(url, timeout=10)
         if resp.status_code == 200:
-            data = resp.json().get("data", [])
-            if data:
-                item = data[0]
-                btc_dom = item.get("btc_dominance", 45)
-                dom_sent = (btc_dom - 30) / (60 - 30) * 100
-                return max(0, min(100, dom_sent))
-            return 50.0
+            data = resp.json()
+            # data["data"] es una lista; extraemos el primer elemento
+            value_str = data["data"][0]["value"]
+            return float(value_str)
         else:
-            st.warning(f"LunarCrush (market): Error {resp.status_code}.")
+            st.warning(f"Fear & Greed Index: Error {resp.status_code}.")
             return 50.0
     except Exception as e:
-        st.warning("Streamlit está experimentando algunos problemas. Usamos un valor neutro para el sentimiento.")
+        st.error(f"Error obteniendo Fear & Greed Index: {e}")
         return 50.0
 
-def get_lunarcrush_news(symbol, limit=5):
-    api_key = st.secrets["lunarcrush_api_key"]
-    url = f"https://api.lunarcrush.com/v2?data=news&symbol={symbol}&limit={limit}&key={api_key}"
+def get_coingecko_sentiment(coin_id):
+    """
+    Obtiene el sentimiento de un activo desde CoinGecko usando datos de la comunidad.
+    """
     try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            return []
-        items = resp.json().get("data", [])
-        news_list = []
-        for it in items:
-            news_list.append({
-                "title": it.get("title"),
-                "url": it.get("url"),
-                "description": it.get("description"),
-                "published_at": it.get("published_at")
-            })
-        return news_list
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&market_data=false&community_data=true&developer_data=false&sparkline=false"
+        resp = session.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            comm = data.get("community_data", {})
+            up = comm.get("sentiment_votes_up_percentage", None)
+            down = comm.get("sentiment_votes_down_percentage", None)
+            if up is not None and down is not None:
+                # Usamos los votos positivos como indicador (0-100)
+                return float(up)
+            elif up is not None:
+                return float(up)
+            else:
+                return 50.0
+        else:
+            st.warning(f"CoinGecko: Error {resp.status_code} al obtener datos para {coin_id}.")
+            return 50.0
     except Exception as e:
-        st.warning("No se pueden mostrar noticias ahora mismo, vuelve luego.")
-        return []
+        st.error(f"Error obteniendo sentimiento de CoinGecko para {coin_id}: {e}")
+        return 50.0
+
+def get_crypto_sentiment_combined(coin_id):
+    """
+    Combina el Fear & Greed Index global y el sentimiento específico del activo obtenido de CoinGecko.
+    Se asume que coin_id para CoinGecko es el mismo que en CoinCap (en minúsculas) o se mapea.
+    """
+    fg = get_fear_greed_index()
+    cg = get_coingecko_sentiment(coinid_to_symbol.get(coin_id, coin_id))
+    return (fg + cg) / 2.0
+
+def get_market_sentiment():
+    """
+    Para el sentimiento global del mercado se usa el Fear & Greed Index.
+    """
+    return get_fear_greed_index()
 
 ##############################################
 # Entrenamiento y predicción con sentimiento
@@ -244,13 +258,13 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
         st.warning("No se encontró 'close_price' en los datos.")
         return None
 
-    symbol = coinid_to_symbol.get(coin_id, "BTC")
-    crypto_sent = get_crypto_sentiment_lunarcrush(symbol)
-    market_sent = get_market_crypto_sentiment_lunarcrush()
-    sentiment_factor = (crypto_sent + market_sent) / 200.0
+    # Para CoinGecko, usamos el mismo coin_id (p. ej., "bitcoin")
+    crypto_sent = get_crypto_sentiment_combined(coin_id)
+    market_sent = get_market_sentiment()
+    sentiment_factor = (crypto_sent + market_sent) / 200.0  # Ambos en escala 0-100
 
-    st.write(f"Sentimiento de {symbol}: {crypto_sent:.2f}")
-    st.write(f"Sentimiento de mercado: {market_sent:.2f}")
+    st.write(f"Sentimiento (combinado) de {coinid_to_symbol.get(coin_id, 'BTC')}: {crypto_sent:.2f}")
+    st.write(f"Sentimiento global del mercado: {market_sent:.2f}")
     st.write(f"Factor combinado: {sentiment_factor:.2f}")
 
     window_size, epochs, batch_size, learning_rate = get_dynamic_params(df_raw, horizon_days)
@@ -297,8 +311,7 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = np.concatenate([last_window.reshape(1, window_size, 1),
-                                      np.full((1, window_size, 1), sentiment_factor)],
-                                     axis=-1)
+                                      np.full((1, window_size, 1), sentiment_factor)], axis=-1)
     for _ in range(horizon_days):
         future_pred = model.predict(current_input)[0][0]
         future_preds_scaled.append(future_pred)
@@ -308,56 +321,36 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     future_preds = scaler_target.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    return df_raw, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor, symbol
+    return df_raw, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor, coinid_to_symbol.get(coin_id, "BTC")
 
 ##############################################
 # Función principal de la app
 ##############################################
 def main_app():
-    st.set_page_config(page_title="Crypto Price Prediction 🔮", layout="wide")
-    st.title("Crypto Price Prediction 🔮")
-    st.markdown("Este modelo combina datos históricos y análisis de sentimiento para predecir precios de criptomonedas. Incluye un LSTM entrenado con datos de CoinCap y LunarCrush, gráficos interactivos y noticias relevantes.")
-    st.markdown("**Fuente de Datos:** CoinCap y LunarCrush")
+    st.set_page_config(page_title="Crypto Price Predictions (Alternative Sentiment) 🔮", layout="wide")
+    st.title("Crypto Price Predictions (Alternative Sentiment) 🔮")
+    st.markdown("Este modelo combina datos históricos de CoinCap y análisis de sentimiento obtenido a partir del Crypto Fear & Greed Index y CoinGecko para predecir precios de criptomonedas.")
+    st.markdown("**Fuente de Datos:** CoinCap, Crypto Fear & Greed Index y CoinGecko")
 
     st.sidebar.title("Configura tu Predicción")
-    st.session_state["crypto_name"] = st.sidebar.selectbox(
-        "Selecciona una criptomoneda:",
-        list(coincap_ids.keys()),
-        help="Elige la criptomoneda que deseas analizar."
-    )
+    st.session_state["crypto_name"] = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()), help="Elige la criptomoneda que deseas analizar.")
     coin_id = coincap_ids[st.session_state["crypto_name"]]
 
     st.sidebar.subheader("Rango de Fechas")
-    use_custom_range = st.sidebar.checkbox(
-        "Habilitar rango de fechas",
-        value=True,
-        help="Activa esto para elegir un período específico."
-    )
+    use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=True, help="Activa esto para elegir un período específico.")
     default_start = datetime(2021, 1, 1)
     default_end = datetime.now()
     if use_custom_range:
-        start_date = st.sidebar.date_input(
-            "Fecha de inicio",
-            default_start,
-            help="Desde cuándo analizar datos."
-        )
-        end_date = st.sidebar.date_input(
-            "Fecha de fin",
-            default_end,
-            help="Hasta cuándo incluir datos."
-        )
+        start_date = st.sidebar.date_input("Fecha de inicio", default_start, help="Desde cuándo analizar datos.")
+        end_date = st.sidebar.date_input("Fecha de fin", default_end, help="Hasta cuándo incluir datos.")
         start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
         end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
     else:
         start_ms, end_ms = None, None
 
-    st.sidebar.subheader("Parámetros de Predicción")
-    horizon = st.sidebar.slider(
-        "Días a predecir:",
-        1, 60, 30,
-        help="Cuántos días en el futuro predecir."
-    )
-    st.sidebar.markdown("**Hiperparámetros ajustados automáticamente según los datos.**")
+    st.sidebar.subheader("Parámetros de Predicción ❓")
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 30, help="Número de días a futuro a predecir.")
+    st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos.**")
 
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
     if df_prices is not None and len(df_prices) > 0:
@@ -380,7 +373,7 @@ def main_app():
         st.info("No se encontraron datos históricos válidos. Reajusta el rango de fechas.")
 
     tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📰 Noticias"])
-
+    
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir", key="train_test"):
@@ -397,16 +390,8 @@ def main_app():
                 df_model, test_preds, y_test_real, future_preds, rmse, mape, sentiment_factor, symbol = result
                 st.success("Entrenamiento y predicción completados!")
                 col1, col2 = st.columns(2)
-                col1.metric(
-                    "RMSE (Test)",
-                    f"{rmse:.2f}",
-                    help=f"Este valor indica el error promedio en dólares. Un RMSE de {rmse:.2f} significa que la predicción puede variar en promedio {rmse:.2f} dólares arriba o abajo del valor real."
-                )
-                col2.metric(
-                    "MAPE (Test)",
-                    f"{mape:.2f}%",
-                    help=f"Este porcentaje muestra el error promedio en términos relativos. Un MAPE de {mape:.2f}% indica que, en promedio, la predicción se desvía un {mape:.2f}% del valor real."
-                )
+                col1.metric("RMSE (Test)", f"{rmse:.2f}")
+                col2.metric("MAPE (Test)", f"{mape:.2f}%")
                 st.subheader("Comparación en el Set de Test")
                 test_dates = df_model["ds"].iloc[-len(y_test_real):]
                 fig_test = go.Figure()
@@ -417,7 +402,7 @@ def main_app():
                 st.plotly_chart(fig_test, use_container_width=True)
             else:
                 st.warning("No se pudo entrenar el modelo. Revisa los avisos.")
-
+    
     with tabs[1]:
         st.header(f"Predicción de Precios - {st.session_state['crypto_name']}")
         if 'result' in locals() and result is not None:
@@ -437,11 +422,13 @@ def main_app():
             st.dataframe(future_df)
         else:
             st.info("Primero entrena el modelo para generar predicciones futuras.")
-
+    
     with tabs[2]:
-        st.header(f"Noticias recientes de {st.session_state['crypto_name']}")
+        st.header("Noticias Recientes")
+        st.markdown("Si hay problemas para cargar las noticias, por favor inténtalo más tarde.")
         if 'result' in locals() and result is not None:
             symbol = result[-1]
+            st.subheader(f"Noticias recientes de {symbol}")
             news_items = get_lunarcrush_news(symbol, limit=5)
             if news_items:
                 for i, item in enumerate(news_items, start=1):
@@ -452,7 +439,7 @@ def main_app():
                     st.write(f"Publicado: {item['published_at']}")
                     st.write("---")
             else:
-                st.write("No hay noticias disponibles en este momento.")
+                st.write("No se encontraron noticias o están limitadas en el plan Free.")
         else:
             st.info("Primero entrena el modelo para mostrar noticias.")
 
