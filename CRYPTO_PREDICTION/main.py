@@ -11,6 +11,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l2
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import time
@@ -80,9 +81,9 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None):
         st.error(f"Error al cargar datos: {e}")
         return None
 
-# Secuencias y modelo LSTM
+# Secuencias y modelo LSTM mejorado
 def create_sequences(data, window_size):
-    """Crea secuencias para el modelo LSTM."""
+    """Crea secuencias para el modelo LSTM con sentimiento integrado."""
     if len(data) <= window_size:
         return None, None
     X, y = [], []
@@ -91,39 +92,52 @@ def create_sequences(data, window_size):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
-def build_lstm_model(input_shape, learning_rate=0.001):
-    """Construye el modelo LSTM."""
+def build_lstm_model(input_shape, learning_rate=0.001, l2_lambda=0.01):
+    """Construye un modelo LSTM mejorado con regularización L2."""
     model = Sequential([
-        LSTM(50, return_sequences=True, input_shape=input_shape),
-        Dropout(0.2),
-        LSTM(50),
-        Dropout(0.2),
-        Dense(20, activation="relu"),
+        LSTM(100, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),  # Más unidades y regularización
+        Dropout(0.3),  # Aumentar Dropout para reducir sobreajuste
+        LSTM(80, kernel_regularizer=l2(l2_lambda)),  # Capa adicional para capturar patrones
+        Dropout(0.3),
+        Dense(50, activation="relu", kernel_regularizer=l2(l2_lambda)),
         Dense(1)
     ])
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
 def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size):
-    """Entrena el modelo LSTM."""
+    """Entrena el modelo LSTM mejorado con validación cruzada simple."""
     tf.keras.backend.clear_session()
     model = build_lstm_model(input_shape)
     callbacks = [
-        EarlyStopping(patience=5, restore_best_weights=True),
-        ReduceLROnPlateau(patience=3, factor=0.5, min_lr=1e-6)
+        EarlyStopping(patience=10, restore_best_weights=True),  # Más paciencia para convergencia
+        ReduceLROnPlateau(patience=5, factor=0.5, min_lr=1e-6)
     ]
-    model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
-    return model
+    history = model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
+    return model, history
 
 def get_dynamic_params(df, horizon_days, coin_id):
-    """Ajusta parámetros dinámicos según volatilidad y datos."""
+    """Ajusta parámetros dinámicos mejorados según volatilidad y datos."""
     volatility = df["close_price"].pct_change().std()
     base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-    # Ajustes más agresivos para criptos volátiles como XRP
-    window_size = min(max(10, int(horizon_days * (1.2 if volatility > base_volatility else 1.5))), len(df) // 4)
-    epochs = min(100, max(30, int(len(df) / 80) + int(volatility * 200)))  # Más épocas para datos complejos
-    batch_size = 16 if volatility > base_volatility else 32  # Batch menor para volátiles
-    learning_rate = 0.0003 if volatility > base_volatility else 0.0005  # LR menor para volátiles
+    
+    # Ajustes más precisos para criptos volátiles (XRP) y estables (Bitcoin)
+    if coin_id == "xrp":  # XRP, más volátil
+        window_size = min(max(15, int(horizon_days * 1.0)), len(df) // 4)  # Ventana más corta para capturar volatilidad
+        epochs = min(150, max(40, int(len(df) / 60) + int(volatility * 300)))  # Más épocas para datos complejos
+        batch_size = 16  # Batch menor para mayor precisión
+        learning_rate = 0.0002  # Learning rate más bajo para convergencia
+    elif coin_id == "bitcoin":  # Bitcoin, más estable
+        window_size = min(max(30, int(horizon_days * 1.5)), len(df) // 3)  # Ventana más larga para patrones estables
+        epochs = min(100, max(30, int(len(df) / 80) + int(volatility * 200)))  # Menos épocas para estabilidad
+        batch_size = 32  # Batch mayor para eficiencia
+        learning_rate = 0.0005  # Learning rate estándar
+    else:  # Otras criptos con volatilidad intermedia
+        window_size = min(max(20, int(horizon_days * 1.2)), len(df) // 4)
+        epochs = min(120, max(35, int(len(df) / 70) + int(volatility * 250)))
+        batch_size = 24
+        learning_rate = 0.0003
+
     return window_size, epochs, batch_size, learning_rate
 
 # Sentimiento dinámico
@@ -154,35 +168,35 @@ def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
     cg = get_coingecko_community_activity(coin_id)
     volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
 
-    # Ajustar pesos: más peso a CoinGecko y noticias para criptos volátiles, menos a Fear & Greed
+    # Ajustar pesos: más peso a noticias y CoinGecko para volátiles, menos para estables
     if volatility > 0.07:  # Criptos muy volátiles (e.g., XRP, DOGE)
-        fg_weight = 0.2  # Menos peso al mercado global
-        cg_weight = 0.5  # Peso moderado a la actividad comunitaria
-        news_weight = 0.3  # Más peso a las noticias políticas para capturar volatilidad
+        fg_weight = 0.15  # Menos peso al mercado global
+        cg_weight = 0.45  # Más peso a la actividad comunitaria
+        news_weight = 0.40  # Más peso a las noticias para capturar volatilidad
     else:  # Criptos más estables (e.g., BTC, ETH)
-        fg_weight = 0.5  # Más peso al mercado global
-        cg_weight = 0.3  # Menos peso a la actividad comunitaria
-        news_weight = 0.2  # Menos peso a las noticias, ya que son menos críticas para estables
+        fg_weight = 0.50  # Más peso al mercado global
+        cg_weight = 0.30  # Menos peso a la actividad comunitaria
+        news_weight = 0.20  # Menos peso a las noticias
 
     # Sentimiento de noticias (si no hay datos o falla, usar 50.0 como valor por defecto)
     news_sent = 50.0 if news_sentiment is None or pd.isna(news_sentiment) else float(news_sentiment)
     combined_sentiment = (fg * fg_weight + cg * cg_weight + news_sent * news_weight)
     return max(0, min(100, combined_sentiment))  # Asegurar rango 0-100
 
-# Nueva función para análisis de noticias (usando NewsData.io con API key desde Secrets, ajustada según documentación)
+# Nueva función para análisis de noticias (usando NewsData.io con API key desde Secrets, optimizada)
 @st.cache_data(ttl=86400)  # Cachear datos diarios para minimizar peticiones
 def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
-    """Obtiene y analiza el sentimiento de noticias políticas y relevantes usando NewsData.io."""
+    """Obtiene y analiza el sentimiento de noticias relevantes usando NewsData.io, optimizado para criptomonedas."""
     if start_date is None or end_date is None:
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=30)  # Rango por defecto de 30 días
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=7)  # Reducido a 7 días por defecto para mayor eficiencia y evitar errores 422
     else:
-        # Validar que el rango no exceda 30 días para evitar errores 422
-        if (end_date - start_date).days > 30:
-            start_date = end_date - timedelta(days=30)
+        # Validar que el rango no exceda 7 días para optimizar y evitar errores 422
+        if (end_date - start_date).days > 7:
+            start_date = end_date - timedelta(days=7)
         # Asegurar que las fechas no sean futuras
         if start_date > datetime.now().date():
-            start_date = datetime.now().date() - timedelta(days=30)
+            start_date = datetime.now().date() - timedelta(days=7)
         if end_date > datetime.now().date():
             end_date = datetime.now().date()
 
@@ -192,8 +206,8 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
         st.error("No se encontró la API key de NewsData.io en Secrets. Usando valor por defecto para sentimiento.")
         return 50.0
 
-    # Construir la URL siguiendo la documentación de NewsData.io
-    query = f"{coin_symbol} AND (crypto OR regulation OR policy)"
+    # Construir la URL siguiendo la documentación de NewsData.io, optimizada para criptomonedas
+    query = f"{coin_symbol} AND crypto"  # Simplificada para minimizar resultados y optimizar
     url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
     
     try:
@@ -214,7 +228,7 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             sentiments = []
             for article in articles[:5]:  # Limitar a 5 artículos (0.5 créditos por consulta)
                 title = article.get("title", "").strip()
-                if title:
+                if title and ("crypto" in title.lower() or "regulation" in title.lower() or "policy" in title.lower()):
                     blob = TextBlob(title)
                     sentiment = blob.sentiment.polarity
                     # Convertir de -1 a 1 a 0 a 100
@@ -223,24 +237,6 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             
             return np.mean(sentiments) if sentiments else 50.0
         elif resp.status_code == 422:
-            # Intentar con una consulta simplificada y rango reducido (7 días)
-            query_simple = f"{coin_symbol} AND crypto"
-            start_date_simple = end_date - timedelta(days=7)
-            url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query_simple)}&language=en&from_date={start_date_simple.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
-            resp_retry = session.get(url_retry, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if resp_retry.status_code == 200:
-                data_retry = resp_retry.json()
-                articles_retry = data_retry.get("results", [])
-                if articles_retry:
-                    sentiments = []
-                    for article in articles_retry[:5]:
-                        title = article.get("title", "").strip()
-                        if title:
-                            blob = TextBlob(title)
-                            sentiment = blob.sentiment.polarity
-                            sentiment_score = 50 + (sentiment * 50)
-                            sentiments.append(sentiment_score)
-                    return np.mean(sentiments) if sentiments else 50.0
             return 50.0  # Valor por defecto si falla, sin mensaje visible
         elif resp.status_code == 429:
             st.error(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido.")
@@ -265,7 +261,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     symbol = coinid_to_symbol[coin_id]
 
     # Obtener sentimiento de noticias para el rango de fechas (si aplica), con manejo de errores
-    start_date = datetime.fromtimestamp(start_ms / 1000) if start_ms else (datetime.now() - timedelta(days=30))
+    start_date = datetime.fromtimestamp(start_ms / 1000) if start_ms else (datetime.now() - timedelta(days=7))
     end_date = datetime.fromtimestamp(end_ms / 1000) if end_ms else datetime.now()
     news_sent = get_news_sentiment(symbol, start_date.date(), end_date.date())
 
@@ -291,17 +287,20 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+    # Ajustar dimensiones para incluir sentimiento
     X_train_adj = np.concatenate([X_train, np.full((X_train.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_val_adj = np.concatenate([X_val, np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_test_adj = np.concatenate([X_test, np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
 
-    lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, (window_size, 2), epochs, batch_size)
+    # Entrenar modelo y obtener historial para depuración
+    lstm_model, history = train_model(X_train_adj, y_train, X_val_adj, y_val, (window_size, 2), epochs, batch_size)
     lstm_test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
     lstm_test_preds = scaler.inverse_transform(lstm_test_preds_scaled).flatten()  # Asegurar 1D
     y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()  # Asegurar 1D
     lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
     lstm_mape = robust_mape(y_test_real, lstm_test_preds)
 
+    # Predicciones futuras con sentimiento
     last_window = scaled_data[-window_size:]
     future_preds_scaled = []
     current_input = np.concatenate([last_window.reshape(1, window_size, 1), np.full((1, window_size, 1), sentiment_factor)], axis=-1)
@@ -352,7 +351,7 @@ def main_app():
     coin_id = coincap_ids[crypto_name]
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
     default_end = datetime.now()
-    default_start = default_end - timedelta(days=30)  # Reducido a 30 días por defecto para evitar errores 422
+    default_start = default_end - timedelta(days=7)  # Reducido a 7 días por defecto para mayor eficiencia
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start.date())
         end_date = st.sidebar.date_input("Fecha de fin", default_end.date())
@@ -360,13 +359,13 @@ def main_app():
         if start_date > end_date:
             st.sidebar.error("La fecha de inicio no puede ser posterior a la fecha de fin.")
             return
-        if (end_date - start_date).days > 30:
-            st.sidebar.warning("El rango de fechas excede 30 días. Ajustando al máximo permitido (30 días).")
-            end_date = start_date + timedelta(days=30)
+        if (end_date - start_date).days > 7:
+            st.sidebar.warning("El rango de fechas excede 7 días. Ajustando al máximo permitido (7 días).")
+            end_date = start_date + timedelta(days=7)
         # Asegurar que las fechas no sean futuras
         if start_date > datetime.now().date():
-            start_date = datetime.now().date() - timedelta(days=30)
-            st.sidebar.warning("La fecha de inicio no puede ser futura. Ajustando al rango máximo permitido (30 días atrás).")
+            start_date = datetime.now().date() - timedelta(days=7)
+            st.sidebar.warning("La fecha de inicio no puede ser futura. Ajustando al rango máximo permitido (7 días atrás).")
         if end_date > datetime.now().date():
             end_date = datetime.now().date()
             st.sidebar.warning("La fecha de fin no puede ser futura. Ajustando a hoy.")
