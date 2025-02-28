@@ -255,6 +255,64 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
     except Exception as e:
         return 50.0  # Valor por defecto para cualquier otro error, sin mensaje visible
 
+# Nueva función para obtener noticias recientes (usando NewsData.io, optimizada para crypto)
+@st.cache_data(ttl=3600)  # Cachear por hora para minimizar peticiones
+def get_recent_crypto_news(coin_symbol):
+    """Obtiene las noticias más recientes y relevantes de criptomonedas usando NewsData.io."""
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=7)  # Limitar a 7 días para eficiencia
+
+    # Obtener la API key desde Streamlit Secrets
+    api_key = st.secrets.get("news_data_key", "pub_7227626d8277642d9399e67d37a74d463f7cc")
+    if not api_key:
+        st.error("No se encontró la API key de NewsData.io en Secrets. No se pueden mostrar noticias.")
+        return []
+
+    # Construir la URL siguiendo la documentación de NewsData.io (#crypto-news)
+    query = f"{coin_symbol} AND (price OR market OR regulation)"  # Consulta específica para noticias cripto relevantes
+    url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
+    
+    try:
+        # Verificar resolución DNS antes de la petición
+        try:
+            socket.getaddrinfo('newsdata.io', 443)
+        except socket.gaierror as dns_error:
+            st.error(f"Error de resolución DNS para newsdata.io: {dns_error}. No se pueden mostrar noticias.")
+            return []
+
+        resp = session.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code == 200:
+            data = resp.json()
+            articles = data.get("results", [])
+            if not articles:
+                return []
+            # Ordenar por fecha de publicación (pubDate) y limitar a las 5 más recientes
+            articles = sorted(articles, key=lambda x: x.get("pubDate", ""), reverse=True)[:5]
+            return [
+                {
+                    "title": article.get("title", "Sin título"),
+                    "description": article.get("description", "Sin descripción"),
+                    "pubDate": article.get("pubDate", "Fecha no disponible"),
+                    "link": article.get("link", "#")
+                }
+                for article in articles
+            ]
+        elif resp.status_code == 422:
+            return []  # Sin noticias si falla, sin mensaje visible
+        elif resp.status_code == 429:
+            st.error(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido.")
+            return []
+        elif resp.status_code == 401:
+            st.error(f"Error 401: Clave de API inválida o no autorizada. Verifica tu clave en Secrets.")
+            return []
+        else:
+            return []  # Sin noticias para otros errores, sin mensaje visible
+    except requests.exceptions.ConnectionError as conn_error:
+        st.error(f"Error de conexión con NewsData.io: {conn_error}. No se pueden mostrar noticias.")
+        return []
+    except Exception as e:
+        return []  # Sin noticias para cualquier otro error, sin mensaje visible
+
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None):
     """Entrena y predice combinando modelos, sentimiento y noticias específicas de cripto."""
@@ -392,7 +450,7 @@ def main_app():
             st.write(df_prices["close_price"].describe())
 
     # Pestañas
-    tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos"])
+    tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos", "📰 Noticias Recientes"])
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
@@ -415,27 +473,30 @@ def main_app():
                     result["test_preds"] = result["test_preds"][:min_len]
                     result["real_prices"] = result["real_prices"][:min_len]
 
-                # Crear el gráfico
+                # Crear el gráfico mejorado para precio real y predicción
                 fig_test = go.Figure()
                 fig_test.add_trace(go.Scatter(
                     x=result["test_dates"],
                     y=result["real_prices"],
                     mode="lines",
                     name="Precio Real",
-                    line=dict(color="blue")
+                    line=dict(color="#1f77b4", width=2)  # Azul oscuro, más visible
                 ))
                 fig_test.add_trace(go.Scatter(
                     x=result["test_dates"],
                     y=result["test_preds"],
                     mode="lines",
                     name="Predicción",
-                    line=dict(color="orange", dash="dash")
+                    line=dict(color="#ff7f0e", width=2, dash="dash")  # Naranja, más visible con línea discontinua
                 ))
                 fig_test.update_layout(
                     title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
                     template="plotly_dark",
                     xaxis_title="Fecha",
-                    yaxis_title="Precio en USD"
+                    yaxis_title="Precio en USD",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    plot_bgcolor="#1e1e2f",  # Fondo oscuro para consistencia con el dashboard
+                    paper_bgcolor="#1e1e2f"
                 )
                 st.plotly_chart(fig_test, use_container_width=True)
                 st.session_state["result"] = result
@@ -451,11 +512,11 @@ def main_app():
                 pred_series = np.concatenate(([current_price], result["future_preds"]))
                 fig_future = go.Figure()
                 future_dates_display = [last_date] + result["future_dates"]
-                fig_future.add_trace(go.Scatter(x=future_dates_display, y=pred_series, mode="lines+markers", name="Predicción"))
-                fig_future.update_layout(title=f"Predicción a Futuro ({horizon} días) - {result['symbol']}", template="plotly_dark")
+                fig_future.add_trace(go.Scatter(x=future_dates_display, y=pred_series, mode="lines+markers", name="Predicción", line=dict(color="#ff7f0e", width=2)))
+                fig_future.update_layout(title=f"Predicción a Futuro ({horizon} días) - {result['symbol']}", template="plotly_dark", xaxis_title="Fecha", yaxis_title="Precio en USD", plot_bgcolor="#1e1e2f", paper_bgcolor="#1e1e2f")
                 st.plotly_chart(fig_future, use_container_width=True)
                 st.subheader("Valores Numéricos")
-                st.dataframe(pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series}))
+                st.dataframe(pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series}).style.format({"Predicción": "{:.2f}"}))
             else:
                 st.error("El resultado almacenado no es un diccionario válido. Por favor, entrena el modelo nuevamente.")
         else:
@@ -478,13 +539,29 @@ def main_app():
                     go.Bar(name="Sentimiento Combinado", x=[result['symbol']], y=[result['crypto_sent']], marker_color="#1f77b4"),
                     go.Bar(name="Sentimiento Global", x=[result['symbol']], y=[result['market_sent']], marker_color="#ff7f0e")
                 ])
-                fig_sentiment.update_layout(barmode="group", title=f"Análisis de Sentimiento de {result['symbol']}", template="plotly_dark")
+                fig_sentiment.update_layout(barmode="group", title=f"Análisis de Sentimiento de {result['symbol']}", template="plotly_dark", plot_bgcolor="#1e1e2f", paper_bgcolor="#1e1e2f")
                 st.plotly_chart(fig_sentiment, use_container_width=True)
                 st.write("**NFA (Not Financial Advice):** Esto es solo información educativa, no un consejo financiero. Consulta a un experto antes de invertir.")
             else:
                 st.error("El resultado almacenado no es un diccionario válido. Por favor, entrena el modelo nuevamente.")
         else:
             st.info("Entrena el modelo para ver el análisis.")
+
+    with tabs[3]:
+        st.header("📰 Noticias Recientes de Criptomonedas")
+        news = get_recent_crypto_news(coinid_to_symbol[coin_id])
+        if news:
+            st.subheader(f"Últimas 5 noticias sobre {crypto_name}")
+            for article in news:
+                with st.expander(f"**{article['title']}** - {article['pubDate']}", expanded=False):
+                    st.write(article['description'])
+                    if article['link']:
+                        st.markdown(f"[Leer más]({article['link']})", unsafe_allow_html=True)
+            # Mostrar en forma de tabla para mejor UX/UI
+            news_df = pd.DataFrame(news)
+            st.dataframe(news_df[["title", "pubDate"]].style.format({"pubDate": "{:%Y-%m-%d %H:%M:%S}"})).style.set_properties(**{'background-color': '#2c2c3e', 'color': 'white', 'border-color': '#4a4a6a'})
+        else:
+            st.info("No se encontraron noticias recientes. Verifica tu conexión o los límites de la API.")
 
 if __name__ == "__main__":
     main_app()
