@@ -152,7 +152,7 @@ def get_crypto_sentiment_combined(coin_id):
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days):
-    """Entrena y predice combinando modelos y sentimiento, devolviendo un diccionario."""
+    """Entrena y predice combinando modelos y sentimiento."""
     df = load_coincap_data(coin_id)
     if df is None:
         return None
@@ -223,7 +223,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days):
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
-    st.markdown("Predice precios de criptomonedas con LSTM, datos históricos y análisis de sentimiento.")
+    st.markdown("""
+    **Descripción del Modelo:**  
+    Esta plataforma utiliza un modelo avanzado de aprendizaje automático basado en redes LSTM (Long Short-Term Memory) para predecir precios futuros de criptomonedas como Bitcoin, Ethereum, Ripple y otras. El modelo integra datos históricos de precios y volúmenes de CoinCap, abarcando hasta dos años de información diaria, ajustando dinámicamente sus hiperparámetros (como tamaño de ventana, épocas, tamaño de lote y tasa de aprendizaje) según la volatilidad específica de cada criptomoneda. Además, incorpora un análisis de sentimiento dinámico que combina el índice Fear & Greed para el mercado global con la actividad comunitaria en redes sociales (Twitter y Reddit) de CoinGecko para cada cripto, mejorando la precisión al considerar el estado de ánimo del mercado y los inversores. Las predicciones se complementan con métricas clave como RMSE y MAPE para evaluar la precisión, y se presentan en gráficos interactivos y tablas para una experiencia clara y detallada.
+
+    **Fuentes de Datos:**  
+    <small>CoinCap, Fear & Greed Index, CoinGecko</small>
+    """)
 
     # Sidebar
     st.sidebar.title("Configura tu Predicción")
