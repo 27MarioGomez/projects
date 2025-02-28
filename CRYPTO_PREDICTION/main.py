@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, LSTM, Dense, Dropout
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from requests.adapters import HTTPAdapter
@@ -17,20 +17,22 @@ import time
 import certifi
 import os
 
-# Importaciones opcionales
 try:
     from statsmodels.tsa.arima.model import ARIMA
     from sklearn.metrics import mean_squared_error
     ARIMA_AVAILABLE = True
 except ImportError:
     ARIMA_AVAILABLE = False
+    st.warning("statsmodels no está instalado. El modelo ARIMA no estará disponible.")
+
 try:
     from prophet import Prophet
     PROPHET_AVAILABLE = True
 except ImportError:
     PROPHET_AVAILABLE = False
+    st.warning("prophet no está instalado. El modelo Prophet no estará disponible.")
 
-# Configuración SSL y sesión de requests
+# Configurar certificados SSL y sesión de requests
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
 retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
@@ -43,9 +45,11 @@ coincap_ids = {"Bitcoin (BTC)": "bitcoin", "Ethereum (ETH)": "ethereum", "Ripple
                "Dogecoin (DOGE)": "dogecoin", "Polkadot (DOT)": "polkadot", "Polygon (MATIC)": "polygon",
                "Litecoin (LTC)": "litecoin", "TRON (TRX)": "tron", "Stellar (XLM)": "stellar"}
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
-historical_sentiment = {"bitcoin": 65.0, "ethereum": 60.0, "xrp": 21.5, "binance-coin": 55.0,
-                       "cardano": 50.0, "solana": 45.0, "dogecoin": 40.0, "polkadot": 50.0,
-                       "polygon": 45.0, "litecoin": 50.0, "tron": 45.0, "stellar": 48.0}
+coinid_to_coingecko = {v: v if v != "xrp" else "ripple" for v in coincap_ids.values()}
+crypto_characteristics = {"bitcoin": {"volatility": 0.03}, "ethereum": {"volatility": 0.05}, "xrp": {"volatility": 0.08},
+                         "binance-coin": {"volatility": 0.06}, "cardano": {"volatility": 0.07}, "solana": {"volatility": 0.09},
+                         "dogecoin": {"volatility": 0.12}, "polkadot": {"volatility": 0.07}, "polygon": {"volatility": 0.06},
+                         "litecoin": {"volatility": 0.04}, "tron": {"volatility": 0.06}, "stellar": {"volatility": 0.05}}
 
 # Funciones de apoyo
 def robust_mape(y_true, y_pred, eps=1e-9):
@@ -83,66 +87,69 @@ def create_sequences(data, window_size):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
-def build_lstm_model(input_shape):
-    model = Sequential([Conv1D(32, 2, activation="relu", input_shape=input_shape),
-                        LSTM(64, return_sequences=True), Dropout(0.3),
-                        LSTM(64), Dropout(0.3), Dense(16, activation="relu"), Dropout(0.2), Dense(1)])
-    model.compile(optimizer=Adam(0.001), loss="mean_squared_error")
+def build_lstm_model(input_shape, learning_rate=0.001):
+    model = Sequential([LSTM(50, return_sequences=True, input_shape=input_shape),
+                        Dropout(0.2), LSTM(50), Dropout(0.2), Dense(20, activation="relu"), Dense(1)])
+    model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
-def train_model(X_train, y_train, X_val, y_val, window_size):
-    model = build_lstm_model((window_size, X_train.shape[2]))
+def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size):
+    tf.keras.backend.clear_session()
+    model = build_lstm_model(input_shape)
     callbacks = [EarlyStopping(patience=5, restore_best_weights=True), ReduceLROnPlateau(patience=3, factor=0.5, min_lr=1e-6)]
-    model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=50, batch_size=32, callbacks=callbacks, verbose=0)
+    model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
     return model
 
-# Sentimiento
-@st.cache_data(ttl=3600)
-def get_sentiment_data(coin_id):
-    try:
-        fg = float(session.get("https://api.alternative.me/fng/?format=json", timeout=10).json()["data"][0]["value"])
-    except Exception:
-        fg = 50.0
-    try:
-        cg_id = coin_id if coin_id != "xrp" else "ripple"
-        cg_data = session.get(f"https://api.coingecko.com/api/v3/coins/{cg_id}?community_data=true", timeout=10).json()["community_data"]
-        cg = min(100, max(cg_data.get("twitter_followers", 0), cg_data.get("reddit_average_posts_48h", 0) * 1000) / 20000000 * 100)
-    except Exception:
-        cg = 50.0
-    hist = historical_sentiment.get(coin_id, 50.0)
-    return max(0, min(100, 0.5 * fg + 0.3 * cg + 0.2 * hist)), fg
+def get_dynamic_params(df, horizon_days, coin_id):
+    volatility = df["close_price"].pct_change().std()
+    base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
+    window_size = min(max(15, int(horizon_days * (1.5 if volatility > base_volatility else 1))), len(df) // 3)
+    epochs = min(50, max(20, int(len(df) / 100) + int(volatility * 150)))
+    batch_size = 32
+    learning_rate = 0.0004 if volatility > base_volatility else 0.0005
+    return window_size, epochs, batch_size, learning_rate
 
-# Modelos alternativos
-def train_alternative_models(df, horizon_days, test_size=0.2):
-    train_size = int(len(df) * (1 - test_size))
-    train, test = df["close_price"][:train_size], df["close_price"][train_size:]
-    arima_result = prophet_result = (None, None, np.nan, np.nan)
-    if ARIMA_AVAILABLE:
-        arima_model = ARIMA(train, order=(5, 1, 0)).fit()
-        arima_preds = arima_model.forecast(steps=len(test))
-        arima_result = (arima_preds, arima_preds, np.sqrt(mean_squared_error(test, arima_preds)), robust_mape(test, arima_preds))
-    if PROPHET_AVAILABLE:
-        prophet_df = df.rename(columns={"ds": "ds", "close_price": "y"})[:train_size]
-        model = Prophet(yearly_seasonality=True, weekly_seasonality=True).fit(prophet_df)
-        future = model.make_future_dataframe(periods=horizon_days + len(test))
-        forecast = model.predict(future)
-        prophet_result = (forecast["yhat"][train_size:train_size+len(test)].values,
-                         forecast["yhat"][-horizon_days:].values,
-                         np.sqrt(mean_squared_error(test, forecast["yhat"][train_size:train_size+len(test)])),
-                         robust_mape(test, forecast["yhat"][train_size:train_size+len(test)]))
-    return arima_result, prophet_result
+# Sentimiento dinámico
+@st.cache_data(ttl=3600)  # Actualiza cada hora
+def get_fear_greed_index():
+    try:
+        return float(session.get("https://api.alternative.me/fng/?format=json", timeout=10).json()["data"][0]["value"])
+    except Exception:
+        st.warning("No se pudo obtener Fear & Greed Index. Usando valor por defecto.")
+        return 50.0
+
+@st.cache_data(ttl=3600)
+def get_coingecko_community_activity(coin_id):
+    try:
+        cg_id = coinid_to_coingecko.get(coin_id, coin_id)
+        data = session.get(f"https://api.coingecko.com/api/v3/coins/{cg_id}?community_data=true", timeout=10).json()["community_data"]
+        activity = max(data.get("twitter_followers", 0), data.get("reddit_average_posts_48h", 0) * 1000)
+        return min(100, (activity / 20000000) * 100) if activity > 0 else 50.0
+    except Exception:
+        st.warning(f"No se pudo obtener actividad de CoinGecko para {coin_id}. Usando valor por defecto.")
+        return 50.0
+
+def get_crypto_sentiment_combined(coin_id):
+    fg = get_fear_greed_index()
+    cg = get_coingecko_community_activity(coin_id)
+    # Pesos dinámicos según volatilidad
+    volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
+    fg_weight = 0.6 if volatility > 0.07 else 0.5  # Más peso al mercado en criptos volátiles
+    cg_weight = 1 - fg_weight
+    return fg * fg_weight + cg * cg_weight
 
 # Predicción
-def train_and_predict(coin_id, horizon_days):
+def train_and_predict_with_sentiment(coin_id, horizon_days):
     df = load_coincap_data(coin_id)
     if df is None: return None
     symbol = coinid_to_symbol[coin_id]
-    sentiment, fg = get_sentiment_data(coin_id)
-    sentiment_factor = (sentiment + fg) / 200.0
+    crypto_sent = get_crypto_sentiment_combined(coin_id)
+    market_sent = get_fear_greed_index()
+    sentiment_factor = (crypto_sent + market_sent) / 200.0
 
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(df[["close_price"]])
-    window_size = min(max(15, int(horizon_days * (1.5 if df["close_price"].pct_change().std() > 0.05 else 1))), len(df) // 3)
+    window_size, epochs, batch_size, learning_rate = get_dynamic_params(df, horizon_days, coin_id)
     X, y = create_sequences(scaled_data, window_size)
     if X is None: return None
 
@@ -157,77 +164,153 @@ def train_and_predict(coin_id, horizon_days):
     X_val_adj = np.concatenate([X_val, np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_test_adj = np.concatenate([X_test, np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
 
-    lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, window_size)
-    test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
-    test_preds = scaler.inverse_transform(test_preds_scaled)
+    lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, (window_size, 2), epochs, batch_size)
+    lstm_test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
+    lstm_test_preds = scaler.inverse_transform(lstm_test_preds_scaled)
     y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1))
-    lstm_rmse, lstm_mape = np.sqrt(mean_squared_error(y_test_real, test_preds)), robust_mape(y_test_real, test_preds)
+    lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
+    lstm_mape = robust_mape(y_test_real, lstm_test_preds)
 
-    arima_result, prophet_result = train_alternative_models(df, horizon_days)
-    models = {"LSTM": (test_preds, None, lstm_rmse, lstm_mape)}
-    if ARIMA_AVAILABLE: models["ARIMA"] = arima_result
-    if PROPHET_AVAILABLE: models["Prophet"] = prophet_result
+    # Predicción futura LSTM
+    last_window = scaled_data[-window_size:]
+    future_preds_scaled = []
+    current_input = np.concatenate([last_window.reshape(1, window_size, 1), np.full((1, window_size, 1), sentiment_factor)], axis=-1)
+    for _ in range(horizon_days):
+        pred = lstm_model.predict(current_input, verbose=0)[0][0]
+        future_preds_scaled.append(pred)
+        new_feature = np.copy(current_input[:, -1:, :])
+        new_feature[0, 0, 0] = pred
+        new_feature[0, 0, 1] = sentiment_factor
+        current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
+    lstm_future_preds = scaler.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
 
-    best_model = min(models.items(), key=lambda x: x[1][2])[0]
-    test_preds = models[best_model][0]
-    future_preds = models[best_model][1]
-    if best_model == "LSTM":
-        last_window = np.concatenate([scaled_data[-window_size:], np.full((window_size, 1), sentiment_factor)], axis=-1).reshape(1, window_size, 2)
-        future_preds_scaled = []
-        current_input = last_window
-        for _ in range(horizon_days):
-            pred = lstm_model.predict(current_input, verbose=0)[0][0]
-            future_preds_scaled.append(pred)
-            current_input = np.append(current_input[:, 1:, :], [[[pred, sentiment_factor]]], axis=1)
-        future_preds = scaler.inverse_transform(np.array(future_preds_scaled).reshape(-1, 1)).flatten()
+    # Modelos alternativos
+    arima_preds, arima_rmse, arima_mape = train_arima_model(df) if ARIMA_AVAILABLE else (None, np.inf, np.inf)
+    prophet_results = train_prophet_model(df, horizon_days) if PROPHET_AVAILABLE else (None, None, np.inf, np.inf)
+    prophet_preds, prophet_future_preds, prophet_rmse, prophet_mape = prophet_results if prophet_results else (None, None, np.inf, np.inf)
 
-    return df, test_preds, y_test_real, future_preds, models[best_model][2], models[best_model][3], sentiment_factor, symbol, best_model
+    models = {"LSTM": (lstm_test_preds, lstm_future_preds, lstm_rmse, lstm_mape)}
+    if ARIMA_AVAILABLE and arima_preds is not None:
+        models["ARIMA"] = (arima_preds, arima_preds[:horizon_days], arima_rmse, arima_mape)
+    if PROPHET_AVAILABLE and prophet_preds is not None:
+        models["Prophet"] = (prophet_preds, prophet_future_preds, prophet_rmse, prophet_mape)
+
+    # Selección combinando RMSE y MAPE
+    best_model = min(models.items(), key=lambda x: (x[1][2] + x[1][3]) / 2 if not (np.isnan(x[1][2]) or np.isnan(x[1][3])) else np.inf)[0]
+    return df, *models[best_model], sentiment_factor, symbol, crypto_sent, market_sent
+
+def train_arima_model(df):
+    if not ARIMA_AVAILABLE: return None, np.inf, np.inf
+    train_size = int(len(df) * 0.8)
+    train, test = df["close_price"][:train_size], df["close_price"][train_size:]
+    model = ARIMA(train, order=(5, 1, 0)).fit()
+    preds = model.forecast(steps=len(test))
+    return preds, np.sqrt(mean_squared_error(test, preds)), robust_mape(test, preds)
+
+def train_prophet_model(df, horizon_days):
+    if not PROPHET_AVAILABLE: return None, None, np.inf, np.inf
+    df_prophet = df.rename(columns={"ds": "ds", "close_price": "y"})
+    train_size = int(len(df_prophet) * 0.8)
+    train, test = df_prophet[:train_size], df_prophet[train_size:]
+    model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+    model.fit(train)
+    future = model.make_future_dataframe(periods=horizon_days + len(test) - train_size)
+    forecast = model.predict(future)
+    preds = forecast["yhat"].iloc[train_size:train_size + len(test)].values
+    future_preds = forecast["yhat"].tail(horizon_days).values
+    return preds, future_preds, np.sqrt(mean_squared_error(test["y"], preds)), robust_mape(test["y"], preds)
 
 # App
 def main_app():
-    st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
-    st.title("Crypto Price Predictions 🔮")
-    st.sidebar.title("Configuración")
-    crypto_name = st.sidebar.selectbox("Criptomoneda:", list(coincap_ids.keys()))
-    horizon = st.sidebar.slider("Días a predecir:", 1, 90, 60)
+    st.set_page_config(page_title="Crypto Price Predictions (Simplified Sentiment) 🔮", layout="wide")
+    st.title("Crypto Price Predictions (Simplified Sentiment) 🔮")
+    st.markdown("Este modelo combina datos históricos de CoinCap y un análisis de sentimiento dinámico basado en Fear & Greed Index y actividad de CoinGecko para predecir precios.")
 
-    df = load_coincap_data(coincap_ids[crypto_name])
-    if df is not None:
-        st.plotly_chart(px.line(df, x="ds", y="close_price", title=f"Histórico de {crypto_name}", template="plotly_dark"), use_container_width=True)
+    st.sidebar.title("Configura tu Predicción")
+    crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()))
+    coin_id = coincap_ids[crypto_name]
+    use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
+    default_end = datetime.now()
+    default_start = default_end - timedelta(days=730)
+    if use_custom_range:
+        start_date = st.sidebar.date_input("Fecha de inicio", default_start)
+        end_date = st.sidebar.date_input("Fecha de fin", default_end)
+        start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
+        end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
+    else:
+        start_ms = int(default_start.timestamp() * 1000)
+        end_ms = int(default_end.timestamp() * 1000)
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
+    st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos históricos.**")
+    show_stats = st.sidebar.checkbox("Ver estadísticas descriptivas", value=False)
 
-    tabs = st.tabs(["Entrenamiento", "Predicción", "Sentimiento"])
+    df_prices = load_coincap_data(coin_id)
+    if df_prices is not None:
+        fig_hist = px.line(df_prices, x="ds", y="close_price", title=f"Histórico de {crypto_name}", labels={"ds": "Fecha", "close_price": "Precio en USD"})
+        fig_hist.update_layout(template="plotly_dark")
+        st.plotly_chart(fig_hist, use_container_width=True)
+        if show_stats:
+            st.subheader("Estadísticas Descriptivas")
+            st.write(df_prices["close_price"].describe())
+
+    tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos"])
     with tabs[0]:
-        if st.button("Entrenar y Predecir"):
+        st.header("Entrenamiento del Modelo y Evaluación en Test")
+        if st.button("Entrenar Modelo y Predecir"):
             with st.spinner("Procesando..."):
-                result = train_and_predict(coincap_ids[crypto_name], horizon)
+                result = train_and_predict_with_sentiment(coin_id, horizon)
             if result:
-                df, test_preds, y_test_real, future_preds, rmse, mape, _, symbol, best_model = result
-                st.success(f"Mejor modelo: {best_model} (RMSE: {rmse:.2f}, MAPE: {mape:.2f}%)")
+                df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent = result
+                st.success("Entrenamiento y predicción completados!")
+                st.write(f"Sentimiento combinado de {symbol}: {crypto_sent:.2f}")
+                st.write(f"Sentimiento global del mercado: {market_sent:.2f}")
+                st.write(f"Factor combinado: {sentiment_factor:.2f}")
                 col1, col2 = st.columns(2)
-                col1.metric("RMSE", f"{rmse:.2f}")
-                col2.metric("MAPE", f"{mape:.2f}%")
-                fig = go.Figure()
+                col1.metric("RMSE (Test)", f"{rmse:.2f}", help=f"Error promedio en dólares.")
+                col2.metric("MAPE (Test)", f"{mape:.2f}%", help=f"Error relativo promedio.")
+                fig_test = go.Figure()
                 test_dates = df["ds"].iloc[-len(test_preds):]
-                fig.add_trace(go.Scatter(x=test_dates, y=y_test_real.flatten(), mode="lines", name="Real"))
-                fig.add_trace(go.Scatter(x=test_dates, y=test_preds.flatten(), mode="lines", name="Predicción"))
-                fig.update_layout(template="plotly_dark", title=f"Test: {symbol}")
-                st.plotly_chart(fig, use_container_width=True)
+                fig_test.add_trace(go.Scatter(x=test_dates, y=df["close_price"].iloc[-len(test_preds):], mode="lines", name="Real"))
+                fig_test.add_trace(go.Scatter(x=test_dates, y=test_preds, mode="lines", name="Predicción"))
+                fig_test.update_layout(title=f"Comparación en Test: {symbol}", template="plotly_dark")
+                st.plotly_chart(fig_test, use_container_width=True)
+                st.session_state["result"] = result
 
     with tabs[1]:
-        if "result" in locals() and result:
+        st.header(f"Predicción de Precios - {crypto_name}")
+        if "result" in st.session_state:
+            df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent = st.session_state["result"]
             last_date = df["ds"].iloc[-1]
-            future_dates = pd.date_range(start=last_date, periods=horizon+1, freq="D")
-            pred_series = np.concatenate(([df["close_price"].iloc[-1]], future_preds))
-            fig = go.Figure(go.Scatter(x=future_dates, y=pred_series, mode="lines+markers", name="Predicción"))
-            fig.update_layout(template="plotly_dark", title=f"Predicción ({horizon} días) - {symbol}")
-            st.plotly_chart(fig, use_container_width=True)
+            current_price = df["close_price"].iloc[-1]
+            future_dates = pd.date_range(start=last_date, periods=horizon + 1, freq="D")
+            pred_series = np.concatenate(([current_price], future_preds))
+            fig_future = go.Figure()
+            fig_future.add_trace(go.Scatter(x=future_dates, y=pred_series, mode="lines+markers", name="Predicción"))
+            fig_future.update_layout(title=f"Predicción a Futuro ({horizon} días) - {symbol}", template="plotly_dark")
+            st.plotly_chart(fig_future, use_container_width=True)
+            st.subheader("Valores Numéricos")
             st.dataframe(pd.DataFrame({"Fecha": future_dates, "Predicción": pred_series}))
+        else:
+            st.info("Entrena el modelo primero.")
 
     with tabs[2]:
-        if "result" in locals() and result:
-            sentiment, fg = get_sentiment_data(coincap_ids[crypto_name])
-            st.write(f"Sentimiento {symbol}: {sentiment:.2f}, Factor: {result[6]:.2f}")
-            st.plotly_chart(go.Figure(go.Bar(x=[symbol], y=[sentiment], name="Sentimiento"), layout={"template": "plotly_dark"}))
+        st.header("Análisis de Sentimientos")
+        if "result" in st.session_state:
+            df, test_preds, future_preds, rmse, mape, sentiment_factor, symbol, crypto_sent, market_sent = st.session_state["result"]
+            sentiment_texts = {
+                "BTC": f"Sentimiento combinado de  {crypto_sent:.2f} refleja cautela con optimismo moderado. Mercado: {market_sent:.2f}.",
+                "ETH": f"Sentimiento combinado de  {crypto_sent:.2f} sugiere neutralidad. Mercado: {market_sent:.2f}.",
+                "XRP": f"Sentimiento combinado de  {crypto_sent:.2f} indica pesimismo leve. Mercado: {market_sent:.2f}.",
+            }
+            st.write(sentiment_texts.get(symbol, f"Sentimiento combinado: {crypto_sent:.2f}, Mercado: {market_sent:.2f}"))
+            fig_sentiment = go.Figure(data=[
+                go.Bar(name='Sentimiento Combinado', x=[symbol], y=[crypto_sent], marker_color='#1f77b4'),
+                go.Bar(name='Sentimiento Global', x=[symbol], y=[market_sent], marker_color='#ff7f0e')
+            ])
+            fig_sentiment.update_layout(barmode='group', title=f"Análisis de Sentimiento de {symbol}", template="plotly_dark")
+            st.plotly_chart(fig_sentiment, use_container_width=True)
+        else:
+            st.info("Entrena el modelo para ver el análisis.")
 
 if __name__ == "__main__":
     main_app()
