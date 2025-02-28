@@ -4,10 +4,7 @@ numpy
 plotly
 scikit-learn
 tensorflow==2.15.0
-absl-py==1.4.0
 requests
-git+https://github.com/twopirllc/pandas-ta@development
 certifi
 statsmodels
-lightgbm
 prophet
