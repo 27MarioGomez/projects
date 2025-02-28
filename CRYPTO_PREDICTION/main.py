@@ -186,7 +186,9 @@ def get_news(coin_symbol):
 
 def predict(coin_id, horizon, start_ms=None, end_ms=None):
     """Predice precios con LSTM y sentimiento."""
-    df = load_data(coin_id, start_ms, end_ms) or return None
+    df = load_data(coin_id, start_ms, end_ms)
+    if df is None:
+        return None
     symbol = SYMBOLS[coin_id]
     news_sent = get_news_sentiment(symbol, datetime.fromtimestamp(start_ms / 1000).date() if start_ms else (datetime.now() - timedelta(days=7)).date(), datetime.fromtimestamp(end_ms / 1000).date() if end_ms else datetime.now().date())
     crypto_sent, market_sent = get_sentiment(coin_id, 50.0 if news_sent is None or pd.isna(news_sent) else float(news_sent)), get_fear_greed()
@@ -195,7 +197,8 @@ def predict(coin_id, horizon, start_ms=None, end_ms=None):
     scaler, data = MinMaxScaler(), scaler.fit_transform(df[["close_price"]])
     window, epochs, batch, lr = get_params(df, horizon, coin_id)
     X, y = create_sequences(data, window)
-    if X is None: return None
+    if X is None:
+        return None
 
     split, val_split = int(len(X) * 0.8), int(len(X) * 0.9)
     X_train, X_test, y_train, y_test = X[:split], X[split:], y[:split], y[split:]
