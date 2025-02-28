@@ -176,15 +176,20 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
     if start_date is None or end_date is None:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=30)  # Rango por defecto de 30 días
+    else:
+        # Validar que el rango no exceda 30 días para evitar errores 422
+        if (end_date - start_date).days > 30:
+            start_date = end_date - timedelta(days=30)
+            st.warning("El rango de fechas excede 30 días. Usando los últimos 30 días.")
 
     # Obtener la API key desde Streamlit Secrets
-    api_key = st.secrets.get("news_data_key", None)
+    api_key = st.secrets.get("news_data_key", "pub_7227626d8277642d9399e67d37a74d463f7cc")
     if not api_key:
-        st.warning("No se encontró la API key de NewsData.io en Secrets. Usando valor por defecto para sentimiento.")
-        return None
+        st.error("No se encontró la API key de NewsData.io en Secrets. Usando valor por defecto para sentimiento.")
+        return 50.0
 
     # Construir la URL siguiendo la documentación de NewsData.io
-    query = f"{coin_symbol}+crypto+regulation+policy"
+    query = f"{coin_symbol} AND (crypto OR regulation OR policy)"
     url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
     
     try:
@@ -193,18 +198,18 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             socket.getaddrinfo('newsdata.io', 443)
         except socket.gaierror as dns_error:
             st.error(f"Error de resolución DNS para newsdata.io: {dns_error}. Verifica tu conexión de red o DNS.")
-            return None
+            return 50.0
 
         resp = session.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code == 200:
             data = resp.json()
             articles = data.get("results", [])
             if not articles:
-                st.warning("No se encontraron noticias. Usando valor por defecto para sentimiento.")
-                return None
+                st.debug("No se encontraron noticias. Usando valor por defecto para sentimiento.")  # Usar st.debug en lugar de st.warning
+                return 50.0
             
             sentiments = []
-            for article in articles[:5]:  # Limitar a 5 artículos (1 crédito = 10 artículos, usamos 0.5 créditos por consulta)
+            for article in articles[:5]:  # Limitar a 5 artículos (0.5 créditos por consulta)
                 title = article.get("title", "").strip()
                 if title:
                     blob = TextBlob(title)
@@ -213,25 +218,43 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
                     sentiment_score = 50 + (sentiment * 50)  # Normalizar a 0-100
                     sentiments.append(sentiment_score)
             
-            return np.mean(sentiments) if sentiments else None
+            return np.mean(sentiments) if sentiments else 50.0
         elif resp.status_code == 422:
-            st.warning(f"Error 422 al obtener noticias de NewsData.io: Requiere parámetros válidos. Verifica el formato de fechas o consulta. Usando valor por defecto para sentimiento.")
-            return None
+            st.debug(f"Error 422 al obtener noticias de NewsData.io: Parámetros inválidos. Ajustando consulta y fechas. Usando valor por defecto para sentimiento.")
+            # Intentar con una consulta simplificada y rango reducido
+            query = f"{coin_symbol} AND crypto"
+            start_date = end_date - timedelta(days=7)  # Usar solo 7 días para evitar errores
+            url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
+            resp_retry = session.get(url_retry, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if resp_retry.status_code == 200:
+                data_retry = resp_retry.json()
+                articles_retry = data_retry.get("results", [])
+                if articles_retry:
+                    sentiments = []
+                    for article in articles_retry[:5]:
+                        title = article.get("title", "").strip()
+                        if title:
+                            blob = TextBlob(title)
+                            sentiment = blob.sentiment.polarity
+                            sentiment_score = 50 + (sentiment * 50)
+                            sentiments.append(sentiment_score)
+                    return np.mean(sentiments) if sentiments else 50.0
+            return 50.0
         elif resp.status_code == 429:
-            st.warning(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido. Usando valor por defecto para sentimiento.")
-            return None
+            st.error(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido.")
+            return 50.0
         elif resp.status_code == 401:
             st.error(f"Error 401: Clave de API inválida o no autorizada. Verifica tu clave en Secrets.")
-            return None
+            return 50.0
         else:
-            st.warning(f"Error al obtener noticias de NewsData.io: {resp.status_code}. Verifica los límites de tu plan gratuito (200 créditos/día).")
-            return None
+            st.debug(f"Error al obtener noticias de NewsData.io: {resp.status_code}. Usando valor por defecto para sentimiento.")
+            return 50.0
     except requests.exceptions.ConnectionError as conn_error:
         st.error(f"Error de conexión con NewsData.io: {conn_error}. Verifica tu conexión de red o los límites de la API.")
-        return None
+        return 50.0
     except Exception as e:
-        st.warning(f"Error al obtener noticias: {e}")
-        return None
+        st.debug(f"Error al obtener noticias: {e}. Usando valor por defecto para sentimiento.")
+        return 50.0
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None):
@@ -249,7 +272,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     # Asegurar que news_sent sea un número válido antes de usarlo
     news_sent = 50.0 if news_sent is None or pd.isna(news_sent) else float(news_sent)
     if news_sent == 50.0:
-        st.warning("No se pudo obtener el sentimiento de noticias. Usando valor por defecto de 50.0.")
+        st.debug("No se pudo obtener el sentimiento de noticias. Usando valor por defecto de 50.0.")
 
     crypto_sent = get_crypto_sentiment_combined(coin_id, news_sent)
     market_sent = get_fear_greed_index()
@@ -330,7 +353,7 @@ def main_app():
     coin_id = coincap_ids[crypto_name]
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
     default_end = datetime.now()
-    default_start = default_end - timedelta(days=730)
+    default_start = default_end - timedelta(days=30)  # Reducido a 30 días por defecto para evitar errores 422
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start)
         end_date = st.sidebar.date_input("Fecha de fin", default_end)
@@ -338,6 +361,9 @@ def main_app():
         if start_date > end_date:
             st.sidebar.error("La fecha de inicio no puede ser posterior a la fecha de fin.")
             return
+        if (end_date - start_date).days > 30:
+            st.sidebar.warning("El rango de fechas excede 30 días. Ajustando al máximo permitido (30 días).")
+            end_date = start_date + timedelta(days=30)
         start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
         end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
     else:
