@@ -180,7 +180,11 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
         # Validar que el rango no exceda 30 días para evitar errores 422
         if (end_date - start_date).days > 30:
             start_date = end_date - timedelta(days=30)
-            st.warning("El rango de fechas excede 30 días. Usando los últimos 30 días.")
+        # Asegurar que las fechas no sean futuras
+        if start_date > datetime.now().date():
+            start_date = datetime.now().date() - timedelta(days=30)
+        if end_date > datetime.now().date():
+            end_date = datetime.now().date()
 
     # Obtener la API key desde Streamlit Secrets
     api_key = st.secrets.get("news_data_key", "pub_7227626d8277642d9399e67d37a74d463f7cc")
@@ -205,8 +209,7 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             data = resp.json()
             articles = data.get("results", [])
             if not articles:
-                st.debug("No se encontraron noticias. Usando valor por defecto para sentimiento.")  # Usar st.debug en lugar de st.warning
-                return 50.0
+                return 50.0  # Valor por defecto si no hay noticias, sin mensaje visible
             
             sentiments = []
             for article in articles[:5]:  # Limitar a 5 artículos (0.5 créditos por consulta)
@@ -220,11 +223,10 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             
             return np.mean(sentiments) if sentiments else 50.0
         elif resp.status_code == 422:
-            st.debug(f"Error 422 al obtener noticias de NewsData.io: Parámetros inválidos. Ajustando consulta y fechas. Usando valor por defecto para sentimiento.")
-            # Intentar con una consulta simplificada y rango reducido
-            query = f"{coin_symbol} AND crypto"
-            start_date = end_date - timedelta(days=7)  # Usar solo 7 días para evitar errores
-            url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
+            # Intentar con una consulta simplificada y rango reducido (7 días)
+            query_simple = f"{coin_symbol} AND crypto"
+            start_date_simple = end_date - timedelta(days=7)
+            url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query_simple)}&language=en&from_date={start_date_simple.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
             resp_retry = session.get(url_retry, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
             if resp_retry.status_code == 200:
                 data_retry = resp_retry.json()
@@ -239,7 +241,7 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
                             sentiment_score = 50 + (sentiment * 50)
                             sentiments.append(sentiment_score)
                     return np.mean(sentiments) if sentiments else 50.0
-            return 50.0
+            return 50.0  # Valor por defecto si falla, sin mensaje visible
         elif resp.status_code == 429:
             st.error(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido.")
             return 50.0
@@ -247,14 +249,12 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             st.error(f"Error 401: Clave de API inválida o no autorizada. Verifica tu clave en Secrets.")
             return 50.0
         else:
-            st.debug(f"Error al obtener noticias de NewsData.io: {resp.status_code}. Usando valor por defecto para sentimiento.")
-            return 50.0
+            return 50.0  # Valor por defecto para otros errores, sin mensaje visible
     except requests.exceptions.ConnectionError as conn_error:
         st.error(f"Error de conexión con NewsData.io: {conn_error}. Verifica tu conexión de red o los límites de la API.")
         return 50.0
     except Exception as e:
-        st.debug(f"Error al obtener noticias: {e}. Usando valor por defecto para sentimiento.")
-        return 50.0
+        return 50.0  # Valor por defecto para cualquier otro error, sin mensaje visible
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None):
@@ -265,13 +265,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     symbol = coinid_to_symbol[coin_id]
 
     # Obtener sentimiento de noticias para el rango de fechas (si aplica), con manejo de errores
-    start_date = datetime.fromtimestamp(start_ms / 1000) if start_ms else None
-    end_date = datetime.fromtimestamp(end_ms / 1000) if end_ms else None
+    start_date = datetime.fromtimestamp(start_ms / 1000).date() if start_ms else None
+    end_date = datetime.fromtimestamp(end_ms / 1000).date() if end_ms else None
     news_sent = get_news_sentiment(symbol, start_date, end_date)
 
     # Asegurar que news_sent sea un número válido antes de usarlo
     news_sent = 50.0 if news_sent is None or pd.isna(news_sent) else float(news_sent)
-    if news_sent == 50.0:
+    if news_sent == 50.0 and start_date and end_date:  # Solo mostrar mensaje si hay fechas válidas
         st.debug("No se pudo obtener el sentimiento de noticias. Usando valor por defecto de 50.0.")
 
     crypto_sent = get_crypto_sentiment_combined(coin_id, news_sent)
@@ -364,6 +364,13 @@ def main_app():
         if (end_date - start_date).days > 30:
             st.sidebar.warning("El rango de fechas excede 30 días. Ajustando al máximo permitido (30 días).")
             end_date = start_date + timedelta(days=30)
+        # Asegurar que las fechas no sean futuras
+        if start_date > datetime.now().date():
+            start_date = datetime.now().date() - timedelta(days=30)
+            st.sidebar.warning("La fecha de inicio no puede ser futura. Ajustando al rango máximo permitido (30 días atrás).")
+        if end_date > datetime.now().date():
+            end_date = datetime.now().date()
+            st.sidebar.warning("La fecha de fin no puede ser futura. Ajustando a hoy.")
         start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
         end_ms = int(datetime.combine(end_date, datetime.min.time()).timestamp() * 1000)
     else:
