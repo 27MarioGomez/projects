@@ -12,7 +12,7 @@ from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, Bidirectional, LSTM, Dense, Dropout
+from tensorflow.keras.layers import Conv1D, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from requests.adapters import HTTPAdapter
@@ -51,7 +51,7 @@ session = get_requests_session()
 def robust_mape(y_true, y_pred, eps=1e-9):
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Diccionarios para CoinCap y mapeo a símbolo para CoinGecko y CryptoCompare
+# Diccionarios para CoinCap y mapeo a símbolo para CoinGecko
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -68,21 +68,6 @@ coincap_ids = {
 }
 
 coinid_to_symbol = {
-    "bitcoin": "BTC",
-    "ethereum": "ETH",
-    "xrp": "XRP",
-    "binance-coin": "BNB",
-    "cardano": "ADA",
-    "solana": "SOL",
-    "dogecoin": "DOGE",
-    "polkadot": "DOT",
-    "polygon": "MATIC",
-    "litecoin": "LTC",
-    "tron": "TRX",
-    "stellar": "XLM"
-}
-
-coinid_to_cryptocompare = {
     "bitcoin": "BTC",
     "ethereum": "ETH",
     "xrp": "XRP",
@@ -166,7 +151,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None, max_retries=3):
 ##############################################
 # Creación de secuencias para LSTM
 ##############################################
-def create_sequences(data, window_size=30):
+def create_sequences(data, window_size=20):  # Reducido para menos complejidad
     if len(data) <= window_size:
         st.warning(f"No hay datos suficientes para una ventana de {window_size} días.")
         return None, None
@@ -177,19 +162,15 @@ def create_sequences(data, window_size=30):
     return np.array(X), np.array(y)
 
 ##############################################
-# Modelo LSTM y entrenamiento optimizado
+# Modelo LSTM simplificado y optimizado
 ##############################################
-def build_lstm_model(input_shape, learning_rate=0.001, l2_reg=0.01):
+def build_lstm_model(input_shape, learning_rate=0.001, l2_reg=0.005):
     model = Sequential()
-    model.add(Conv1D(filters=64, kernel_size=3, activation="relu", input_shape=input_shape, kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))
-    model.add(Bidirectional(LSTM(128, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(l2_reg))))
-    model.add(Dropout(0.4))
-    model.add(Bidirectional(LSTM(128, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(l2_reg))))
-    model.add(Dropout(0.4))
-    model.add(Bidirectional(LSTM(128, return_sequences=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg))))
-    model.add(Dropout(0.4))
-    model.add(Dense(32, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))
+    model.add(Conv1D(filters=32, kernel_size=2, activation="relu", input_shape=input_shape, kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))
+    model.add(LSTM(64, return_sequences=False, kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))  # Una sola capa LSTM
     model.add(Dropout(0.3))
+    model.add(Dense(16, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(l2_reg)))
+    model.add(Dropout(0.2))
     model.add(Dense(1))
     opt = Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss="mean_squared_error")
@@ -198,8 +179,8 @@ def build_lstm_model(input_shape, learning_rate=0.001, l2_reg=0.01):
 def train_model(X_train, y_train, X_val, y_val, input_shape, epochs, batch_size, learning_rate):
     tf.keras.backend.clear_session()
     model = build_lstm_model(input_shape, learning_rate=learning_rate)
-    early_stop = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
-    reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6)
+    early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, min_lr=1e-6)
     model.fit(X_train, y_train, validation_data=(X_val, y_val),
               epochs=epochs, batch_size=batch_size, verbose=1, callbacks=[early_stop, reduce_lr])
     return model
@@ -208,10 +189,10 @@ def get_dynamic_params(df, horizon_days):
     data_len = len(df)
     volatility = df["close_price"].pct_change().std()
     mean_price = df["close_price"].mean()
-    window_size = min(max(15, int(horizon_days * 1.5)), min(90, data_len // 2))
-    epochs = min(100, max(30, int(data_len/50) + int(volatility*200)))
-    batch_size = 32 if volatility > 0.03 or data_len < 1000 else 64
-    learning_rate = 0.0003 if mean_price > 500 or volatility > 0.05 else 0.0007
+    window_size = min(max(10, horizon_days), min(60, data_len // 3))  # Simplificado
+    epochs = min(50, max(20, int(data_len/100) + int(volatility*100)))
+    batch_size = 32  # Fijo para simplicidad
+    learning_rate = 0.0005  # Valor fijo optimizado
     return window_size, epochs, batch_size, learning_rate
 
 ##############################################
@@ -236,41 +217,10 @@ def get_fear_greed_index():
         st.error(f"Error obteniendo Fear & Greed Index: {e}")
         return 50.0
 
-def get_cryptocompare_social_sentiment(coin_id):
+def get_coingecko_community_activity(coin_id):
     """
-    Obtiene el sentimiento social desde CryptoCompare.
-    Escala: -1 (negativo) a 1 (positivo), normalizado a 0-100.
-    """
-    try:
-        symbol = coinid_to_cryptocompare.get(coin_id, coin_id.upper())
-        st.write(f"Debug CryptoCompare: Solicitando datos para {symbol}")  # Depuración
-        url = f"https://min-api.cryptocompare.com/data/social/coin/histo/day?fsym={symbol}&tsym=USD&limit=1"
-        resp = session.get(url, timeout=10)
-        st.write(f"Debug CryptoCompare: Status {resp.status_code} para {symbol}")  # Depuración
-        if resp.status_code == 200:
-            data = resp.json()
-            if data["Response"] == "Success" and data["Data"]:
-                latest = data["Data"][0]
-                positive = latest.get("positive", 0)
-                negative = latest.get("negative", 0)
-                total = positive + negative
-                st.write(f"Debug CryptoCompare: Positive={positive}, Negative={negative}, Total={total} para {symbol}")  # Depuración
-                if total > 0:
-                    sentiment = (positive - negative) / total  # Rango -1 a 1
-                    return max(0, min(100, (sentiment + 1) * 50))  # Normalizar a 0-100
-                return 50.0
-            return 50.0
-        else:
-            st.warning(f"CryptoCompare: Error {resp.status_code} para {symbol}.")
-            return 50.0
-    except Exception as e:
-        st.error(f"Error obteniendo sentimiento de CryptoCompare para {symbol}: {e}")
-        return 50.0
-
-def get_coingecko_community_sentiment(coin_id):
-    """
-    Obtiene el sentimiento de la comunidad desde CoinGecko.
-    Escala: % de votos positivos (0-100).
+    Usa el volumen de actividad de comunidad (twitter_followers o reddit_posts) como proxy de sentimiento.
+    Normaliza a 0-100 basado en el máximo observado.
     """
     try:
         cg_id = coinid_to_coingecko.get(coin_id, coin_id)
@@ -281,33 +231,30 @@ def get_coingecko_community_sentiment(coin_id):
         if resp.status_code == 200:
             data = resp.json()
             comm = data.get("community_data", {})
-            up = comm.get("sentiment_votes_up_percentage", None)
-            down = comm.get("sentiment_votes_down_percentage", None)
-            st.write(f"Debug CoinGecko: Up={up}, Down={down} para {cg_id}")  # Depuración
-            if up is not None and down is not None:
-                return float(up)
-            elif up is not None:
-                return float(up)
-            else:
-                return 50.0
+            followers = comm.get("twitter_followers", 0)
+            posts = comm.get("reddit_average_posts_48h", 0)
+            activity = max(followers, posts * 1000)  # Peso mayor a followers
+            # Normalización: Suponemos un máximo teórico (ej. 10M followers para Bitcoin)
+            max_activity = 10000000  # Ajustable según datos reales
+            sentiment = min(100, (activity / max_activity) * 100) if activity > 0 else 50.0
+            st.write(f"Debug CoinGecko: Activity={activity}, Sentiment={sentiment} para {cg_id}")  # Depuración
+            return sentiment
         else:
             st.warning(f"CoinGecko: Error {resp.status_code} al obtener datos para {cg_id}.")
             return 50.0
     except Exception as e:
-        st.error(f"Error obteniendo sentimiento de CoinGecko para {cg_id}: {e}")
+        st.error(f"Error obteniendo actividad de CoinGecko para {cg_id}: {e}")
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id):
     """
-    Combina el sentimiento de CryptoCompare y CoinGecko, ponderado con Fear & Greed Index.
-    Asegura que el sentimiento varíe por criptomoneda.
+    Combina Fear & Greed Index con actividad de comunidad como proxy de sentimiento específico.
     """
     fg = get_fear_greed_index()
-    cc = get_cryptocompare_social_sentiment(coin_id)
-    cg = get_coingecko_community_sentiment(coin_id)
-    st.write(f"Debug Combined: FG={fg}, CC={cc}, CG={cg} para {coin_id}")  # Depuración
-    # Ponderación optimizada: 40% Fear & Greed, 30% CryptoCompare, 30% CoinGecko
-    combined = 0.4 * fg + 0.3 * cc + 0.3 * cg
+    cg_activity = get_coingecko_community_activity(coin_id)
+    st.write(f"Debug Combined: FG={fg}, CG_Activity={cg_activity} para {coin_id}")  # Depuración
+    # Ponderación: 60% Fear & Greed, 40% Actividad comunitaria
+    combined = 0.6 * fg + 0.4 * cg_activity
     return max(0, min(100, combined))  # Asegurar rango 0-100
 
 def get_market_sentiment():
@@ -399,10 +346,10 @@ def train_and_predict_with_sentiment(coin_id, use_custom_range, start_ms, end_ms
 # Función principal de la app
 ##############################################
 def main_app():
-    st.set_page_config(page_title="Crypto Price Predictions (Alternative Sentiment) 🔮", layout="wide")
-    st.title("Crypto Price Predictions (Alternative Sentiment) 🔮")
-    st.markdown("Este modelo combina datos históricos de CoinCap y análisis de sentimiento obtenido a partir del Crypto Fear & Greed Index, CryptoCompare Social API y CoinGecko para predecir precios de criptomonedas.")
-    st.markdown("**Fuente de Datos:** CoinCap, Crypto Fear & Greed Index, CryptoCompare Social API, CoinGecko")
+    st.set_page_config(page_title="Crypto Price Predictions (Simplified Sentiment) 🔮", layout="wide")
+    st.title("Crypto Price Predictions (Simplified Sentiment) 🔮")
+    st.markdown("Este modelo combina datos históricos de CoinCap y un análisis de sentimiento simplificado basado en Fear & Greed Index y actividad de comunidad de CoinGecko para predecir precios.")
+    st.markdown("**Fuente de Datos:** CoinCap, Crypto Fear & Greed Index, CoinGecko")
 
     st.sidebar.title("Configura tu Predicción")
     st.session_state["crypto_name"] = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()), help="Elige la criptomoneda que deseas analizar.")
@@ -498,7 +445,6 @@ def main_app():
     with tabs[2]:
         st.header("Noticias Recientes")
         st.markdown("No hay una fuente gratuita de noticias disponible en este momento.")
-        
 
 if __name__ == "__main__":
     main_app()
