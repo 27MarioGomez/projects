@@ -518,7 +518,7 @@ def main_app():
                 st.session_state["result"] = result
 
     with tabs[1]:
-        st.header(f"Predicción de Precios - {crypto_name}")
+        st.header(f"🔮 Predicción de Precios - {crypto_name}")
         if "result" in st.session_state:
             # Verificar si result es un diccionario
             if isinstance(st.session_state["result"], dict):
