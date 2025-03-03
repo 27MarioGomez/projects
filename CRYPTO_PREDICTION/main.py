@@ -582,12 +582,12 @@ def main_app():
                 else:  # Bullish y Very Bullish (50-100)
                     color = "#00ff00" if level <= 5 else "#008000"  # Verde claro para Bullish, verde oscuro para Very Bullish
 
-                # Ajustar el threshold para que esté en el valor exacto de crypto_sent
-                threshold_value = crypto_sent  # Colocar la línea blanca (needle) en el valor exacto de crypto_sent
+                # Ajustar el threshold para simular una aguja en el valor exacto de crypto_sent
+                threshold_value = crypto_sent  # Colocar la línea blanca (simulando needle) en el valor exacto de crypto_sent
 
-                # Diseño inspirado en "Bitcoin Technical Score", con gauge semicircular, needle, y colores graduados
+                # Diseño inspirado en "Bitcoin Technical Score", con gauge semicircular y threshold como needle
                 fig_sentiment = go.Figure(go.Indicator(
-                    mode="gauge+number+needle",
+                    mode="gauge+number",  # Cambiado de 'gauge+number+needle' a 'gauge+number' para evitar el error
                     value=crypto_sent,
                     domain={"x": [0, 1], "y": [0, 1]},
                     title={
@@ -616,7 +616,7 @@ def main_app():
                         "threshold": {
                             "line": {"color": "#ffffff", "width": 4},
                             "thickness": 1,
-                            "value": threshold_value  # Ajustado dinámicamente al valor de crypto_sent
+                            "value": threshold_value  # Simula una aguja apuntando al valor exacto
                         }
                     },
                     number={"font": {"size": 48, "color": "#ffffff", "family": "Arial, sans-serif"}}
