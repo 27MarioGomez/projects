@@ -204,7 +204,7 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
         st.error("No se encontró la API key de NewsData.io en Secrets. Usando valor por defecto para sentimiento.")
         return 50.0
 
-    # Construir la URL siguiendo la documentación de NewsData.io (#crypto-news), optimizada para noticias cripto
+    # Construir la URL siguiendo la documentación de NewsData.io, optimizada para noticias cripto
     query = f"{coin_symbol} AND (price OR market OR regulation)"  # Consulta específica para noticias cripto relevantes
     url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
     
@@ -238,7 +238,8 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             
             return np.mean(sentiments) if sentiments else 50.0
         elif resp.status_code == 422:
-            return 50.0  # Valor por defecto si falla, sin mensaje visible
+            st.warning("Parámetros inválidos en la solicitud a NewsData.io. Ajustando consulta o verificando API key.")
+            return 50.0
         elif resp.status_code == 429:
             st.error(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido.")
             return 50.0
@@ -246,19 +247,21 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
             st.error(f"Error 401: Clave de API inválida o no autorizada. Verifica tu clave en Secrets.")
             return 50.0
         else:
-            return 50.0  # Valor por defecto para otros errores, sin mensaje visible
+            st.warning(f"Error {resp.status_code} al conectar con NewsData.io. Usando valor por defecto.")
+            return 50.0
     except requests.exceptions.ConnectionError as conn_error:
         st.error(f"Error de conexión con NewsData.io: {conn_error}. Verifica tu conexión de red o los límites de la API.")
         return 50.0
     except Exception as e:
-        return 50.0  # Valor por defecto para cualquier otro error, sin mensaje visible
+        st.error(f"Error inesperado al obtener sentimiento de noticias: {e}. Usando valor por defecto.")
+        return 50.0
 
-# Nueva función para obtener noticias recientes (usando NewsData.io, optimizada para crypto según #crypto-news)
+# Nueva función para obtener noticias recientes (usando NewsData.io, optimizada para crypto según documentación)
 @st.cache_data(ttl=3600)  # Cachear por hora para minimizar peticiones
 def get_recent_crypto_news(coin_symbol):
-    """Obtiene las noticias más recientes y relevantes de criptomonedas usando NewsData.io."""
+    """Obtiene las noticias más recientes y relevantes de criptomonedas usando NewsData.io, optimizado según documentación."""
     end_date = datetime.now().date()
-    start_date = end_date - timedelta(days=14)  # Aumentado a 14 días para capturar más noticias recientes
+    start_date = end_date - timedelta(days=14)  # Rango de 14 días para capturar más noticias recientes
 
     # Obtener la API key desde Streamlit Secrets
     api_key = st.secrets.get("news_data_key", "pub_7227626d8277642d9399e67d37a74d463f7cc")
@@ -266,8 +269,8 @@ def get_recent_crypto_news(coin_symbol):
         st.error("No se encontró la API key de NewsData.io en Secrets. No se pueden mostrar noticias.")
         return []
 
-    # Construir la URL siguiendo la documentación de NewsData.io (#crypto-news), optimizada para noticias cripto recientes
-    query = f"crypto AND {coin_symbol}"  # Consulta simplificada para capturar más noticias relevantes
+    # Construir la URL siguiendo la documentación de NewsData.io, optimizada para noticias cripto recientes
+    query = f"{coin_symbol} AND crypto"  # Consulta más específica y robusta para cripto, siguiendo documentación
     url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
     
     try:
@@ -283,8 +286,8 @@ def get_recent_crypto_news(coin_symbol):
             data = resp.json()
             articles = data.get("results", [])
             if not articles:
-                # Intentar con una consulta más genérica y rango reducido (7 días)
-                query_simple = "crypto"  # Consulta genérica para capturar cualquier noticia cripto
+                # Reintentar con consulta genérica "crypto" y rango reducido (7 días) si falla
+                query_simple = "crypto"
                 start_date_simple = end_date - timedelta(days=7)
                 url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query_simple)}&language=en&from_date={start_date_simple.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
                 resp_retry = session.get(url_retry, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
@@ -302,7 +305,8 @@ def get_recent_crypto_news(coin_symbol):
                             }
                             for article in articles_retry
                         ]
-                return []  # Sin noticias si no hay resultados, sin mensaje visible
+                st.warning("No se encontraron noticias específicas. Usando consulta genérica, pero aún sin resultados.")
+                return []  # Sin noticias si no hay resultados, con mensaje útil
             
             # Ordenar por fecha de publicación (pubDate) y limitar a las 5 más recientes
             articles = sorted(articles, key=lambda x: x.get("pubDate", ""), reverse=True)[:5]
@@ -316,7 +320,8 @@ def get_recent_crypto_news(coin_symbol):
                 for article in articles
             ]
         elif resp.status_code == 422:
-            return []  # Sin noticias si falla, sin mensaje visible
+            st.warning("Parámetros inválidos en la solicitud a NewsData.io. Ajustando consulta o verificando API key.")
+            return []
         elif resp.status_code == 429:
             st.error(f"Error 429 al obtener noticias de NewsData.io: Límite de créditos diarios (200) excedido.")
             return []
@@ -324,12 +329,14 @@ def get_recent_crypto_news(coin_symbol):
             st.error(f"Error 401: Clave de API inválida o no autorizada. Verifica tu clave en Secrets.")
             return []
         else:
-            return []  # Sin noticias para otros errores, sin mensaje visible
+            st.warning(f"Error {resp.status_code} al conectar con NewsData.io. No se pueden mostrar noticias.")
+            return []
     except requests.exceptions.ConnectionError as conn_error:
         st.error(f"Error de conexión con NewsData.io: {conn_error}. No se pueden mostrar noticias.")
         return []
     except Exception as e:
-        return []  # Sin noticias para cualquier otro error, sin mensaje visible
+        st.error(f"Error inesperado al obtener noticias: {e}. No se pueden mostrar noticias.")
+        return []
 
 # Predicción
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None):
@@ -483,38 +490,44 @@ def main_app():
                 col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error promedio en dólares.")
                 col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error relativo promedio.")
 
-                # Verificación estricta de dimensiones
-                if len(result["test_dates"]) != len(result["test_preds"]) or len(result["test_dates"]) != len(result["real_prices"]):
-                    st.error(f"Error en las dimensiones de los datos: test_dates ({len(result['test_dates'])}), test_preds ({len(result['test_preds'])}), real_prices ({len(result['real_prices'])}). Ajustando...")
-                    min_len = min(len(result["test_dates"]), len(result["test_preds"]), len(result["real_prices"]))
-                    result["test_dates"] = result["test_dates"][:min_len]
-                    result["test_preds"] = result["test_preds"][:min_len]
-                    result["real_prices"] = result["real_prices"][:min_len]
-
-                # Crear el gráfico mejorado para precio real y predicción (solo líneas, sin fondo ni configuraciones adicionales, con días en el eje X)
-                if len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0:
-                    fig_test = go.Figure()
-                    fig_test.add_trace(go.Scatter(
-                        x=result["test_dates"],
-                        y=result["real_prices"],
-                        mode="lines",
-                        name="Precio Real",
-                        line=dict(color="#1f77b4", width=3)  # Azul oscuro, línea sólida más gruesa
-                    ))
-                    fig_test.add_trace(go.Scatter(
-                        x=result["test_dates"],
-                        y=result["test_preds"],
-                        mode="lines",
-                        name="Predicción",
-                        line=dict(color="#ff7f0e", width=3, dash="dash")  # Naranja, línea discontinua más gruesa
-                    ))
-                    fig_test.update_layout(
-                        title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
-                        xaxis=dict(tickformat="%Y-%m-%d")  # Mostrar solo días en el eje X
-                    )  # Solo título y formato de días, sin fondo ni otras configuraciones
-                    st.plotly_chart(fig_test, use_container_width=True)
-                else:
+                # Verificación estricta y robusta de dimensiones
+                if not (len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0):
                     st.error("No hay suficientes datos para mostrar el gráfico de entrenamiento y test.")
+                    st.session_state["result"] = result
+                    return
+
+                # Asegurar que las longitudes sean consistentes
+                min_len = min(len(result["test_dates"]), len(result["real_prices"]), len(result["test_preds"]))
+                if min_len < 1:
+                    st.error("No hay datos suficientes para generar el gráfico.")
+                    st.session_state["result"] = result
+                    return
+
+                result["test_dates"] = result["test_dates"][:min_len]
+                result["real_prices"] = result["real_prices"][:min_len]
+                result["test_preds"] = result["test_preds"][:min_len]
+
+                # Crear el gráfico mejorado para precio real y predicción (curvas suaves, solo líneas, con días en el eje X)
+                fig_test = go.Figure()
+                fig_test.add_trace(go.Scatter(
+                    x=result["test_dates"],
+                    y=result["real_prices"],
+                    mode="lines",
+                    name="Precio Real",
+                    line=dict(color="#1f77b4", width=3, shape="spline")  # Curva suave, azul oscuro, línea sólida más gruesa
+                ))
+                fig_test.add_trace(go.Scatter(
+                    x=result["test_dates"],
+                    y=result["test_preds"],
+                    mode="lines",
+                    name="Predicción",
+                    line=dict(color="#ff7f0e", width=3, dash="dash", shape="spline")  # Curva suave, naranja, línea discontinua más gruesa
+                ))
+                fig_test.update_layout(
+                    title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
+                    xaxis=dict(tickformat="%Y-%m-%d")  # Mostrar solo días en el eje X
+                )  # Solo título y formato de días, sin fondo ni otras configuraciones
+                st.plotly_chart(fig_test, use_container_width=True)
                 st.session_state["result"] = result
 
     with tabs[1]:
@@ -528,8 +541,21 @@ def main_app():
                 pred_series = np.concatenate(([current_price], result["future_preds"]))  # Usamos "future_preds" para consistencia
                 fig_future = go.Figure()
                 future_dates_display = [last_date] + result["future_dates"]
-                fig_future.add_trace(go.Scatter(x=future_dates_display, y=pred_series, mode="lines+markers", name="Predicción", line=dict(color="#ff7f0e", width=2)))
-                fig_future.update_layout(title=f"Predicción a Futuro ({horizon} días) - {result['symbol']}", template="plotly_dark", xaxis_title="Fecha", yaxis_title="Precio en USD", plot_bgcolor="#1e1e2f", paper_bgcolor="#1e1e2f")
+                fig_future.add_trace(go.Scatter(
+                    x=future_dates_display,
+                    y=pred_series,
+                    mode="lines+markers",
+                    name="Predicción",
+                    line=dict(color="#ff7f0e", width=2, shape="spline")  # Curva suave, naranja, ancho 2
+                ))
+                fig_future.update_layout(
+                    title=f"Predicción a Futuro ({horizon} días) - {result['symbol']}",
+                    template="plotly_dark",
+                    xaxis_title="Fecha",
+                    yaxis_title="Precio en USD",
+                    plot_bgcolor="#1e1e2f",
+                    paper_bgcolor="#1e1e2f"
+                )
                 st.plotly_chart(fig_future, use_container_width=True)
                 st.subheader("Valores Numéricos")
                 st.dataframe(pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series}).style.format({"Predicción": "{:.2f}"}))
@@ -548,14 +574,20 @@ def main_app():
                 level = (crypto_sent - 50) / 5  # Escala -10 a 10 para determinar el estado
                 sentiment_label = "Very Bearish" if level <= -5 else "Bearish" if level <= -2 else \
                                  "Neutral" if -2 < level < 2 else "Bullish" if level <= 5 else "Very Bullish"
-                color = "#ff7f0e" if level < 0 else "#1f77b4"  # Naranja para bearish, azul para bullish
+                # Colores según tu preferencia: rojo para Very Bearish/Bearish, amarillo para Neutral, verde para Bullish/Very Bullish
+                if level <= -2:  # Very Bearish y Bearish (0-50)
+                    color = "#ff0000"  # Rojo
+                elif -2 < level < 2:  # Neutral (50)
+                    color = "#ffd700"  # Amarillo
+                else:  # Bullish y Very Bullish (50-100)
+                    color = "#00ff00" if level <= 5 else "#008000"  # Verde claro para Bullish, verde oscuro para Very Bullish
 
                 # Ajustar el threshold para que esté en el valor exacto de crypto_sent
-                threshold_value = crypto_sent  # Colocar la línea blanca en el valor exacto de crypto_sent
+                threshold_value = crypto_sent  # Colocar la línea blanca (needle) en el valor exacto de crypto_sent
 
-                # Mejorar el diseño del gauge para hacerlo más amigable y dinámico
+                # Diseño inspirado en "Bitcoin Technical Score", con gauge semicircular, needle, y colores graduados
                 fig_sentiment = go.Figure(go.Indicator(
-                    mode="gauge+number+delta",
+                    mode="gauge+number+needle",
                     value=crypto_sent,
                     domain={"x": [0, 1], "y": [0, 1]},
                     title={
@@ -565,33 +597,27 @@ def main_app():
                     gauge={
                         "axis": {
                             "range": [0, 100],
-                            "tickvals": [0, 25, 40, 50, 60, 75, 100],
-                            "ticktext": ["Very Bearish", "Bearish", "", "Neutral", "", "Bullish", "Very Bullish"],
+                            "tickvals": [0, 25, 50, 75, 100],
+                            "ticktext": ["Very Bearish", "Bearish", "Neutral", "Bullish", "Very Bullish"],
                             "tickcolor": "#ffffff",
                             "tickwidth": 2,
-                            "tickfont": {"size": 14, "color": "#ffffff"}
+                            "tickfont": {"size": 16, "color": "#ffffff"}
                         },
                         "bar": {"color": color},
                         "bgcolor": "#2c2c3e",
                         "borderwidth": 2,
                         "bordercolor": "#4a4a6a",
                         "steps": [
-                            {"range": [0, 25], "color": "#ff7f0e"},  # Very Bearish, naranja oscuro
-                            {"range": [25, 40], "color": "#ffaa7f"},  # Bearish, naranja claro
-                            {"range": [40, 60], "color": "#666666"},  # Neutral, gris
-                            {"range": [60, 75], "color": "#7fb4ff"},  # Bullish, azul claro
-                            {"range": [75, 100], "color": "#1f77b4"}  # Very Bullish, azul oscuro
+                            {"range": [0, 25], "color": "#ff0000"},  # Very Bearish, rojo
+                            {"range": [25, 50], "color": "#ffd700"},  # Bearish, amarillo
+                            {"range": [50, 75], "color": "#00ff00"},  # Bullish, verde claro
+                            {"range": [75, 100], "color": "#008000"}  # Very Bullish, verde oscuro
                         ],
                         "threshold": {
                             "line": {"color": "#ffffff", "width": 4},
-                            "thickness": 0.75,
+                            "thickness": 1,
                             "value": threshold_value  # Ajustado dinámicamente al valor de crypto_sent
                         }
-                    },
-                    delta={
-                        "reference": market_sent,
-                        "increasing": {"color": "#1f77b4"},
-                        "decreasing": {"color": "#ff7f0e"}
                     },
                     number={"font": {"size": 48, "color": "#ffffff", "family": "Arial, sans-serif"}}
                 ))
@@ -599,8 +625,8 @@ def main_app():
                     template="plotly_dark",
                     plot_bgcolor="#1e1e2f",
                     paper_bgcolor="#1e1e2f",
-                    height=500,  # Aumentado para mayor visibilidad
-                    width=800,  # Aumentado para mayor visibilidad
+                    height=600,  # Aumentado para mayor visibilidad
+                    width=900,  # Aumentado para mayor visibilidad
                     margin=dict(l=20, r=20, t=80, b=20)  # Ajuste de márgenes para mejor presentación
                 )
                 st.plotly_chart(fig_sentiment, use_container_width=True)
@@ -625,7 +651,7 @@ def main_app():
             news_df = pd.DataFrame(news)
             st.dataframe(news_df[["title", "pubDate"]].style.format({"pubDate": "{:%Y-%m-%d %H:%M:%S}"}).set_properties(**{'background-color': '#2c2c3e', 'color': 'white', 'border-color': '#4a4a6a'}))
         else:
-            st.info("No se encontraron noticias recientes. Verifica tu conexión, los límites de la API, o intenta más tarde.")
+            st.info("No se encontraron noticias recientes. Verifica tu conexión, los límites de la API (200 créditos/día), o la clave API en Secrets.")
 
 if __name__ == "__main__":
     main_app()
