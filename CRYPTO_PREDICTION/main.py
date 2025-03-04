@@ -19,7 +19,7 @@ from textblob import TextBlob
 import socket
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-import keras_tuner as kt  # <-- Asegúrate de tener keras-tuner instalado
+import keras_tuner as kt  # Asegúrate de tener keras-tuner instalado
 
 # Configuración inicial: certificados SSL y sesión requests
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -88,10 +88,12 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None):
 
         df["ds"] = pd.to_datetime(df["time"], unit="ms", errors="coerce")
         df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-        df["volume"] = pd.to_numeric(df.get("volumeUsd", 0), errors="coerce").fillna(0.0)
-        df = df[["ds", "close_price", "volume"]].dropna().sort_values("ds").reset_index(drop=True)
-        return df
-
+        # Si "volumeUsd" existe, conviértelo a numérico y aplica fillna; si no, crea una Serie de 0.0
+        if "volumeUsd" in df.columns:
+            df["volume"] = pd.to_numeric(df["volumeUsd"], errors="coerce").fillna(0.0)
+        else:
+            df["volume"] = pd.Series(0.0, index=df.index)
+        return df[["ds", "close_price", "volume"]].dropna().sort_values("ds").reset_index(drop=True)
     except Exception as e:
         st.error(f"Error al cargar datos: {e}")
         return None
