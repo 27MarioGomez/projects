@@ -209,56 +209,6 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
         st.error(f"Error inesperado en NewsData.io: {e}. Usando valor por defecto.")
         return 50.0
 
-# Obtiene noticias recientes de criptomonedas
-@st.cache_data(ttl=3600)
-def get_recent_crypto_news(coin_symbol):
-    end_date = datetime.now().date()  # Corrección: inicializa end_date explícitamente
-    start_date = end_date - timedelta(days=14)  # Rango de 14 días para capturar más noticias recientes
-    api_key = st.secrets.get("news_data_key", "pub_7227626d8277642d9399e67d37a74d463f7cc")
-    if not api_key:
-        st.error("API key de NewsData.io no encontrada. No se pueden mostrar noticias.")
-        return []
-    
-    query = f"{coin_symbol} AND crypto"
-    url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
-    
-    try:
-        try:
-            socket.getaddrinfo('newsdata.io', 443)
-        except socket.gaierror as dns_error:
-            st.error(f"Error DNS para newsdata.io: {dns_error}. No se pueden mostrar noticias.")
-            return []
-        
-        resp = session.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code == 200:
-            data = resp.json()
-            articles = data.get("results", [])
-            if not articles:
-                start_date = end_date - timedelta(days=7)  # Reintento con rango reducido
-                url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q=crypto&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
-                resp_retry = session.get(url_retry, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-                if resp_retry.status_code == 200:
-                    articles = sorted(resp_retry.json().get("results", []), key=lambda x: x.get("pubDate", ""), reverse=True)[:5]
-                    if articles:
-                        return [{"title": a.get("title", "Sin título"), "description": a.get("description", "Sin descripción"), 
-                                 "pubDate": a.get("pubDate", "Fecha no disponible"), "link": a.get("link", "#")} for a in articles]
-                st.warning("No se encontraron noticias específicas. Consulta genérica sin resultados.")
-                return []
-            return [{"title": a.get("title", "Sin título"), "description": a.get("description", "Sin descripción"), 
-                     "pubDate": a.get("pubDate", "Fecha no disponible"), "link": a.get("link", "#")} for a in sorted(articles, key=lambda x: x.get("pubDate", ""), reverse=True)[:5]]
-        elif resp.status_code in [422, 429, 401]:
-            st.error(f"Error NewsData.io {resp.status_code}: {resp.text}. No se pueden mostrar noticias.")
-            return []
-        else:
-            st.warning(f"Error NewsData.io {resp.status_code}. No se pueden mostrar noticias.")
-            return []
-    except requests.exceptions.ConnectionError as conn_error:
-        st.error(f"Error de conexión con NewsData.io: {conn_error}. No se pueden mostrar noticias.")
-        return []
-    except Exception as e:
-        st.error(f"Error inesperado en NewsData.io: {e}. No se pueden mostrar noticias.")
-        return []
-
 # Realiza predicciones usando LSTM con integración de sentimiento
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None):
     df = load_coincap_data(coin_id, start_ms, end_ms)
@@ -279,7 +229,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     if X is None:
         return None
 
-    split, val_split = int(len(X) * 0.8), int(len(X[:split]) * 0.9)
+    split = int(len(X) * 0.8)  # Corrección: inicializa split explícitamente antes de usarlo
+    val_split = int(len(X[:split]) * 0.9)  # Usa el valor de split ya inicializado
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
     X_val, y_val = X_train[val_split:], y_train[val_split:]
@@ -357,7 +308,7 @@ def main_app():
             st.subheader("Estadísticas Descriptivas de Precios")
             st.write(df_prices["close_price"].describe())
 
-    tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos", "📰 Noticias Recientes"])
+    tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos"])
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
@@ -419,21 +370,6 @@ def main_app():
             st.write("**NFA (Not Financial Advice):** Esto es solo información educativa, no un consejo financiero. Consulta a un experto antes de invertir.")
         else:
             st.info("Entrena el modelo para ver el análisis de sentimientos.")
-
-    with tabs[3]:
-        st.header("📰 Noticias Recientes de Criptomonedas")
-        news = get_recent_crypto_news(coinid_to_symbol[coin_id])
-        if news:
-            st.subheader(f"Últimas 5 Noticias sobre {crypto_name}")
-            for article in news:
-                with st.expander(f"**{article['title']}** - {article['pubDate']}", expanded=False):
-                    st.write(article['description'])
-                    if article['link']:
-                        st.markdown(f"[Leer más]({article['link']})", unsafe_allow_html=True)
-            news_df = pd.DataFrame(news)
-            st.dataframe(news_df[["title", "pubDate"]].style.format({"pubDate": "{:%Y-%m-%d %H:%M:%S}"}).set_properties(**{'background-color': '#2c2c3e', 'color': 'white', 'border-color': '#4a4a6a'}))
-        else:
-            st.info("No se encontraron noticias recientes. Verifica conexión, límites de API (200 créditos/día), o clave en Secrets.")
 
 if __name__ == "__main__":
     main_app()
