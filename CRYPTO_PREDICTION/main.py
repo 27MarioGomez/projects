@@ -19,7 +19,8 @@ from textblob import TextBlob
 import socket
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-import keras_tuner as kt  # Asegúrate de tener "keras-tuner" en requirements.txt
+import keras_tuner as kt
+import tweepy  # Usamos tweepy para integrar la API de Twitter
 
 # ------------------------------------------------------------------------------
 # Configuración inicial: certificados SSL y sesión requests
@@ -70,7 +71,7 @@ def load_coincap_data(coin_id, start_ms=None, end_ms=None):
     """
     Carga datos históricos desde CoinCap para la cripto dada.
     Se fuerza a incluir datos hasta 1 día después para obtener el precio más actual.
-    Eliminamos el volumen, ya que no se usa en el modelo.
+    Elimina el volumen, ya que no se usa en el modelo.
     """
     try:
         if start_ms is None or end_ms is None:
@@ -111,10 +112,17 @@ def create_sequences(data, window_size):
 # ------------------------------------------------------------------------------
 # MODELOS: LSTM y Ajuste dinámico de hiperparámetros
 # ------------------------------------------------------------------------------
-def build_lstm_model(input_shape, learning_rate=0.001, l2_lambda=0.01, lstm_units1=100, lstm_units2=80, dropout_rate=0.3, dense_units=50):
+def build_lstm_model(
+    input_shape,
+    learning_rate=0.001,
+    l2_lambda=0.01,
+    lstm_units1=100,
+    lstm_units2=80,
+    dropout_rate=0.3,
+    dense_units=50
+):
     """
     Construye un modelo LSTM con regularización y dropout.
-    Parametrizamos las capas LSTM para que se ajusten según la volatilidad u otra lógica.
     """
     model = Sequential([
         LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
@@ -130,7 +138,6 @@ def build_lstm_model(input_shape, learning_rate=0.001, l2_lambda=0.01, lstm_unit
 def train_model(X_train, y_train, X_val, y_val, model, epochs, batch_size):
     """
     Entrena el modelo LSTM con callbacks para optimización.
-    Recibimos 'model' ya construido (posiblemente ajustado dinámicamente).
     """
     tf.keras.backend.clear_session()
     callbacks = [
@@ -150,34 +157,20 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs, batch_size):
 def get_dynamic_params(df, horizon_days, coin_id):
     """
     Ajusta parámetros del modelo en función de la volatilidad y datos.
-    Devuelve un diccionario con hyperparams que iremos afinando.
+    Devuelve un diccionario con hiperparámetros.
     """
-    # Extraemos la volatilidad real de los datos
     real_volatility = df["close_price"].pct_change().std()
     base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-
-    # Lógica extra: combinamos la volatilidad "definida" y la "real"
     combined_volatility = (real_volatility + base_volatility) / 2.0
 
-    # Ajustamos la ventana y epochs en base al horizon y la volatilidad
-    # De manera más flexible que antes
     window_size = int(max(15, min(60, horizon_days * (1.0 + combined_volatility * 5))))
-    epochs = int(max(30, min(200, (len(df) / 70) + combined_volatility * 300)))
+    epochs = int(max(40, min(250, (len(df) / 70) + combined_volatility * 400)))
     batch_size = int(max(16, min(64, (combined_volatility * 500) + 16)))
-
-    # Ajustamos param LSTM
-    # Ejemplo: si hay más volatilidad => más neuronas
-    # Nota: Límite 200 para no exagerar
     lstm_units1 = int(max(50, min(200, 100 + (combined_volatility * 400))))
     lstm_units2 = int(max(30, min(150, 80 + (combined_volatility * 200))))
     dropout_rate = 0.3 if combined_volatility < 0.1 else 0.4
     dense_units = int(max(30, min(100, 50 + (combined_volatility * 100))))
-
-    # Learning rate
-    # Menor LR si la volatilidad es alta
     learning_rate = 0.0005 if combined_volatility < 0.08 else 0.0002
-
-    # L2 regularization
     l2_lambda = 0.01 if combined_volatility < 0.07 else 0.02
 
     return {
@@ -223,62 +216,47 @@ def get_coingecko_community_activity(coin_id):
         return 50.0
 
 # ------------------------------------------------------------------------------
-# LUNARCRUSH (Noticias y Sentimiento)
+# INTEGRACIÓN CON TWITTER API V2 USANDO TWEEPY
 # ------------------------------------------------------------------------------
-@st.cache_data(ttl=3600)
-def get_lunarcrush_news(coin_symbol):
+def get_twitter_news(coin_symbol):
     """
-    Obtiene las noticias más recientes de LunarCrush para la cripto dada.
-    Devuelve una lista de artículos con título, descripción, fecha y link.
+    Obtiene tweets recientes usando Tweepy (Twitter API v2).
+    Se buscan tweets que contengan el símbolo de la cripto y la palabra "crypto",
+    se excluyen retweets y se filtra en inglés.
     """
-    key = st.secrets.get("lunarcrush_key", "")
-    if not key:
-        st.error("No se encontró la API key de LunarCrush en Secrets ('lunarcrush_key').")
+    bearer_token = st.secrets.get("twitter_bearer", "AAAAAAAAAAAAAAAAAAAAAATkzgEAAAAAeiHtpBrRwWRCHK7PcVHWEnJ5npI%3D1m3yhQZlXQkWvPS4NuD7NcPWPdm8dHUeNQCqUkJoiUfGuIth2f")
+    if not bearer_token:
+        st.error("No se encontró el token 'twitter_bearer' en Secrets.")
         return []
-
-    url = (
-        "https://api.lunarcrush.com/v2"
-        f"?data=feeds&key={key}&type=news&symbol={coin_symbol}&limit=5"
-    )
     try:
-        resp = session.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "data" not in data or not data["data"]:
-                return []
-            articles = []
-            for item in data["data"]:
-                title = item.get("title", "Sin título")
-                desc = item.get("description", "")
-                pub_ts = item.get("published_at", None)
-                pub_date = datetime.utcfromtimestamp(pub_ts).strftime("%Y-%m-%d %H:%M:%S") if pub_ts else "Fecha no disponible"
-                link = item.get("url", "#")
-                articles.append({
-                    "title": title,
-                    "description": desc,
-                    "pubDate": pub_date,
-                    "link": link
+        client = tweepy.Client(bearer_token=bearer_token)
+        query = f"{coin_symbol} crypto -is:retweet lang:en"
+        # Límite máximo de resultados = 10
+        response = client.search_recent_tweets(query=query, tweet_fields=["created_at","text","id"], max_results=10)
+        tweets = []
+        if response.data:
+            for tweet in response.data:
+                tweets.append({
+                    "text": tweet.text,
+                    "pubDate": tweet.created_at.strftime("%Y-%m-%d %H:%M:%S") if tweet.created_at else "",
+                    "link": f"https://twitter.com/i/web/status/{tweet.id}"
                 })
-            return articles
-        else:
-            st.warning(f"Error {resp.status_code} al conectar con LunarCrush.")
-            return []
+        return tweets
     except Exception as e:
-        st.error(f"Error al obtener noticias de LunarCrush: {e}")
+        st.error(f"Error al obtener tweets: {e}")
         return []
 
-@st.cache_data(ttl=3600)
-def get_lunarcrush_sentiment(coin_symbol):
+def get_twitter_sentiment(coin_symbol):
     """
-    Calcula un sentimiento promedio a partir de las noticias de LunarCrush.
-    Retorna 50.0 si no hay noticias o si ocurre un error.
+    Calcula el sentimiento promedio a partir de los tweets obtenidos por Tweepy.
+    Retorna 50.0 si no hay tweets.
     """
-    news = get_lunarcrush_news(coin_symbol)
-    if not news:
+    tweets = get_twitter_news(coin_symbol)
+    if not tweets:
         return 50.0
     sentiments = []
-    for article in news:
-        text = (article["title"] or "") + " " + (article["description"] or "")
+    for tweet in tweets:
+        text = tweet["text"]
         blob = TextBlob(text)
         sentiment = blob.sentiment.polarity  # Valor entre -1 y 1
         sentiment_score = 50 + (sentiment * 50)  # Normalizado a 0-100
@@ -287,23 +265,23 @@ def get_lunarcrush_sentiment(coin_symbol):
 
 def get_crypto_sentiment_combined(coin_id):
     """
-    Obtiene el sentimiento de la cripto (LunarCrush) y del mercado (Fear & Greed),
+    Obtiene el sentimiento de la cripto (usando Twitter vía Tweepy) y del mercado (Fear & Greed),
     y calcula un valor de gauge:
         gauge_val = 50 + (crypto_sent - market_sent), forzando a [0, 100].
     """
     symbol = coinid_to_symbol[coin_id]
-    crypto_sent = get_lunarcrush_sentiment(symbol)
+    crypto_sent = get_twitter_sentiment(symbol)
     market_sent = get_fear_greed_index()
     gauge_val = 50 + (crypto_sent - market_sent)
     gauge_val = max(0, min(100, gauge_val))
     return crypto_sent, market_sent, gauge_val
 
 # ------------------------------------------------------------------------------
-# KERAS TUNER
+# KERAS TUNER (Hyperband)
 # ------------------------------------------------------------------------------
 def build_model_tuner(input_shape):
     """
-    Función modelo para Keras Tuner. Ajusta hiperparámetros LSTM.
+    Función modelo para Keras Tuner. Ajusta hiperparámetros LSTM con Hyperband.
     """
     def model_builder(hp):
         lstm_units1 = hp.Int('lstm_units1', min_value=50, max_value=200, step=50, default=100)
@@ -332,7 +310,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     """
     Entrena el modelo LSTM y realiza predicciones futuras, integrando
     el factor de sentimiento (gauge_val/100) en cada timestep.
-    Si tune==True, se optimizan los hiperparámetros con Keras Tuner.
+    Si tune==True, se optimizan los hiperparámetros con Keras Tuner (Hyperband).
     """
     df = load_coincap_data(coin_id, start_ms, end_ms)
     if df is None or df.empty:
@@ -342,7 +320,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     crypto_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
     sentiment_factor = gauge_val / 100.0
 
-    # Ajuste dinámico (nuestro "mini-autoML" manual)
     params = get_dynamic_params(df, horizon_days, coin_id)
     window_size = params["window_size"]
     epochs = params["epochs"]
@@ -360,7 +337,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     if X is None:
         return None
 
-    # División de datos: train, validation y test
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -368,7 +344,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Añadir el factor de sentimiento a cada timestep
     X_train_adj = np.concatenate([X_train, np.full((X_train.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_val_adj   = np.concatenate([X_val,   np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_test_adj  = np.concatenate([X_test,  np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
@@ -376,19 +351,18 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     input_shape = (window_size, 2)
 
     if tune:
-        # Búsqueda con Keras Tuner
-        tuner = kt.RandomSearch(
+        tuner = kt.Hyperband(
             build_model_tuner(input_shape),
             objective='val_loss',
-            max_trials=3,   # Ajusta si quieres más o menos
-            executions_per_trial=1,
+            max_epochs=50,
+            factor=3,
             directory='kt_dir',
-            project_name='crypto_prediction'
+            project_name='crypto_prediction_hb'
         )
-        tuner.search(X_train_adj, y_train, validation_data=(X_val_adj, y_val), epochs=20, batch_size=batch_size, verbose=0)
+        stop_early = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+        tuner.search(X_train_adj, y_train, validation_data=(X_val_adj, y_val), epochs=50, batch_size=batch_size, callbacks=[stop_early], verbose=0)
         lstm_model = tuner.get_best_models(num_models=1)[0]
     else:
-        # Creamos el modelo con parámetros dinámicos
         lstm_model = build_lstm_model(
             input_shape=input_shape,
             learning_rate=learning_rate,
@@ -400,14 +374,12 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
         )
         lstm_model, history = train_model(X_train_adj, y_train, X_val_adj, y_val, lstm_model, epochs, batch_size)
 
-    # Predicción en Test
     lstm_test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
     lstm_test_preds = scaler.inverse_transform(lstm_test_preds_scaled).flatten()
     y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
     lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
     lstm_mape = robust_mape(y_test_real, lstm_test_preds)
 
-    # Predicción Futura
     last_window = scaled_data[-window_size:]
     future_preds = []
     current_input = np.concatenate([
@@ -452,11 +424,10 @@ def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Modelo:**  
-    Esta plataforma utiliza un modelo avanzado de aprendizaje automático basado en redes LSTM (Long Short-Term Memory) 
-    para predecir precios futuros de criptomonedas como Bitcoin, Ethereum, Ripple y otras. Integra datos históricos 
-    de CoinCap y ajusta dinámicamente sus hiperparámetros según la volatilidad.  
-    Además, combina el índice Fear & Greed, la actividad de CoinGecko y las noticias de LunarCrush para estimar el sentimiento.  
-    Las predicciones se evalúan mediante RMSE y MAPE, y se muestran en gráficos interactivos.
+    Esta plataforma utiliza un avanzado modelo LSTM para predecir precios futuros de criptomonedas como Bitcoin, Ethereum, Ripple y más.  
+    Se integra un ajuste dinámico de hiperparámetros (incluyendo Keras Tuner con Hyperband) basado en la volatilidad y datos históricos de CoinCap.  
+    Además, se estima el sentimiento del mercado combinando el índice Fear & Greed y el sentimiento extraído de tweets (vía Tweepy).  
+    Las predicciones se evalúan con RMSE y MAPE, y se muestran en gráficos interactivos.
     """)
 
     # Sidebar
@@ -471,10 +442,10 @@ def main_app():
         start_date = st.sidebar.date_input("Fecha de inicio", default_start.date())
         end_date = st.sidebar.date_input("Fecha de fin", default_end.date())
         if start_date > end_date:
-            st.sidebar.error("La fecha de inicio no puede ser posterior a la fecha de fin.")
+            st.sidebar.error("La fecha de inicio no puede ser posterior a la de fin.")
             return
         if (end_date - start_date).days > 7:
-            st.sidebar.warning("El rango excede 7 días. Se ajustará al máximo (7).")
+            st.sidebar.warning("El rango excede 7 días. Se ajustará al máximo permitido (7 días).")
             end_date = start_date + timedelta(days=7)
         if start_date > datetime.utcnow().date():
             start_date = datetime.utcnow().date() - timedelta(days=7)
@@ -490,11 +461,11 @@ def main_app():
         start_ms = int(default_start.timestamp() * 1000)
         end_ms = int(end_date_with_offset.timestamp() * 1000)
 
-    optimize_hp = st.sidebar.checkbox("Optimizar hiperparámetros con Keras Tuner", value=False)
+    optimize_hp = st.sidebar.checkbox("Optimizar hiperparámetros (Keras Tuner Hyperband)", value=False)
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Ver estadísticas descriptivas", value=False)
 
-    # Carga y gráfica histórica
+    # Gráfico Histórico de CoinCap
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
     if df_prices is not None and not df_prices.empty:
         fig_hist = px.line(
@@ -513,12 +484,9 @@ def main_app():
     else:
         st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
 
-    # Tabs
     tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos", "📰 Noticias Recientes"])
 
-    # --------------------------------------------------------------------------
     # Tab 1: Entrenamiento y Test
-    # --------------------------------------------------------------------------
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
@@ -535,7 +503,7 @@ def main_app():
                 col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error relativo promedio.")
 
                 if not (len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0):
-                    st.error("No hay datos suficientes para la gráfica de Test.")
+                    st.error("No hay suficientes datos para la gráfica de Test.")
                     st.session_state["result"] = result
                     return
 
@@ -569,9 +537,7 @@ def main_app():
                 st.plotly_chart(fig_test, use_container_width=True)
                 st.session_state["result"] = result
 
-    # --------------------------------------------------------------------------
     # Tab 2: Predicción de Precios
-    # --------------------------------------------------------------------------
     with tabs[1]:
         st.header(f"🔮 Predicción de Precios - {crypto_name}")
         if "result" in st.session_state and isinstance(st.session_state["result"], dict):
@@ -606,9 +572,7 @@ def main_app():
         else:
             st.info("Entrena el modelo primero.")
 
-    # --------------------------------------------------------------------------
     # Tab 3: Análisis de Sentimientos
-    # --------------------------------------------------------------------------
     with tabs[2]:
         st.header("📊 Análisis de Sentimientos")
         if "result" in st.session_state:
@@ -623,9 +587,6 @@ def main_app():
                     market_sent = result["market_sent"]
                     gauge_val   = result["gauge_val"]
 
-                    # Texto dinámico para un público no técnico
-                    # Dependiendo de gauge_val, clasificamos en:
-                    # 0-20 Muy Bearish, 20-40 Bearish, 40-60 Neutral, 60-80 Bullish, 80-100 Muy Bullish
                     if gauge_val < 20:
                         gauge_text = "Muy Bearish"
                     elif gauge_val < 40:
@@ -637,14 +598,12 @@ def main_app():
                     else:
                         gauge_text = "Muy Bullish"
 
-                    # Creamos el gauge
                     fig_sentiment = go.Figure(go.Indicator(
                         mode="gauge+number",
                         value=gauge_val,
                         number={'suffix': "", "font": {"size": 36}},
                         gauge={
                             "axis": {"range": [0, 100], "tickwidth": 2, "tickcolor": "#fff"},
-                            # Cambiamos la barra a un color claro para resaltar
                             "bar": {"color": "LightSkyBlue"},
                             "bgcolor": "#2c2c3e",
                             "borderwidth": 2,
@@ -681,23 +640,21 @@ def main_app():
                     st.write(f"**Sentimiento Mercado (Fear & Greed):** {market_sent:.2f}")
                     st.write(f"**Gauge Value:** {gauge_val:.2f} → **{gauge_text}**")
                     if gauge_val > 50:
-                        st.write("**Tendencia:** El sentimiento de esta cripto está por encima del mercado. Es posible un escenario bullish.")
+                        st.write("**Tendencia:** El sentimiento de esta cripto está por encima del mercado. Escenario bullish posible.")
                     else:
-                        st.write("**Tendencia:** El sentimiento de esta cripto está por debajo o igual al mercado. Prudencia recomendada.")
+                        st.write("**Tendencia:** El sentimiento de esta cripto está por debajo o igual al del mercado. Se recomienda precaución.")
             else:
                 st.error("El resultado almacenado no es válido. Entrena el modelo nuevamente.")
         else:
             st.info("Entrena el modelo para ver el análisis de sentimientos.")
 
-    # --------------------------------------------------------------------------
-    # Tab 4: Noticias Recientes (vía LunarCrush)
-    # --------------------------------------------------------------------------
+    # Tab 4: Noticias Recientes (vía Twitter con Tweepy)
     with tabs[3]:
         st.header("📰 Noticias Recientes de Criptomonedas")
         symbol = coinid_to_symbol[coin_id]
-        news = get_lunarcrush_news(symbol)
-        if news:
-            st.subheader(f"Últimas noticias sobre {crypto_name}")
+        tweets = get_twitter_news(symbol)
+        if tweets:
+            st.subheader(f"Últimos tweets sobre {crypto_name}")
             st.markdown(
                 """
                 <style>
@@ -727,25 +684,21 @@ def main_app():
                 unsafe_allow_html=True
             )
             st.markdown("<div class='news-container'>", unsafe_allow_html=True)
-            for article in news:
-                title = article["title"]
-                desc = article["description"]
-                pub_date = article["pubDate"]
-                link = article["link"]
+            for tweet in tweets:
                 st.markdown(
                     f"""
                     <div class='news-item'>
-                        <h4>{title}</h4>
-                        <p><em>{pub_date}</em></p>
-                        <p>{desc}</p>
-                        <p><a href='{link}' target='_blank'>Leer más</a></p>
+                        <h4>Tweet</h4>
+                        <p><em>{tweet['pubDate']}</em></p>
+                        <p>{tweet['text']}</p>
+                        <p><a href="{tweet['link']}" target="_blank">Ver tweet</a></p>
                     </div>
                     """,
                     unsafe_allow_html=True
                 )
             st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.warning("No se encontraron noticias recientes en LunarCrush o hubo un error.")
+            st.warning("No se encontraron tweets recientes o hubo un error.")
 
 # ------------------------------------------------------------------------------
 # MAIN

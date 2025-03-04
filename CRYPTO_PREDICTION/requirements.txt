@@ -10,3 +10,4 @@ statsmodels
 prophet
 textblob
 keras-tuner
+tweepy
