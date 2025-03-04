@@ -15,19 +15,15 @@ import requests
 import certifi
 import os
 from sklearn.metrics import mean_squared_error
-from textblob import TextBlob
-import socket
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
 
 # Configura certificados SSL para solicitudes HTTPS seguras
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
-retry_strategy = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-adapter = HTTPAdapter(max_retries=retry_strategy)
+retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
-# Define diccionarios de mapeo para criptomonedas y características de volatilidad
+# Define diccionarios de mapeo para criptomonedas y características
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin", "Ethereum (ETH)": "ethereum", "Ripple (XRP)": "xrp",
     "Binance Coin (BNB)": "binance-coin", "Cardano (ADA)": "cardano", "Solana (SOL)": "solana",
@@ -131,7 +127,7 @@ def get_fear_greed_index():
     try:
         return float(session.get("https://api.alternative.me/fng/?format=json", timeout=10).json()["data"][0]["value"])
     except Exception:
-        st.warning("No se pudo obtener Fear & Greed Index. Usando valor por defecto 50.0")
+        st.warning("No se pudo obtener Fear & Greed Index. Usando valor por defecto.")
         return 50.0
 
 # Obtiene actividad comunitaria desde CoinGecko
@@ -146,79 +142,36 @@ def get_coingecko_community_activity(coin_id):
         return 50.0
 
 # Combina sentimiento de múltiples fuentes ajustado por volatilidad
-def get_crypto_sentiment_combined(coin_id, news_sentiment=None):
+def get_crypto_sentiment_combined(coin_id, sentiment_value=None):
     fg = get_fear_greed_index()
     cg = get_coingecko_community_activity(coin_id)
     volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-    if volatility > 0.07:  # Criptos volátiles (XRP, DOGE)
-        fg_weight, cg_weight, news_weight = 0.15, 0.45, 0.40
-    else:  # Criptos estables (BTC, ETH)
-        fg_weight, cg_weight, news_weight = 0.50, 0.30, 0.20
-    news_sent = 50.0 if news_sentiment is None or pd.isna(news_sentiment) else float(news_sentiment)
-    combined = (fg * fg_weight + cg * cg_weight + news_sent * news_weight)
-    return max(0, min(100, combined))
 
-# Obtiene y analiza sentimiento de noticias usando NewsData.io
-@st.cache_data(ttl=86400)
-def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
-    if start_date is None or end_date is None:
-        end_date, start_date = datetime.now().date(), end_date - timedelta(days=7)
-    if (end_date - start_date).days > 7:
-        start_date = end_date - timedelta(days=7)
-    if start_date > datetime.now().date() or end_date > datetime.now().date():
-        start_date, end_date = datetime.now().date() - timedelta(days=7), datetime.now().date()
-    
-    api_key = st.secrets.get("news_data_key", "pub_7227626d8277642d9399e67d37a74d463f7cc")
-    if not api_key:
-        st.error("API key de NewsData.io no encontrada en Secrets. Usando valor por defecto.")
-        return 50.0
-    
-    query = f"{coin_symbol} AND (price OR market OR regulation)"
-    url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=5&category=crypto"
-    
-    try:
-        try:
-            socket.getaddrinfo('newsdata.io', 443)
-        except socket.gaierror as dns_error:
-            st.error(f"Error DNS para newsdata.io: {dns_error}. Usando valor por defecto.")
-            return 50.0
-        
-        resp = session.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code == 200:
-            data = resp.json()
-            articles = data.get("results", [])
-            if not articles:
-                return 50.0
-            sentiments = []
-            for article in articles[:5]:
-                text = (article.get("title", "") + " " + article.get("description", "")).strip()
-                if text and any(k in text.lower() for k in ["price", "market", "regulation"]):
-                    sentiment = TextBlob(text).sentiment.polarity
-                    sentiments.append(50 + (sentiment * 50))
-            return np.mean(sentiments) if sentiments else 50.0
-        elif resp.status_code in [422, 429, 401]:
-            st.error(f"Error NewsData.io {resp.status_code}: {resp.text}. Usando valor por defecto.")
-            return 50.0
-        else:
-            st.warning(f"Error NewsData.io {resp.status_code}. Usando valor por defecto 50.0")
-            return 50.0
-    except requests.exceptions.ConnectionError as conn_error:
-        st.error(f"Error de conexión con NewsData.io: {conn_error}. Usando valor por defecto.")
-        return 50.0
-    except Exception as e:
-        st.error(f"Error inesperado en NewsData.io: {e}. Usando valor por defecto.")
-        return 50.0
+    # Ajusta pesos según volatilidad: más peso a Fear & Greed y CoinGecko para criptos estables
+    if volatility > 0.07:  # Criptos volátiles (e.g., XRP, DOGE)
+        fg_weight = 0.15  # Menos peso al mercado global
+        cg_weight = 0.45  # Más peso a la actividad comunitaria
+        sentiment_weight = 0.40  # Más peso a un valor simulado para mantener compatibilidad
+    else:  # Criptos estables (e.g., BTC, ETH)
+        fg_weight = 0.50  # Más peso al mercado global
+        cg_weight = 0.30  # Menos peso a la actividad comunitaria
+        sentiment_weight = 0.20  # Menos peso a un valor simulado
 
-# Realiza predicciones usando LSTM con integración de sentimiento
+    # Usa un valor simulado o por defecto si no hay noticias
+    sentiment = 50.0 if sentiment_value is None or pd.isna(sentiment_value) else float(sentiment_value)
+    combined_sentiment = (fg * fg_weight + cg * cg_weight + sentiment * sentiment_weight)
+    return max(0, min(100, combined_sentiment))  # Asegura rango 0-100
+
+# Predice precios usando LSTM con integración de sentimiento
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None):
     df = load_coincap_data(coin_id, start_ms, end_ms)
     if df is None:
         return None
     symbol = coinid_to_symbol[coin_id]
-    start_date = datetime.fromtimestamp(start_ms / 1000) if start_ms else datetime.now() - timedelta(days=7)
-    end_date = datetime.fromtimestamp(end_ms / 1000) if end_ms else datetime.now()
-    news_sent = get_news_sentiment(symbol, start_date.date(), end_date.date()) or 50.0
-    crypto_sent = get_crypto_sentiment_combined(coin_id, news_sent)
+
+    # Simula un sentimiento constante para mantener la lógica sin NewsData.io
+    sentiment_value = 50.0  # Valor neutral por defecto
+    crypto_sent = get_crypto_sentiment_combined(coin_id, sentiment_value)
     market_sent = get_fear_greed_index()
     sentiment_factor = (crypto_sent + market_sent) / 200.0
 
@@ -229,39 +182,59 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
     if X is None:
         return None
 
-    split = int(len(X) * 0.8)  # Corrección: inicializa split explícitamente antes de usarlo
-    val_split = int(len(X[:split]) * 0.9)  # Usa el valor de split ya inicializado
+    split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
+    val_split = int(len(X_train) * 0.9)
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    X_train_adj = np.concatenate([X_train, np.full((len(X_train), window_size, 1), sentiment_factor)], axis=-1)
-    X_val_adj = np.concatenate([X_val, np.full((len(X_val), window_size, 1), sentiment_factor)], axis=-1)
-    X_test_adj = np.concatenate([X_test, np.full((len(X_test), window_size, 1), sentiment_factor)], axis=-1)
+    # Ajusta dimensiones para incluir sentimiento
+    X_train_adj = np.concatenate([X_train, np.full((X_train.shape[0], window_size, 1), sentiment_factor)], axis=-1)
+    X_val_adj = np.concatenate([X_val, np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
+    X_test_adj = np.concatenate([X_test, np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
 
-    model, _ = train_model(X_train_adj, y_train, X_val_adj, y_val, (window_size, 2), epochs, batch_size)
-    test_preds_scaled = model.predict(X_test_adj, verbose=0).flatten()
-    test_preds = scaler.inverse_transform(test_preds_scaled.reshape(-1, 1)).flatten()
+    # Entrena el modelo LSTM
+    lstm_model, history = train_model(X_train_adj, y_train, X_val_adj, y_val, (window_size, 2), epochs, batch_size)
+    lstm_test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
+    lstm_test_preds = scaler.inverse_transform(lstm_test_preds_scaled).flatten()
     y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
-    rmse, mape = np.sqrt(mean_squared_error(y_test_real, test_preds)), robust_mape(y_test_real, test_preds)
+    lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
+    lstm_mape = robust_mape(y_test_real, lstm_test_preds)
 
+    # Predicciones futuras con sentimiento simulado
     last_window = scaled_data[-window_size:]
     future_preds = []
     current_input = np.concatenate([last_window.reshape(1, window_size, 1), np.full((1, window_size, 1), sentiment_factor)], axis=-1)
     for _ in range(horizon_days):
-        pred = model.predict(current_input, verbose=0)[0][0]
+        pred = lstm_model.predict(current_input, verbose=0)[0][0]
         future_preds.append(pred)
-        current_input = np.append(current_input[:, 1:, :], [[[pred, sentiment_factor]]], axis=1)
+        new_feature = np.copy(current_input[:, -1:, :])
+        new_feature[0, 0, 0] = pred
+        new_feature[0, 0, 1] = sentiment_factor
+        current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     future_preds = scaler.inverse_transform(np.array(future_preds).reshape(-1, 1)).flatten()
 
     last_date = df["ds"].iloc[-1]
     future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=horizon_days).tolist()
-    test_dates, real_prices = df["ds"].iloc[-len(test_preds):].values, df["close_price"].iloc[-len(test_preds):].values
 
-    return {"df": df, "test_preds": test_preds, "future_preds": future_preds, "rmse": rmse, "mape": mape,
-            "sentiment_factor": sentiment_factor, "symbol": symbol, "crypto_sent": crypto_sent, "market_sent": market_sent,
-            "future_dates": future_dates, "test_dates": test_dates, "real_prices": real_prices}
+    test_dates = df["ds"].iloc[-len(lstm_test_preds):].values  # Fechas para el set de test
+    real_prices = df["close_price"].iloc[-len(lstm_test_preds):].values  # Precios reales del set de test
+
+    return {
+        "df": df,
+        "test_preds": lstm_test_preds,
+        "future_preds": future_preds,
+        "rmse": lstm_rmse,
+        "mape": lstm_mape,
+        "sentiment_factor": sentiment_factor,
+        "symbol": symbol,
+        "crypto_sent": crypto_sent,
+        "market_sent": market_sent,
+        "future_dates": future_dates,
+        "test_dates": test_dates,
+        "real_prices": real_prices
+    }
 
 # Configura y ejecuta la aplicación de predicción de precios de criptomonedas
 def main_app():
@@ -269,17 +242,18 @@ def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Modelo:**  
-    Esta plataforma utiliza un modelo avanzado de aprendizaje automático basado en redes LSTM (Long Short-Term Memory) para predecir precios futuros de criptomonedas como Bitcoin, Ethereum, Ripple y otras. El modelo integra datos históricos de precios y volúmenes de CoinCap, abarcando hasta dos años de información diaria, ajustando dinámicamente sus hiperparámetros según la volatilidad específica de cada criptomoneda. Además, incorpora un análisis de sentimiento dinámico que combina el índice Fear & Greed para el mercado global, la actividad comunitaria en redes sociales (Twitter y Reddit) de CoinGecko, y noticias específicas de criptomonedas obtenidas a través de NewsData.io, mejorando la precisión al considerar el estado de ánimo del mercado, los inversores y eventos externos. Las predicciones se complementan con métricas clave como RMSE y MAPE para evaluar la precisión, y se presentan en gráficos interactivos y tablas para una experiencia clara y detallada.
+    Esta plataforma utiliza un modelo avanzado de aprendizaje automático basado en redes LSTM (Long Short-Term Memory) para predecir precios futuros de criptomonedas como Bitcoin, Ethereum, Ripple y otras. El modelo integra datos históricos de precios y volúmenes de CoinCap, abarcando hasta dos años de información diaria, ajustando dinámicamente sus hiperparámetros (como tamaño de ventana, épocas, tamaño de lote y tasa de aprendizaje) según la volatilidad específica de cada criptomoneda. Además, incorpora un análisis de sentimiento dinámico que combina el índice Fear & Greed para el mercado global y la actividad comunitaria en redes sociales (Twitter y Reddit) de CoinGecko para cada cripto, mejorando la precisión al considerar el estado de ánimo del mercado y los inversores. Las predicciones se complementan con métricas clave como RMSE y MAPE para evaluar la precisión, y se presentan en gráficos interactivos y tablas para una experiencia clara y detallada.
 
-    Fuentes de datos: CoinCap, Fear & Greed Index, CoinGecko, NewsData.io
+    Fuentes de datos: CoinCap, Fear & Greed Index, CoinGecko
     """)
 
+    # Sidebar para configuración de predicciones
     st.sidebar.title("Configura tu Predicción")
     crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
-    default_end = datetime.now()  # Inicializa explícitamente para evitar UnboundLocalError
-    default_start = default_end - timedelta(days=7)  # Reducido a 7 días por defecto para mayor eficiencia
+    default_end = datetime.now()
+    default_start = default_end - timedelta(days=7)  # Rango por defecto de 7 días
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start.date())
         end_date = st.sidebar.date_input("Fecha de fin", default_end.date())
@@ -287,7 +261,7 @@ def main_app():
             st.sidebar.error("La fecha de inicio no puede ser posterior a la fecha de fin.")
             return
         if (end_date - start_date).days > 7:
-            st.sidebar.warning("Rango excede 7 días. Ajustando al máximo permitido.")
+            st.sidebar.warning("El rango excede 7 días. Ajustando al máximo permitido.")
             end_date = start_date + timedelta(days=7)
         if start_date > datetime.now().date() or end_date > datetime.now().date():
             start_date, end_date = datetime.now().date() - timedelta(days=7), datetime.now().date()
@@ -296,78 +270,149 @@ def main_app():
     else:
         start_ms, end_ms = int(default_start.timestamp() * 1000), int(default_end.timestamp() * 1000)
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
-    st.sidebar.markdown("**Los hiperparámetros se ajustan dinámicamente según datos y volatilidad.**")
+    st.sidebar.markdown("**Los hiperparámetros se ajustan automáticamente según los datos.**")
     show_stats = st.sidebar.checkbox("Ver estadísticas descriptivas", value=False)
 
+    # Gráfico histórico de precios
     df_prices = load_coincap_data(coin_id, start_ms, end_ms)
     if df_prices is not None:
-        fig_hist = px.line(df_prices, x="ds", y="close_price", title=f"Histórico de Precios - {crypto_name}", labels={"ds": "Fecha", "close_price": "Precio en USD"})
+        fig_hist = px.line(df_prices, x="ds", y="close_price", title=f"Histórico de {crypto_name}", labels={"ds": "Fecha", "close_price": "Precio en USD"})
         fig_hist.update_layout(template="plotly_dark")
         st.plotly_chart(fig_hist, use_container_width=True)
         if show_stats:
-            st.subheader("Estadísticas Descriptivas de Precios")
+            st.subheader("Estadísticas Descriptivas")
             st.write(df_prices["close_price"].describe())
 
+    # Pestañas de la aplicación
     tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos"])
     with tabs[0]:
         st.header("Entrenamiento del Modelo y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
-            with st.spinner("Procesando predicciones, esto puede tardar..."):
+            with st.spinner("Esto puede tardar un poco, por favor espera..."):
                 result = train_and_predict_with_sentiment(coin_id, horizon, start_ms, end_ms)
             if result:
-                st.success("Entrenamiento y predicción completados con éxito")
+                st.success("Entrenamiento y predicción completados!")
                 st.write(f"Sentimiento combinado de {result['symbol']}: {result['crypto_sent']:.2f}")
                 st.write(f"Sentimiento global del mercado: {result['market_sent']:.2f}")
-                st.write(f"Factor de sentimiento combinado: {result['sentiment_factor']:.2f}")
+                st.write(f"Factor combinado: {result['sentiment_factor']:.2f}")
                 col1, col2 = st.columns(2)
-                col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error promedio en dólares")
-                col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error relativo promedio en porcentaje")
+                col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error promedio en dólares.")
+                col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error relativo promedio.")
 
+                # Verifica dimensiones antes de graficar
                 if not (len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0):
-                    st.error("Datos insuficientes para mostrar gráfico de comparación.")
+                    st.error("No hay suficientes datos para mostrar el gráfico de entrenamiento y test.")
+                    st.session_state["result"] = result
                     return
+
+                # Asegura consistencia en longitudes de datos
                 min_len = min(len(result["test_dates"]), len(result["real_prices"]), len(result["test_preds"]))
                 if min_len < 1:
                     st.error("No hay datos suficientes para generar el gráfico.")
+                    st.session_state["result"] = result
                     return
-                result["test_dates"], result["real_prices"], result["test_preds"] = result["test_dates"][:min_len], result["real_prices"][:min_len], result["test_preds"][:min_len]
 
+                result["test_dates"] = result["test_dates"][:min_len]
+                result["real_prices"] = result["real_prices"][:min_len]
+                result["test_preds"] = result["test_preds"][:min_len]
+
+                # Crea gráfico de comparación con líneas curvas
                 fig_test = go.Figure()
-                fig_test.add_trace(go.Scatter(x=result["test_dates"], y=result["real_prices"], mode="lines", name="Precio Real", line=dict(color="#1f77b4", width=3, shape="spline")))
-                fig_test.add_trace(go.Scatter(x=result["test_dates"], y=result["test_preds"], mode="lines", name="Predicción", line=dict(color="#ff7f0e", width=3, dash="dash", shape="spline")))
-                fig_test.update_layout(title=f"Comparación Precio Real vs Predicción - {result['symbol']}", xaxis=dict(tickformat="%Y-%m-%d"), template="plotly_dark")
+                fig_test.add_trace(go.Scatter(
+                    x=result["test_dates"],
+                    y=result["real_prices"],
+                    mode="lines",
+                    name="Precio Real",
+                    line=dict(color="#1f77b4", width=3, shape="spline")  # Línea curva, azul oscuro, sólida
+                ))
+                fig_test.add_trace(go.Scatter(
+                    x=result["test_dates"],
+                    y=result["test_preds"],
+                    mode="lines",
+                    name="Predicción",
+                    line=dict(color="#ff7f0e", width=3, dash="dash", shape="spline")  # Línea curva, naranja, discontinua
+                ))
+                fig_test.update_layout(
+                    title=f"Comparación entre el precio real y la predicción: {result['symbol']}",
+                    xaxis=dict(tickformat="%Y-%m-%d"),  # Solo días en el eje X
+                    template="plotly_dark"  # Tema oscuro sin fondo adicional
+                )
                 st.plotly_chart(fig_test, use_container_width=True)
                 st.session_state["result"] = result
 
     with tabs[1]:
         st.header(f"🔮 Predicción de Precios - {crypto_name}")
-        if "result" in st.session_state and isinstance(st.session_state["result"], dict):
-            result = st.session_state["result"]
-            last_date, current_price = result["df"]["ds"].iloc[-1], result["df"]["close_price"].iloc[-1]
-            pred_series = np.concatenate([np.array([current_price]), result["future_preds"]])
-            future_dates_display = [last_date] + result["future_dates"]
-            fig_future = go.Figure(go.Scatter(x=future_dates_display, y=pred_series, mode="lines+markers", name="Predicción", line=dict(color="#ff7f0e", width=2, shape="spline")))
-            fig_future.update_layout(title=f"Predicción Futura ({horizon} días) - {result['symbol']}", template="plotly_dark", xaxis_title="Fecha", yaxis_title="Precio en USD", plot_bgcolor="#1e1e2f", paper_bgcolor="#1e1e2f")
-            st.plotly_chart(fig_future, use_container_width=True)
-            st.subheader("Valores Numéricos de Predicción")
-            st.dataframe(pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series}).style.format({"Predicción": "{:.2f}"}))
+        if "result" in st.session_state:
+            if isinstance(st.session_state["result"], dict):
+                result = st.session_state["result"]
+                last_date = result["df"]["ds"].iloc[-1]
+                current_price = result["df"]["close_price"].iloc[-1]
+                pred_series = np.concatenate(([current_price], result["future_preds"]))
+                future_dates_display = [last_date] + result["future_dates"]
+                fig_future = go.Figure()
+                fig_future.add_trace(go.Scatter(
+                    x=future_dates_display,
+                    y=pred_series,
+                    mode="lines+markers",
+                    name="Predicción",
+                    line=dict(color="#ff7f0e", width=2, shape="spline")  # Línea curva, naranja, con marcadores
+                ))
+                fig_future.update_layout(
+                    title=f"Predicción a Futuro ({horizon} días) - {result['symbol']}",
+                    template="plotly_dark",
+                    xaxis_title="Fecha",
+                    yaxis_title="Precio en USD",
+                    plot_bgcolor="#1e1e2f",
+                    paper_bgcolor="#1e1e2f"
+                )
+                st.plotly_chart(fig_future, use_container_width=True)
+                st.subheader("Valores Numéricos")
+                st.dataframe(pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series}).style.format({"Predicción": "{:.2f}"}))
+            else:
+                st.error("El resultado almacenado no es un diccionario válido. Por favor, entrena el modelo nuevamente.")
         else:
             st.info("Entrena el modelo primero para ver predicciones.")
 
     with tabs[2]:
         st.header("📊 Análisis de Sentimientos")
-        if "result" in st.session_state and isinstance(st.session_state["result"], dict):
-            result = st.session_state["result"]
-            crypto_sent, market_sent = result["crypto_sent"], result["market_sent"]
-            level = (crypto_sent - 50) / 5
-            sentiment_label = "Very Bearish" if level <= -5 else "Bearish" if level <= -2 else "Neutral" if -2 < level < 2 else "Bullish" if level <= 5 else "Very Bullish"
-            color = "#ff0000" if level <= -2 else "#ffd700" if -2 < level < 2 else "#00ff00" if level <= 5 else "#008000"
+        if "result" in st.session_state:
+            if isinstance(st.session_state["result"], dict):
+                result = st.session_state["result"]
+                crypto_sent, market_sent = result["crypto_sent"], result["market_sent"]
+                level = (crypto_sent - 50) / 5  # Escala el sentimiento para clasificar
+                sentiment_label = "Very Bearish" if level <= -5 else "Bearish" if level <= -2 else "Neutral" if -2 < level < 2 else "Bullish" if level <= 5 else "Very Bullish"
+                color = "#ff0000" if level <= -2 else "#ffd700" if -2 < level < 2 else "#00ff00" if level <= 5 else "#008000"
 
-            fig_sentiment = go.Figure(go.Indicator(mode="gauge+number", value=crypto_sent, domain={"x": [0, 1], "y": [0, 1]}, title={"text": f"Sentimiento - {result['symbol']}", "font": {"size": 24, "color": "#ffffff", "family": "Arial, sans-serif"}}, gauge={"axis": {"range": [0, 100], "tickvals": [0, 25, 50, 75, 100], "ticktext": ["Very Bearish", "Bearish", "Neutral", "Bullish", "Very Bullish"], "tickcolor": "#ffffff", "tickwidth": 2, "tickfont": {"size": 16, "color": "#ffffff"}}, "bar": {"color": color}, "bgcolor": "#2c2c3e", "borderwidth": 2, "bordercolor": "#4a4a6a", "steps": [{"range": [0, 25], "color": "#ff0000"}, {"range": [25, 50], "color": "#ffd700"}, {"range": [50, 75], "color": "#00ff00"}, {"range": [75, 100], "color": "#008000"}], "threshold": {"line": {"color": "#ffffff", "width": 4}, "thickness": 1, "value": crypto_sent}}, number={"font": {"size": 48, "color": "#ffffff", "family": "Arial, sans-serif"}}))
-            fig_sentiment.update_layout(template="plotly_dark", plot_bgcolor="#1e1e2f", paper_bgcolor="#1e1e2f", height=600, width=900, margin=dict(l=20, r=20, t=80, b=20))
-            st.plotly_chart(fig_sentiment, use_container_width=True)
-            st.write(f"**Estado:** {sentiment_label} (Mercado: {market_sent:.2f})")
-            st.write("**NFA (Not Financial Advice):** Esto es solo información educativa, no un consejo financiero. Consulta a un experto antes de invertir.")
+                # Crea un velocímetro realista con Plotly para análisis de sentimiento
+                fig_sentiment = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=crypto_sent,
+                    domain={"x": [0, 1], "y": [0, 1]},
+                    title={"text": f"Sentimiento - {result['symbol']}", "font": {"size": 24, "color": "#ffffff"}},
+                    gauge={
+                        "axis": {"range": [0, 100], "tickvals": [0, 25, 50, 75, 100], "ticktext": ["Very Bearish", "Bearish", "Neutral", "Bullish", "Very Bullish"], "tickcolor": "#ffffff", "tickwidth": 2, "tickfont": {"size": 16, "color": "#ffffff"}},
+                        "bar": {"color": color},
+                        "bgcolor": "#2c2c3e",
+                        "borderwidth": 2,
+                        "bordercolor": "#4a4a6a",
+                        "steps": [{"range": [0, 25], "color": "#ff0000"}, {"range": [25, 50], "color": "#ffd700"}, {"range": [50, 75], "color": "#00ff00"}, {"range": [75, 100], "color": "#008000"}],
+                        "threshold": {"line": {"color": "#ffffff", "width": 4}, "thickness": 1, "value": crypto_sent}
+                    },
+                    number={"font": {"size": 48, "color": "#ffffff"}}
+                ))
+                fig_sentiment.update_layout(
+                    template="plotly_dark",
+                    plot_bgcolor="#1e1e2f",
+                    paper_bgcolor="#1e1e2f",
+                    height=600,
+                    width=900,
+                    margin=dict(l=20, r=20, t=80, b=20)
+                )
+                st.plotly_chart(fig_sentiment, use_container_width=True)
+                st.write(f"**Estado:** {sentiment_label} (Mercado: {market_sent:.2f})")
+                st.write("**NFA (Not Financial Advice):** Esto es solo información educativa, no un consejo financiero. Consulta a un experto antes de invertir.")
+            else:
+                st.error("El resultado almacenado no es un diccionario válido. Por favor, entrena el modelo nuevamente.")
         else:
             st.info("Entrena el modelo para ver el análisis de sentimientos.")
 
