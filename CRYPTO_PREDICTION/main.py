@@ -212,7 +212,8 @@ def get_news_sentiment(coin_symbol, start_date=None, end_date=None):
 # Obtiene noticias recientes de criptomonedas
 @st.cache_data(ttl=3600)
 def get_recent_crypto_news(coin_symbol):
-    end_date, start_date = datetime.now().date(), end_date - timedelta(days=14)
+    end_date = datetime.now().date()  # Corrección: inicializa end_date explícitamente
+    start_date = end_date - timedelta(days=14)  # Rango de 14 días para capturar más noticias recientes
     api_key = st.secrets.get("news_data_key", "pub_7227626d8277642d9399e67d37a74d463f7cc")
     if not api_key:
         st.error("API key de NewsData.io no encontrada. No se pueden mostrar noticias.")
@@ -233,8 +234,8 @@ def get_recent_crypto_news(coin_symbol):
             data = resp.json()
             articles = data.get("results", [])
             if not articles:
-                query_simple, start_date = "crypto", end_date - timedelta(days=7)
-                url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q={requests.utils.quote(query_simple)}&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
+                start_date = end_date - timedelta(days=7)  # Reintento con rango reducido
+                url_retry = f"https://newsdata.io/api/1/news?apikey={api_key}&q=crypto&language=en&from_date={start_date.strftime('%Y-%m-%d')}&to_date={end_date.strftime('%Y-%m-%d')}&size=10&category=crypto&sort_by=pubDate"
                 resp_retry = session.get(url_retry, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
                 if resp_retry.status_code == 200:
                     articles = sorted(resp_retry.json().get("results", []), key=lambda x: x.get("pubDate", ""), reverse=True)[:5]
@@ -326,7 +327,7 @@ def main_app():
     crypto_name = st.sidebar.selectbox("Selecciona una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
-    default_end = datetime.now()  # Corrección: inicializa default_end explícitamente
+    default_end = datetime.now()  # Inicializa explícitamente para evitar UnboundLocalError
     default_start = default_end - timedelta(days=7)  # Reducido a 7 días por defecto para mayor eficiencia
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start.date())
