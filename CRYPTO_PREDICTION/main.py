@@ -11,6 +11,7 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
+import yfinance as yf
 import requests
 import certifi
 import os
@@ -22,14 +23,18 @@ from requests.adapters import HTTPAdapter
 import keras_tuner as kt
 import tweepy
 
-# --- Configuration for SSL and HTTP session ---
+# ---------------------------------------------------------------------------
+# Configuración inicial: certificados SSL y sesión HTTP
+# ---------------------------------------------------------------------------
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
 retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
-# --- Cryptocurrency identifiers and symbols ---
+# ---------------------------------------------------------------------------
+# Diccionarios: Identificadores y símbolos de las criptomonedas
+# ---------------------------------------------------------------------------
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -47,7 +52,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 coinid_to_coingecko = {v: v if v != "xrp" else "ripple" for v in coincap_ids.values()}
 
-# --- Predefined volatility characteristics per cryptocurrency ---
+# Características predefinidas de volatilidad para cada cripto
 crypto_characteristics = {
     "bitcoin": {"volatility": 0.03},
     "ethereum": {"volatility": 0.05},
@@ -63,52 +68,51 @@ crypto_characteristics = {
     "stellar": {"volatility": 0.05}
 }
 
-# --- Utility functions ---
+# ---------------------------------------------------------------------------
+# Funciones de utilidad
+# ---------------------------------------------------------------------------
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """Compute the Mean Absolute Percentage Error."""
+    """Calcula el MAPE evitando la división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
+# Función para cargar datos históricos desde yfinance
 @st.cache_data
-def load_coincap_data(coin_id, start_ms=None, end_ms=None):
+def load_crypto_data(coin_id, start_date, end_date):
     """
-    Load historical data from CoinCap for the given cryptocurrency.
-    Data is fetched up to one day ahead to include the latest available price.
-    Volume data is not processed.
+    Obtiene datos históricos de una criptomoneda usando yfinance.
+    Se espera que 'coin_id' sea la clave interna (p.ej., "bitcoin") y se traduce a ticker (p.ej., "BTC-USD").
+    Los datos se descargan para el rango [start_date, end_date].
     """
-    try:
-        if start_ms is None or end_ms is None:
-            end_date = datetime.utcnow() + timedelta(days=1)
-            start_date = end_date - timedelta(days=730)
-            start_ms = int(start_date.timestamp() * 1000)
-            end_ms = int(end_date.timestamp() * 1000)
-        url = f"https://api.coincap.io/v2/assets/{coin_id}/history?interval=d1&start={start_ms}&end={end_ms}"
-        resp = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, verify=certifi.where(), timeout=10)
-        if resp.status_code != 200:
-            st.warning(f"CoinCap: Error {resp.status_code}")
-            return None
-        df = pd.DataFrame(resp.json().get("data", []))
-        if df.empty or "time" not in df.columns or "priceUsd" not in df.columns:
-            st.warning("CoinCap: No valid data available")
-            return None
-        df["ds"] = pd.to_datetime(df["time"], unit="ms", errors="coerce")
-        df["close_price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-        df = df[["ds", "close_price"]].dropna().sort_values("ds").reset_index(drop=True)
-        return df
-    except Exception as e:
-        st.error(f"Error loading CoinCap data: {e}")
+    ticker_ids = {
+        "bitcoin": "BTC-USD",
+        "ethereum": "ETH-USD",
+        "xrp": "XRP-USD",
+        "binance-coin": "BNB-USD",
+        "cardano": "ADA-USD",
+        "solana": "SOL-USD",
+        "dogecoin": "DOGE-USD",
+        "polkadot": "DOT-USD",
+        "polygon": "MATIC-USD",
+        "litecoin": "LTC-USD",
+        "tron": "TRX-USD",
+        "stellar": "XLM-USD"
+    }
+    ticker = ticker_ids.get(coin_id)
+    if not ticker:
+        st.error("No se encontró el ticker para la criptomoneda.")
         return None
+    df = yf.download(ticker, start=start_date, end=end_date)
+    if df.empty:
+        st.warning("No se obtuvieron datos de yfinance.")
+        return None
+    df = df.reset_index()
+    df.rename(columns={"Date": "ds", "Close": "close_price"}, inplace=True)
+    df = df[["ds", "close_price"]]
+    return df
 
-def create_sequences(data, window_size):
-    """Generate sequences for LSTM model."""
-    if len(data) <= window_size:
-        return None, None
-    X, y = [], []
-    for i in range(window_size, len(data)):
-        X.append(data[i - window_size:i])
-        y.append(data[i, 0])
-    return np.array(X), np.array(y)
-
-# --- LSTM Model and dynamic hyperparameter adjustment ---
+# ---------------------------------------------------------------------------
+# Modelado y ajuste dinámico de hiperparámetros
+# ---------------------------------------------------------------------------
 def build_lstm_model(
     input_shape,
     learning_rate=0.001,
@@ -118,7 +122,7 @@ def build_lstm_model(
     dropout_rate=0.3,
     dense_units=50
 ):
-    """Build an LSTM model with regularization and dropout."""
+    """Construye un modelo LSTM con regularización y dropout."""
     model = Sequential([
         LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
         Dropout(dropout_rate),
@@ -131,21 +135,26 @@ def build_lstm_model(
     return model
 
 def train_model(X_train, y_train, X_val, y_val, model, epochs, batch_size):
-    """Train the LSTM model with early stopping and learning rate reduction."""
+    """Entrena el modelo LSTM con early stopping y reducción de la tasa de aprendizaje."""
     tf.keras.backend.clear_session()
     callbacks = [
         EarlyStopping(patience=10, restore_best_weights=True),
         ReduceLROnPlateau(patience=5, factor=0.5, min_lr=1e-6)
     ]
-    history = model.fit(X_train, y_train, validation_data=(X_val, y_val),
-                        epochs=epochs, batch_size=batch_size,
-                        callbacks=callbacks, verbose=0)
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=callbacks,
+        verbose=0
+    )
     return model, history
 
 def get_dynamic_params(df, horizon_days, coin_id):
     """
-    Dynamically adjust hyperparameters based on historical data volatility and prediction horizon.
-    Returns a dictionary with model hyperparameters.
+    Ajusta dinámicamente los hiperparámetros del modelo en función de la volatilidad y el histórico.
+    Devuelve un diccionario con hiperparámetros.
     """
     real_volatility = df["close_price"].pct_change().std()
     base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
@@ -173,20 +182,22 @@ def get_dynamic_params(df, horizon_days, coin_id):
         "l2_lambda": l2_lambda
     }
 
-# --- External Market Sentiment Data ---
+# ---------------------------------------------------------------------------
+# Datos de sentimiento del mercado
+# ---------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_fear_greed_index():
-    """Retrieve the market Fear & Greed index."""
+    """Obtiene el índice Fear & Greed del mercado."""
     try:
         data = session.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
         return float(data["data"][0]["value"])
     except Exception:
-        st.warning("Could not retrieve Fear & Greed Index. Using default 50.0.")
+        st.warning("No se pudo obtener el índice Fear & Greed. Se usará 50.0 por defecto.")
         return 50.0
 
 @st.cache_data(ttl=3600)
 def get_coingecko_community_activity(coin_id):
-    """Retrieve community activity from CoinGecko."""
+    """Obtiene la actividad comunitaria desde CoinGecko."""
     try:
         cg_id = coinid_to_coingecko.get(coin_id, coin_id)
         data = session.get(f"https://api.coingecko.com/api/v3/coins/{cg_id}?community_data=true", timeout=10).json()["community_data"]
@@ -195,17 +206,18 @@ def get_coingecko_community_activity(coin_id):
     except Exception:
         return 50.0
 
-# --- Twitter API Integration using Tweepy ---
+# ---------------------------------------------------------------------------
+# Integración con la API de Twitter mediante Tweepy
+# ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_twitter_news(coin_symbol):
     """
-    Retrieve recent tweets using Tweepy (Twitter API v2).
-    The query searches for tweets containing the cryptocurrency symbol and "crypto",
-    excluding retweets and filtering for English tweets.
+    Obtiene tweets recientes usando Tweepy (Twitter API v2).
+    Se buscan tweets que contengan el símbolo de la cripto y "crypto", se excluyen retweets y se filtra en inglés.
     """
     bearer_token = st.secrets.get("twitter_bearer")
     if not bearer_token:
-        st.error("Twitter bearer token not found in Secrets.")
+        st.error("No se encontró el token 'twitter_bearer' en Secrets.")
         return []
     try:
         client = tweepy.Client(bearer_token=bearer_token)
@@ -221,13 +233,13 @@ def get_twitter_news(coin_symbol):
                 })
         return tweets
     except Exception as e:
-        st.error(f"Error retrieving tweets: {e}")
+        st.error(f"Error al obtener tweets: {e}")
         return []
 
 def get_twitter_sentiment(coin_symbol):
     """
-    Compute the average sentiment from recent tweets using TextBlob.
-    Returns a sentiment score in the range [0, 100].
+    Calcula el sentimiento promedio a partir de los tweets obtenidos mediante Tweepy.
+    Retorna un puntaje en el rango [0, 100].
     """
     tweets = get_twitter_news(coin_symbol)
     if not tweets:
@@ -242,9 +254,10 @@ def get_twitter_sentiment(coin_symbol):
 
 def get_crypto_sentiment_combined(coin_id):
     """
-    Combine the cryptocurrency sentiment (from Twitter) and the market Fear & Greed index
-    to compute a gauge value:
-        gauge_val = 50 + (crypto_sent - market_sent), clamped to [0, 100].
+    Combina el sentimiento de la criptomoneda (extraído de Twitter mediante Tweepy)
+    con el índice Fear & Greed del mercado para calcular un valor gauge:
+        gauge_val = 50 + (crypto_sent - market_sent)
+    El valor se ajusta al rango [0, 100].
     """
     symbol = coinid_to_symbol[coin_id]
     crypto_sent = get_twitter_sentiment(symbol)
@@ -253,10 +266,12 @@ def get_crypto_sentiment_combined(coin_id):
     gauge_val = max(0, min(100, gauge_val))
     return crypto_sent, market_sent, gauge_val
 
-# --- Keras Tuner Integration (Hyperband) ---
+# ---------------------------------------------------------------------------
+# Keras Tuner (Hyperband)
+# ---------------------------------------------------------------------------
 def build_model_tuner(input_shape):
     """
-    Model builder for Keras Tuner using Hyperband.
+    Función modelo para Keras Tuner. Se ajustan los hiperparámetros del modelo LSTM utilizando Hyperband.
     """
     def model_builder(hp):
         lstm_units1 = hp.Int('lstm_units1', min_value=50, max_value=200, step=50, default=100)
@@ -278,13 +293,15 @@ def build_model_tuner(input_shape):
         return model
     return model_builder
 
-# --- Training and Prediction Pipeline ---
-def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_ms=None, tune=False):
+# ---------------------------------------------------------------------------
+# Entrenamiento y Predicción
+# ---------------------------------------------------------------------------
+def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date, tune=False):
     """
-    Train the LSTM model and perform future predictions, integrating the sentiment factor (gauge_val/100)
-    at each timestep. If 'tune' is True, hyperparameters are optimized using Keras Tuner (Hyperband).
+    Entrena el modelo LSTM y realiza predicciones futuras integrando el factor de sentimiento (gauge_val/100)
+    en cada timestep. Si 'tune' es True, se optimizan los hiperparámetros con Keras Tuner (Hyperband).
     """
-    df = load_coincap_data(coin_id, start_ms, end_ms)
+    df = load_crypto_data(coin_id, start_date, end_date)
     if df is None or df.empty:
         return None
 
@@ -354,10 +371,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
 
     last_window = scaled_data[-window_size:]
     future_preds = []
-    current_input = np.concatenate([
-        last_window.reshape(1, window_size, 1),
-        np.full((1, window_size, 1), sentiment_factor)
-    ], axis=-1)
+    current_input = np.concatenate([last_window.reshape(1, window_size, 1),
+                                      np.full((1, window_size, 1), sentiment_factor)], axis=-1)
     for _ in range(horizon_days):
         pred = lstm_model.predict(current_input, verbose=0)[0][0]
         future_preds.append(pred)
@@ -388,92 +403,91 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_ms=None, end_m
         "real_prices": real_prices
     }
 
-# --- Streamlit Application ---
+# ---------------------------------------------------------------------------
+# Aplicación Streamlit
+# ---------------------------------------------------------------------------
 def main_app():
-    st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
-    st.title("Crypto Price Predictions 🔮")
+    st.set_page_config(page_title="Predicción de Precios Cripto 🔮", layout="wide")
+    st.title("Predicción de Precios Cripto 🔮")
     st.markdown("""
-    **Model Overview:**  
-    This application uses an advanced LSTM model to predict future cryptocurrency prices (e.g., Bitcoin, Ethereum, Ripple).  
-    It dynamically adjusts hyperparameters (with optional optimization via Keras Tuner Hyperband) based on historical volatility data from CoinCap.  
-    Additionally, it computes market sentiment by combining the Fear & Greed index with tweet sentiment (retrieved via Tweepy).  
-    Predictions are evaluated using RMSE and MAPE and are visualized through interactive charts.
+    **Descripción del Modelo:**  
+    Esta aplicación utiliza un avanzado modelo LSTM para predecir precios futuros de criptomonedas (por ejemplo, Bitcoin, Ethereum, Ripple).  
+    Se ajustan dinámicamente los hiperparámetros (con optimización opcional mediante Keras Tuner Hyperband) según la volatilidad y datos históricos obtenidos con yfinance.  
+    Además, se estima el sentimiento del mercado combinando el índice Fear & Greed con el sentimiento extraído de tweets (vía Tweepy).  
+    Las predicciones se evalúan mediante RMSE y MAPE, y se visualizan en gráficos interactivos.
     """)
 
-    # Sidebar for configuration
-    st.sidebar.title("Prediction Configuration")
-    crypto_name = st.sidebar.selectbox("Select a cryptocurrency:", list(coincap_ids.keys()))
+    # Configuración en la barra lateral
+    st.sidebar.title("Configuración de Predicción")
+    crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
-    use_custom_range = st.sidebar.checkbox("Enable custom date range", value=False)
+    use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
     default_end = datetime.utcnow()
     default_start = default_end - timedelta(days=7)
 
     if use_custom_range:
-        start_date = st.sidebar.date_input("Start Date", default_start.date())
-        end_date = st.sidebar.date_input("End Date", default_end.date())
+        start_date = st.sidebar.date_input("Fecha de inicio", default_start.date())
+        end_date = st.sidebar.date_input("Fecha de fin", default_end.date())
         if start_date > end_date:
-            st.sidebar.error("Start date cannot be after end date.")
+            st.sidebar.error("La fecha de inicio no puede ser posterior a la de fin.")
             return
         if (end_date - start_date).days > 7:
-            st.sidebar.warning("Date range exceeds 7 days. It will be capped at 7 days.")
+            st.sidebar.warning("El rango excede 7 días. Se ajustará a 7 días.")
             end_date = start_date + timedelta(days=7)
         if start_date > datetime.utcnow().date():
             start_date = datetime.utcnow().date() - timedelta(days=7)
-            st.sidebar.warning("Start date cannot be in the future. Adjusted to 7 days back.")
+            st.sidebar.warning("La fecha de inicio no puede ser futura. Se ajusta a 7 días atrás.")
         if end_date > datetime.utcnow().date():
             end_date = datetime.utcnow().date()
-            st.sidebar.warning("End date cannot be in the future. Adjusted to today.")
-        end_date_with_offset = datetime.combine(end_date, datetime.min.time()) + timedelta(days=1)
-        start_ms = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
-        end_ms = int(end_date_with_offset.timestamp() * 1000)
+            st.sidebar.warning("La fecha de fin no puede ser futura. Se ajusta a hoy.")
+        end_date_with_offset = end_date + timedelta(days=1)
     else:
+        start_date = default_start
         end_date_with_offset = default_end + timedelta(days=1)
-        start_ms = int(default_start.timestamp() * 1000)
-        end_ms = int(end_date_with_offset.timestamp() * 1000)
 
-    optimize_hp = st.sidebar.checkbox("Optimize hyperparameters (Keras Tuner Hyperband)", value=False)
-    horizon = st.sidebar.slider("Days to predict:", 1, 60, 5)
-    show_stats = st.sidebar.checkbox("Show descriptive statistics", value=False)
+    optimize_hp = st.sidebar.checkbox("Optimizar hiperparámetros (Keras Tuner Hyperband)", value=False)
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
+    show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
 
-    # Historical Price Chart
-    df_prices = load_coincap_data(coin_id, start_ms, end_ms)
+    # Gráfico histórico de precios (usando yfinance)
+    df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     if df_prices is not None and not df_prices.empty:
         fig_hist = px.line(
             df_prices,
             x="ds",
             y="close_price",
-            title=f"Historical Prices - {crypto_name}",
-            labels={"ds": "Date", "close_price": "Price (USD)"}
+            title=f"Histórico de {crypto_name}",
+            labels={"ds": "Fecha", "close_price": "Precio (USD)"}
         )
         fig_hist.update_layout(template="plotly_dark")
         fig_hist.update_xaxes(tickformat="%Y-%m-%d")
         st.plotly_chart(fig_hist, use_container_width=True)
         if show_stats:
-            st.subheader("Descriptive Statistics")
+            st.subheader("Estadísticas Descriptivas")
             st.write(df_prices["close_price"].describe())
     else:
-        st.warning("No historical data available for the selected range.")
+        st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
 
-    tabs = st.tabs(["🤖 Training & Test", "🔮 Price Prediction", "📊 Sentiment Analysis", "📰 Recent Tweets"])
+    tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos", "📰 Noticias Recientes"])
 
-    # --- Tab 1: Training & Test ---
+    # Tab 1: Entrenamiento y Test
     with tabs[0]:
-        st.header("Training & Test Evaluation")
-        if st.button("Train Model and Predict"):
-            with st.spinner("Training model..."):
-                result = train_and_predict_with_sentiment(coin_id, horizon, start_ms, end_ms, tune=optimize_hp)
+        st.header("Entrenamiento y Evaluación en Test")
+        if st.button("Entrenar Modelo y Predecir"):
+            with st.spinner("Entrenando el modelo..."):
+                result = train_and_predict_with_sentiment(coin_id, horizon, start_date, end_date_with_offset, tune=optimize_hp)
             if result:
-                st.success("Training and prediction completed!")
-                st.write(f"Crypto Sentiment ({result['symbol']}): {result['crypto_sent']:.2f}")
-                st.write(f"Market Sentiment (Fear & Greed): {result['market_sent']:.2f}")
-                st.write(f"Combined Gauge: {result['gauge_val']:.2f}")
+                st.success("¡Entrenamiento y predicción completados!")
+                st.write(f"Sentimiento Cripto ({result['symbol']}): {result['crypto_sent']:.2f}")
+                st.write(f"Sentimiento Mercado (Fear & Greed): {result['market_sent']:.2f}")
+                st.write(f"Gauge Combinado: {result['gauge_val']:.2f}")
 
                 col1, col2 = st.columns(2)
-                col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Mean error in USD.")
-                col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Mean percentage error.")
+                col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error medio en USD.")
+                col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error porcentual medio.")
 
                 if not (len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0):
-                    st.error("Insufficient data for Test chart.")
+                    st.error("Datos insuficientes para la gráfica de Test.")
                     st.session_state["result"] = result
                     return
 
@@ -487,29 +501,29 @@ def main_app():
                     x=result["test_dates"],
                     y=result["real_prices"],
                     mode="lines",
-                    name="Actual Price",
+                    name="Precio Real",
                     line=dict(color="#1f77b4", width=3, shape="spline")
                 ))
                 fig_test.add_trace(go.Scatter(
                     x=result["test_dates"],
                     y=result["test_preds"],
                     mode="lines",
-                    name="Prediction",
+                    name="Predicción",
                     line=dict(color="#ff7f0e", width=3, dash="dash", shape="spline")
                 ))
                 fig_test.update_layout(
-                    title=f"Actual vs. Predicted Prices ({result['symbol']})",
+                    title=f"Precio Real vs. Predicción ({result['symbol']})",
                     xaxis=dict(tickformat="%Y-%m-%d"),
                     template="plotly_dark",
-                    xaxis_title="Date",
-                    yaxis_title="Price (USD)"
+                    xaxis_title="Fecha",
+                    yaxis_title="Precio (USD)"
                 )
                 st.plotly_chart(fig_test, use_container_width=True)
                 st.session_state["result"] = result
 
-    # --- Tab 2: Price Prediction ---
+    # Tab 2: Predicción de Precios
     with tabs[1]:
-        st.header(f"Price Prediction - {crypto_name}")
+        st.header(f"Predicción de Precios - {crypto_name}")
         if "result" in st.session_state and isinstance(st.session_state["result"], dict):
             result = st.session_state["result"]
             if result is not None:
@@ -522,38 +536,38 @@ def main_app():
                     x=future_dates_display,
                     y=pred_series,
                     mode="lines+markers",
-                    name="Prediction",
+                    name="Predicción",
                     line=dict(color="#ff7f0e", width=2, shape="spline")
                 ))
                 fig_future.update_layout(
-                    title=f"Future Price Prediction ({horizon} days) - {result['symbol']}",
+                    title=f"Predicción Futura ({horizon} días) - {result['symbol']}",
                     template="plotly_dark",
-                    xaxis_title="Date",
-                    yaxis_title="Price (USD)"
+                    xaxis_title="Fecha",
+                    yaxis_title="Precio (USD)"
                 )
                 st.plotly_chart(fig_future, use_container_width=True)
-                st.subheader("Numerical Results")
-                df_future = pd.DataFrame({"Date": future_dates_display, "Prediction": pred_series})
-                st.dataframe(df_future.style.format({"Prediction": "{:.2f}"}))
+                st.subheader("Resultados Numéricos")
+                df_future = pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series})
+                st.dataframe(df_future.style.format({"Predicción": "{:.2f}"}))
             else:
-                st.info("No result available. Train the model first.")
+                st.info("No se obtuvo resultado. Entrene el modelo primero.")
         else:
-            st.info("Train the model first.")
+            st.info("Entrene el modelo primero.")
 
-    # --- Tab 3: Sentiment Analysis ---
+    # Tab 3: Análisis de Sentimientos
     with tabs[2]:
-        st.header("Sentiment Analysis")
+        st.header("Análisis de Sentimientos")
         if "result" in st.session_state:
             if isinstance(st.session_state["result"], dict):
                 result = st.session_state["result"]
                 if result is None or "gauge_val" not in result:
-                    st.warning("No valid result. Please retrain the model.")
+                    st.warning("No se obtuvo un resultado válido. Reentrene el modelo.")
                 else:
                     crypto_sent = result["crypto_sent"]
                     market_sent = result["market_sent"]
                     gauge_val = result["gauge_val"]
                     if gauge_val < 20:
-                        gauge_text = "Very Bearish"
+                        gauge_text = "Muy Bearish"
                     elif gauge_val < 40:
                         gauge_text = "Bearish"
                     elif gauge_val < 60:
@@ -561,7 +575,7 @@ def main_app():
                     elif gauge_val < 80:
                         gauge_text = "Bullish"
                     else:
-                        gauge_text = "Very Bullish"
+                        gauge_text = "Muy Bullish"
 
                     fig_sentiment = go.Figure(go.Indicator(
                         mode="gauge+number",
@@ -589,31 +603,31 @@ def main_app():
                         domain={"x": [0, 1], "y": [0, 1]}
                     ))
                     fig_sentiment.update_layout(
-                        title={"text": f"Sentiment - {result['symbol']}", "x": 0.5, "xanchor": "center", "font": {"size": 24}},
+                        title={"text": f"Sentimiento - {result['symbol']}", "x": 0.5, "xanchor": "center", "font": {"size": 24}},
                         template="plotly_dark",
                         height=400,
                         margin=dict(l=20, r=20, t=80, b=20)
                     )
                     st.plotly_chart(fig_sentiment, use_container_width=True)
-                    st.write(f"**Crypto Sentiment ({result['symbol']}):** {crypto_sent:.2f}")
-                    st.write(f"**Market Sentiment (Fear & Greed):** {market_sent:.2f}")
+                    st.write(f"**Sentimiento Cripto ({result['symbol']}):** {crypto_sent:.2f}")
+                    st.write(f"**Sentimiento Mercado (Fear & Greed):** {market_sent:.2f}")
                     st.write(f"**Gauge Value:** {gauge_val:.2f} → **{gauge_text}**")
                     if gauge_val > 50:
-                        st.write("**Trend:** Crypto sentiment exceeds market sentiment. Bullish scenario possible.")
+                        st.write("**Tendencia:** El sentimiento de la cripto supera al del mercado. Posible escenario bullish.")
                     else:
-                        st.write("**Trend:** Crypto sentiment is at or below market sentiment. Caution advised.")
+                        st.write("**Tendencia:** El sentimiento de la cripto es igual o inferior al del mercado. Se recomienda precaución.")
             else:
-                st.error("Invalid result data. Please retrain the model.")
+                st.error("Datos de resultado inválidos. Reentrene el modelo.")
         else:
-            st.info("Train the model to view sentiment analysis.")
+            st.info("Entrene el modelo para ver el análisis de sentimientos.")
 
-    # --- Tab 4: Recent Tweets ---
+    # Tab 4: Noticias Recientes (usando Tweepy)
     with tabs[3]:
-        st.header("Recent Tweets on Cryptocurrency")
+        st.header("Noticias Recientes en Twitter")
         symbol = coinid_to_symbol[coin_id]
         tweets = get_twitter_news(symbol)
         if tweets:
-            st.subheader(f"Latest tweets on {crypto_name}")
+            st.subheader(f"Últimos tweets sobre {crypto_name}")
             st.markdown(
                 """
                 <style>
@@ -650,14 +664,14 @@ def main_app():
                         <h4>Tweet</h4>
                         <p><em>{tweet['pubDate']}</em></p>
                         <p>{tweet['text']}</p>
-                        <p><a href="{tweet['link']}" target="_blank">View Tweet</a></p>
+                        <p><a href="{tweet['link']}" target="_blank">Ver tweet</a></p>
                     </div>
                     """,
                     unsafe_allow_html=True
                 )
             st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.warning("No recent tweets found or an error occurred.")
+            st.warning("No se encontraron tweets recientes o ocurrió un error.")
 
 if __name__ == "__main__":
     main_app()
