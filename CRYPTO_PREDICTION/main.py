@@ -22,7 +22,7 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-# Importar módulos específicos de la librería ta
+# Importar módulos específicos de la librería ta (en lugar de TA-Lib)
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -61,7 +61,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # =============================================================================
-# INDICADORES TÉCNICOS CON TA
+# INDICADORES TÉCNICOS CON LA LIBRERÍA TA
 # =============================================================================
 
 def compute_indicators(df):
@@ -142,7 +142,7 @@ def create_sequences(data, window_size):
     return np.array(X), np.array(y)
 
 # =============================================================================
-# FUNCIÓN BUILD_LSTM_MODEL
+# BUILD_LSTM_MODEL Y TRAIN_MODEL
 # =============================================================================
 
 def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
@@ -158,8 +158,24 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
+def train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=32):
+    tf.keras.backend.clear_session()
+    callbacks = [
+        EarlyStopping(patience=10, restore_best_weights=True),
+        ReduceLROnPlateau(patience=5, factor=0.5, min_lr=1e-6)
+    ]
+    model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=callbacks,
+        verbose=0
+    )
+    return model
+
 # =============================================================================
-# TUNING DE HIPERPARÁMETROS CON OPTUNA
+# TUNING CON OPTUNA
 # =============================================================================
 
 def objective(trial, X_train, y_train, X_val, y_val, input_shape):
