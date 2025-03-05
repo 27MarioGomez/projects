@@ -10,9 +10,11 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
-# Activar Mixed Precision (si tienes GPU compatible, de lo contrario se ignorará)
-from tensorflow.keras.mixed_precision import set_global_policy
-set_global_policy('mixed_float16')
+
+# Activar mixed precision si hay GPU compatible
+if tf.config.list_physical_devices('GPU'):
+    from tensorflow.keras.mixed_precision import set_global_policy
+    set_global_policy('mixed_float16')
 
 import yfinance as yf
 import requests
@@ -33,7 +35,7 @@ from transformers import pipeline
 import optuna
 from xgboost import XGBRegressor
 
-# Reducir la verbosidad de Optuna
+# Reducir verbosidad de Optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -59,10 +61,8 @@ coincap_ids = {
 }
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
-# =============================================================================
-# Funciones de indicadores técnicos
-# =============================================================================
 def compute_indicators(df):
+    """Calcula indicadores técnicos y rellena valores faltantes."""
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
     df["rsi_norm"] = df["RSI"] / 100.0
     df["macd"] = MACD(close=df["close_price"], window_fast=12, window_slow=26, window_sign=9).macd()
@@ -75,14 +75,13 @@ def compute_indicators(df):
     df.ffill(inplace=True)
     return df
 
-# =============================================================================
-# Sentimiento avanzado con Transformers y TextBlob
-# =============================================================================
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
+    """Carga una pipeline de análisis de sentimiento de Transformers."""
     return pipeline("sentiment-analysis")
 
 def get_advanced_sentiment(text):
+    """Obtiene el sentimiento avanzado (Transformers) para un texto dado."""
     sentiment_pipe = load_sentiment_pipeline()
     result = sentiment_pipe(text)[0]
     if result["label"].upper() == "POSITIVE":
@@ -90,11 +89,9 @@ def get_advanced_sentiment(text):
     else:
         return 50 - (result["score"] * 50)
 
-# =============================================================================
-# Carga y preprocesamiento de datos históricos
-# =============================================================================
 @st.cache_data
 def load_crypto_data(coin_id, start_date=None, end_date=None):
+    """Descarga datos históricos de yfinance y calcula indicadores."""
     ticker_ids = {
         "bitcoin": "BTC-USD",
         "ethereum": "ETH-USD",
@@ -120,6 +117,7 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     if df.empty:
         st.warning("Datos no disponibles desde yfinance.")
         return None
+
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -130,19 +128,18 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     return df[["ds", "close_price", "volume", "high", "low", "RSI", "rsi_norm", "macd", "atr"]]
 
 def create_sequences(data, window_size):
+    """Crea secuencias para el entrenamiento LSTM."""
     if len(data) <= window_size:
         return None, None
     X, y = [], []
     for i in range(window_size, len(data)):
-        X.append(data[i-window_size:i])
-        y.append(data[i,0])
+        X.append(data[i - window_size:i])
+        y.append(data[i, 0])
     return np.array(X), np.array(y)
 
-# =============================================================================
-# Modelo LSTM y entrenamiento
-# =============================================================================
 def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
                      lstm_units1=128, lstm_units2=64, dropout_rate=0.3, dense_units=100):
+    """Construye y compila el modelo LSTM."""
     model = Sequential([
         LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
         Dropout(dropout_rate),
@@ -154,7 +151,11 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
-def train_model(X_train, y_train, X_val, y_val, model, epochs=50, batch_size=32):
+def train_model(X_train, y_train, X_val, y_val, model, epochs=20, batch_size=32):
+    """
+    Entrena el modelo LSTM final.  
+    Se han reducido los epochs a 20 para acelerar el entrenamiento sin perder demasiada precisión.
+    """
     tf.keras.backend.clear_session()
     callbacks = [
         EarlyStopping(patience=10, restore_best_weights=True),
@@ -164,29 +165,24 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs=50, batch_size=32)
               epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
     return model
 
-# =============================================================================
-# XGBoost para ensamble
-# =============================================================================
 def flatten_sequences(X_seq):
+    """Convierte secuencias 3D en 2D para XGBoost."""
     return X_seq.reshape((X_seq.shape[0], X_seq.shape[1]*X_seq.shape[2]))
 
 def train_xgboost(X, y):
+    """Entrena un modelo XGBoost para el ensamble."""
     model_xgb = XGBRegressor(n_estimators=200, max_depth=5, learning_rate=0.05,
                              subsample=0.8, colsample_bytree=0.8)
     model_xgb.fit(X, y)
     return model_xgb
 
-# =============================================================================
-# Ensamble final: LSTM, XGBoost y Prophet
-# =============================================================================
 def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.5, w_xgb=0.3, w_prophet=0.2):
+    """Combina predicciones de LSTM, XGBoost y Prophet."""
     return w_lstm * lstm_pred + w_xgb * xgb_pred + w_prophet * prophet_pred
 
-# =============================================================================
-# Predicción a medio/largo plazo con Prophet
-# =============================================================================
 def medium_long_term_prediction(df, days=180):
-    df_prophet = df[["ds","close_price"]].copy()
+    """Predicción a medio/largo plazo con Prophet."""
+    df_prophet = df[["ds", "close_price"]].copy()
     df_prophet.rename(columns={"close_price": "y"}, inplace=True)
     df_prophet["y"] = np.log1p(df_prophet["y"])
     model = Prophet()
@@ -196,10 +192,8 @@ def medium_long_term_prediction(df, days=180):
     forecast["exp_yhat"] = np.expm1(forecast["yhat"])
     return model, forecast
 
-# =============================================================================
-# Shock factor: ajustar sentimiento si variación >5%
-# =============================================================================
 def apply_shock_factor(df, base_sentiment):
+    """Ajusta el sentimiento si hay variaciones mayores al 5% en el precio."""
     df["pct_change"] = df["close_price"].pct_change().fillna(0)
     sentiment_array = []
     for i in range(len(df)):
@@ -210,11 +204,10 @@ def apply_shock_factor(df, base_sentiment):
     df.drop(columns=["pct_change"], inplace=True)
     return np.array(sentiment_array)
 
-# =============================================================================
-# Optimización de hiperparámetros con Optuna (MedianPruner, 5 ensayos, 10 epochs)
-# =============================================================================
+# Optimización de hiperparámetros con Optuna (3 ensayos, 5 epochs en tuning)
 def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    progress_text.write(f"Ensayo {trial.number + 1}: Probando nuevos hiperparámetros...")
+    trial_num = trial.number + 1
+    progress_text.write(f"Ensayo {trial_num}: Ajustando hiperparámetros...")
     lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
     lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
@@ -223,28 +216,27 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
 
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    # Usamos 10 epochs para la fase de tuning
-    model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=10, batch_size=batch_size)
+    # Para el tuning, solo 5 epochs
+    model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=5, batch_size=batch_size)
     preds = model.predict(X_val_adj, verbose=0)
     reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)
     loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
-    progress_bar.progress(min(100, 40 + int((trial.number + 1) * 20)))
-    progress_text.write(f"Ensayo {trial.number + 1}: Pérdida obtenida = {loss:.4f}")
+
+    progress_bar.progress(min(100, 40 + int(trial_num * 20)))
+    progress_text.write(f"Ensayo {trial_num}: Pérdida obtenida = {loss:.4f}")
     return loss
 
 def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=1, n_warmup_steps=3)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=1, n_warmup_steps=2)
     study = optuna.create_study(direction="minimize", pruner=pruner)
     study.optimize(lambda trial: objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar),
                    n_trials=3)
     progress_text.write(f"Optimización completada. Mejor pérdida: {study.best_value:.4f}")
     return study.best_params
 
-# =============================================================================
-# Funciones para noticias y sentimiento
-# =============================================================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=43200)  # Cachear durante 12 horas
 def get_newsapi_articles(coin_id):
+    """Obtiene noticias desde NewsAPI con caché de 12 horas y page_size=5."""
     newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
         st.error("Clave 'newsapi_key' no encontrada.")
@@ -252,7 +244,12 @@ def get_newsapi_articles(coin_id):
     try:
         query = f"{coin_id} crypto"
         newsapi = NewsApiClient(api_key=newsapi_key)
-        data = newsapi.get_everything(q=query, language="en", sort_by="relevancy", page_size=10)
+        data = newsapi.get_everything(
+            q=query,
+            language="en",
+            sort_by="relevancy",
+            page_size=5
+        )
         articles = []
         if data.get("articles"):
             for art in data["articles"]:
@@ -277,10 +274,15 @@ def get_newsapi_articles(coin_id):
             articles = sorted(articles, key=lambda x: x["parsed_date"], reverse=True)
         return articles
     except Exception as e:
-        st.error(f"Error al obtener noticias: {e}")
+        # Si detectamos un error de límite de peticiones, mostramos un mensaje amigable
+        if "rateLimited" in str(e) or "429" in str(e):
+            st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas :)")
+        else:
+            st.error(f"Error al obtener noticias: {e}")
         return []
 
 def get_news_sentiment(coin_id):
+    """Calcula el sentimiento medio (TextBlob + Transformers) de las noticias."""
     articles = get_newsapi_articles(coin_id)
     if not articles:
         return 50.0
@@ -295,6 +297,7 @@ def get_news_sentiment(coin_id):
     return (np.mean(sentiments_tb) + np.mean(sentiments_trans)) / 2.0
 
 def get_fear_greed_index():
+    """Obtiene el índice Fear & Greed."""
     try:
         data = requests.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
         return float(data["data"][0]["value"])
@@ -303,6 +306,7 @@ def get_fear_greed_index():
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id):
+    """Combina el sentimiento de noticias y el Fear & Greed para obtener un gauge."""
     news_sent = get_news_sentiment(coin_id)
     market_sent = get_fear_greed_index()
     gauge_val = 50 + (news_sent - market_sent)
@@ -310,21 +314,13 @@ def get_crypto_sentiment_combined(coin_id):
     return news_sent, market_sent, gauge_val
 
 def adjust_predictions_for_sentiment(future_preds, gauge_val):
+    """Ajusta las predicciones futuras según el gauge de sentimiento."""
     if gauge_val > 80:
         return future_preds * 1.03
     elif gauge_val < 20:
         return future_preds * 0.97
     return future_preds
 
-# =============================================================================
-# Ensamble final: LSTM, XGBoost y Prophet
-# =============================================================================
-def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.5, w_xgb=0.3, w_prophet=0.2):
-    return w_lstm * lstm_pred + w_xgb * xgb_pred + w_prophet * prophet_pred
-
-# =============================================================================
-# Entrenamiento y predicción a corto plazo (requiere entrenamiento)
-# =============================================================================
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     progress_text = st.empty()
     progress_bar = st.progress(0)
@@ -398,7 +394,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_text.write("Entrenando modelo LSTM final...")
     progress_bar.progress(60)
     lstm_model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=50, batch_size=batch_size)
+    # Reducción a 20 epochs para que sea más rápido
+    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=20, batch_size=batch_size)
 
     progress_text.write("Realizando predicción en test (LSTM)...")
     progress_bar.progress(70)
@@ -408,13 +405,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     preds_test_log = reconst_test_inv[:, 0]
     lstm_test_preds = np.expm1(preds_test_log)
 
-    reconst_y = np.concatenate([y_test.reshape(-1,1), np.zeros((len(y_test),4))], axis=1)
+    reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), 4))], axis=1)
     reconst_y_inv = scaler.inverse_transform(reconst_y)
-    y_test_log = reconst_y_inv[:,0]
+    y_test_log = reconst_y_inv[:, 0]
     y_test_real = np.expm1(y_test_log)
 
     lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
-    lstm_mape = np.mean(np.abs((y_test_real - lstm_test_preds)/np.maximum(np.abs(y_test_real), 1e-9)))*100
+    lstm_mape = np.mean(np.abs((y_test_real - lstm_test_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
 
     progress_text.write("Entrenando XGBoost y Prophet para ensamble...")
     progress_bar.progress(80)
@@ -425,13 +422,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     X_test_flat = flatten_sequences(X_test)
     xgb_test_scaled = xgb_model.predict(X_test_flat)
-    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1,1), np.zeros((len(xgb_test_scaled),4))], axis=1)
+    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1, 1), np.zeros((len(xgb_test_scaled), 4))], axis=1)
     xgb_test_inv = scaler.inverse_transform(xgb_reconst)
-    xgb_test_log = xgb_test_inv[:,0]
+    xgb_test_log = xgb_test_inv[:, 0]
     xgb_test_preds = np.expm1(xgb_test_log)
 
-    df_prophet = df[["ds","close_price"]].copy()
-    df_prophet.rename(columns={"close_price":"y"}, inplace=True)
+    df_prophet = df[["ds", "close_price"]].copy()
+    df_prophet.rename(columns={"close_price": "y"}, inplace=True)
     df_prophet["y"] = np.log1p(df_prophet["y"])
     prophet_model = Prophet()
     prophet_model.fit(df_prophet)
@@ -442,7 +439,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     test_ens_preds = ensemble_prediction(lstm_test_preds, xgb_test_preds, prophet_test_preds, 0.5, 0.3, 0.2)
     ens_rmse = np.sqrt(mean_squared_error(y_test_real, test_ens_preds))
-    ens_mape = np.mean(np.abs((y_test_real - test_ens_preds)/np.maximum(np.abs(y_test_real), 1e-9)))*100
+    ens_mape = np.mean(np.abs((y_test_real - test_ens_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
 
     progress_text.write("Realizando predicción futura...")
     progress_bar.progress(90)
@@ -455,23 +452,23 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     future_preds_log_lstm = []
     for _ in range(horizon_days):
         p_scaled = lstm_model.predict(current_input, verbose=0)[0][0]
-        reconst_f = np.concatenate([[p_scaled], np.zeros(4)]).reshape(1,-1)
+        reconst_f = np.concatenate([[p_scaled], np.zeros(4)]).reshape(1, -1)
         inv_f = scaler.inverse_transform(reconst_f)
-        plog = inv_f[0,0]
+        plog = inv_f[0, 0]
         future_preds_log_lstm.append(plog)
         new_feature = np.copy(current_input[:, -1:, :])
-        new_feature[0,0,0] = p_scaled
-        new_feature[0,0,5] = last_shock
-        current_input = np.append(current_input[:,1:,:], new_feature, axis=1)
+        new_feature[0, 0, 0] = p_scaled
+        new_feature[0, 0, 5] = last_shock
+        current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     lstm_future_preds = np.expm1(np.array(future_preds_log_lstm))
 
     X_last_flat = flatten_sequences(current_input)
     xgb_future_preds_log = []
     for _ in range(horizon_days):
         xgb_p = xgb_model.predict(X_last_flat)[0]
-        reconst_xgb = np.concatenate([[xgb_p], np.zeros((4,))]).reshape(1,-1)
+        reconst_xgb = np.concatenate([[xgb_p], np.zeros((4,))]).reshape(1, -1)
         inv_xgb = scaler.inverse_transform(reconst_xgb)
-        xgb_log = inv_xgb[0,0]
+        xgb_log = inv_xgb[0, 0]
         xgb_future_preds_log.append(xgb_log)
     xgb_future_preds = np.expm1(np.array(xgb_future_preds_log))
 
@@ -546,11 +543,16 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir (corto plazo):", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
 
-    # Datos históricos para Análisis de Sentimientos y Noticias (siempre accesibles)
+    # Datos históricos para análisis de sentimientos y noticias
     df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     if df_prices is not None and not df_prices.empty:
-        fig_hist = px.line(df_prices, x="ds", y="close_price", title=f"Histórico de {crypto_name}",
-                           labels={"ds": "Fecha", "close_price": "Precio (USD)"})
+        fig_hist = px.line(
+            df_prices,
+            x="ds",
+            y="close_price",
+            title=f"Histórico de {crypto_name}",
+            labels={"ds": "Fecha", "close_price": "Precio (USD)"}
+        )
         fig_hist.update_layout(template="plotly_dark")
         fig_hist.update_xaxes(tickformat="%Y-%m-%d")
         st.plotly_chart(fig_hist, use_container_width=True)
@@ -560,12 +562,6 @@ def main_app():
     else:
         st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
 
-    # Orden de pestañas:
-    # 0. Entrenamiento y Test (requiere entrenamiento)
-    # 1. Predicción de Precios (Corto Plazo) (requiere entrenamiento)
-    # 2. Predicción a Medio/Largo Plazo (se muestra solo si se ha entrenado)
-    # 3. Análisis de Sentimientos (siempre accesible)
-    # 4. Noticias Recientes (siempre accesible)
     tabs = st.tabs([
         "Entrenamiento y Test",
         "Predicción de Precios (Corto Plazo)",
@@ -588,6 +584,7 @@ def main_app():
                 test_dates = result["test_dates"][:min(len(result["test_dates"]), len(result["real_prices"]), len(result["test_preds"]))]
                 real_prices = result["real_prices"][:len(test_dates)]
                 test_preds = result["test_preds"][:len(test_dates)]
+
                 fig_test = go.Figure()
                 fig_test.add_trace(go.Scatter(
                     x=test_dates,
@@ -657,7 +654,7 @@ def main_app():
             if result:
                 st.header(f"Predicción a Medio/Largo Plazo - {result['symbol']}")
                 last_date = result["df"]["ds"].iloc[-1].date()
-                # Usamos Prophet para predecir 180 días
+                # Usamos Prophet para 180 días
                 _, forecast_long = medium_long_term_prediction(result["df"], days=180)
                 forecast_long_part = forecast_long[["ds", "exp_yhat"]].tail(180)
                 fig_long = go.Figure()
@@ -683,8 +680,10 @@ def main_app():
                 )
                 st.plotly_chart(fig_long, use_container_width=True)
                 st.subheader("Valores Numéricos (Horizonte 180 días)")
-                st.dataframe(forecast_long_part.rename(columns={"exp_yhat": "Predicción (USD)"})
-                             .style.format({"Predicción (USD)": "{:.2f}"}))
+                st.dataframe(
+                    forecast_long_part.rename(columns={"exp_yhat": "Predicción (USD)"})
+                    .style.format({"Predicción (USD)": "{:.2f}"})
+                )
                 st.download_button(
                     label="Descargar predicción (medio/largo plazo) en CSV",
                     data=forecast_long_part.to_csv(index=False).encode("utf-8"),
@@ -711,6 +710,7 @@ def main_app():
             gauge_text = "Bullish"
         else:
             gauge_text = "Very Bullish"
+
         fig_sentiment = go.Figure(go.Indicator(
             mode="gauge+number",
             value=gauge_val,
