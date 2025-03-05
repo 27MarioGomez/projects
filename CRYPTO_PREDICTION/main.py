@@ -32,7 +32,7 @@ adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
 # ------------------------------------------------------------------------------
-# Diccionarios de criptomonedas y sus símbolos
+# Diccionarios de criptomonedas y símbolos
 # ------------------------------------------------------------------------------
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
@@ -49,23 +49,6 @@ coincap_ids = {
     "Stellar (XLM)": "stellar"
 }
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
-coinid_to_coingecko = {v: v if v != "xrp" else "ripple" for v in coincap_ids.values()}
-
-# Características de volatilidad por criptomoneda
-crypto_characteristics = {
-    "bitcoin": {"volatility": 0.03},
-    "ethereum": {"volatility": 0.05},
-    "xrp": {"volatility": 0.08},
-    "binance-coin": {"volatility": 0.06},
-    "cardano": {"volatility": 0.07},
-    "solana": {"volatility": 0.09},
-    "dogecoin": {"volatility": 0.12},
-    "polkadot": {"volatility": 0.07},
-    "polygon": {"volatility": 0.06},
-    "litecoin": {"volatility": 0.04},
-    "tron": {"volatility": 0.06},
-    "stellar": {"volatility": 0.05}
-}
 
 # ------------------------------------------------------------------------------
 # Funciones de utilidad
@@ -78,7 +61,7 @@ def robust_mape(y_true, y_pred, eps=1e-9):
 def load_crypto_data(coin_id, start_date, end_date):
     """
     Descarga datos históricos de una criptomoneda usando yfinance.
-    Se utiliza el ticker correspondiente (ej. "BTC-USD").
+    Se utiliza el ticker correspondiente (por ejemplo, "BTC-USD").
     """
     ticker_ids = {
         "bitcoin": "BTC-USD",
@@ -96,7 +79,7 @@ def load_crypto_data(coin_id, start_date, end_date):
     }
     ticker = ticker_ids.get(coin_id)
     if not ticker:
-        st.error("Ticker no encontrado para la criptomoneda.")
+        st.error("No se encontró el ticker para la criptomoneda.")
         return None
 
     df = yf.download(ticker, start=start_date, end=end_date)
@@ -105,8 +88,6 @@ def load_crypto_data(coin_id, start_date, end_date):
         return None
 
     df = df.reset_index()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] for col in df.columns]
     df.rename(columns={"Date": "ds", "Close": "close_price"}, inplace=True)
     df = df[["ds", "close_price"]]
     return df
@@ -121,16 +102,19 @@ def create_sequences(data, window_size):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
+# ------------------------------------------------------------------------------
+# Modelo LSTM (25 épocas para reducir RMSE y MAPE)
+# ------------------------------------------------------------------------------
 def build_lstm_model(
     input_shape,
     learning_rate=0.001,
     l2_lambda=0.01,
     lstm_units1=100,
-    lstm_units2=80,
+    lstm_units2=60,
     dropout_rate=0.3,
     dense_units=50
 ):
-    """Construye un modelo LSTM con regularización L2 y dropout."""
+    """Construye un modelo LSTM con hiperparámetros fijos y 25 épocas."""
     model = Sequential([
         LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
         Dropout(dropout_rate),
@@ -142,8 +126,8 @@ def build_lstm_model(
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
-def train_model(X_train, y_train, X_val, y_val, model, epochs, batch_size):
-    """Entrena el modelo LSTM con early stopping y reducción de la LR."""
+def train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=32):
+    """Entrena el modelo LSTM con early stopping y reduce LR."""
     tf.keras.backend.clear_session()
     callbacks = [
         EarlyStopping(patience=10, restore_best_weights=True),
@@ -159,64 +143,29 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs, batch_size):
     )
     return model
 
-def get_dynamic_params(df, horizon_days, coin_id):
-    """
-    Ajusta hiperparámetros dinámicamente según la volatilidad y datos históricos.
-    Devuelve un diccionario con los hiperparámetros, pero establecemos epochs=25
-    para intentar reducir RMSE y MAPE al máximo.
-    """
-    real_volatility = df["close_price"].pct_change().std()
-    base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
-    combined_volatility = (real_volatility + base_volatility) / 2.0
-
-    # Ajustes dinámicos
-    window_size = int(max(15, min(60, horizon_days * (1.0 + combined_volatility * 5))))
-    # Se fija a 25 epochs
-    epochs = 25
-    batch_size = int(max(16, min(32, (combined_volatility * 200) + 16)))
-    lstm_units1 = int(max(50, min(150, 100 + (combined_volatility * 200))))
-    lstm_units2 = int(max(30, min(100, 80 + (combined_volatility * 100))))
-    dropout_rate = 0.3 if combined_volatility < 0.1 else 0.4
-    dense_units = int(max(30, min(80, 50 + (combined_volatility * 60))))
-    learning_rate = 0.0005 if combined_volatility < 0.08 else 0.0002
-    l2_lambda = 0.01 if combined_volatility < 0.07 else 0.02
-
-    return {
-        "window_size": window_size,
-        "epochs": epochs,
-        "batch_size": batch_size,
-        "lstm_units1": lstm_units1,
-        "lstm_units2": lstm_units2,
-        "dropout_rate": dropout_rate,
-        "dense_units": dense_units,
-        "learning_rate": learning_rate,
-        "l2_lambda": l2_lambda
-    }
-
+# ------------------------------------------------------------------------------
+# Fear & Greed
+# ------------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_fear_greed_index():
     """Obtiene el índice Fear & Greed del mercado."""
     try:
-        data = session.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
+        data = requests.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
         return float(data["data"][0]["value"])
     except Exception:
         st.warning("No se pudo obtener el índice Fear & Greed. Se usará 50.0 por defecto.")
         return 50.0
 
 # ------------------------------------------------------------------------------
-# Integración con NewsAPI para noticias y sentimiento
+# NewsAPI (TextBlob)
 # ------------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_newsapi_articles(coin_symbol):
-    """
-    Obtiene artículos de noticias recientes usando NewsAPI.
-    Se buscan artículos en inglés, ordenados por relevancia, con un máximo de 10.
-    """
-    newsapi_key = st.secrets.get("newsapi_key", "") or os.environ.get("newsapi_key")
+    """Obtiene artículos de noticias recientes usando NewsAPI (hasta 10)."""
+    newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
-        st.error("No se encontró la clave 'newsapi_key' en Secrets ni en variables de entorno.")
+        st.error("No se encontró la clave 'newsapi_key' en Secrets.")
         return []
-
     try:
         newsapi = NewsApiClient(api_key=newsapi_key)
         data = newsapi.get_everything(q=coin_symbol, language="en", sort_by="relevancy", page_size=10)
@@ -237,7 +186,7 @@ def get_newsapi_articles(coin_symbol):
         return []
 
 def get_news_sentiment(coin_symbol):
-    """Calcula el sentimiento promedio a partir de artículos de NewsAPI."""
+    """Calcula el sentimiento promedio (0..100) a partir de artículos de NewsAPI."""
     articles = get_newsapi_articles(coin_symbol)
     if not articles:
         return 50.0
@@ -249,46 +198,41 @@ def get_news_sentiment(coin_symbol):
         sentiments.append(50 + (polarity * 50))
     return np.mean(sentiments) if sentiments else 50.0
 
-def get_crypto_sentiment_combined(coin_id):
-    """
-    Combina el sentimiento de noticias (NewsAPI) y el índice Fear & Greed
-    para generar un valor gauge:
-    gauge_val = 50 + (news_sent - market_sent)
-    """
-    symbol = coinid_to_symbol[coin_id]
-    news_sent = get_news_sentiment(symbol)
+def get_crypto_sentiment_combined(coin_symbol):
+    """Combina el sentimiento de noticias y Fear & Greed para un gauge 0..100."""
+    news_sent = get_news_sentiment(coin_symbol)
     market_sent = get_fear_greed_index()
     gauge_val = 50 + (news_sent - market_sent)
     gauge_val = max(0, min(100, gauge_val))
     return news_sent, market_sent, gauge_val
 
 # ------------------------------------------------------------------------------
-# Entrenamiento y Predicción sin Keras Tuner
+# Entrenamiento y Predicción (25 épocas)
 # ------------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date):
     """
-    Entrena el modelo LSTM y realiza predicciones futuras integrando el factor de sentimiento (gauge_val/100)
-    en cada timestep. Se establecen 25 epochs para intentar reducir RMSE y MAPE al máximo.
+    Entrena el modelo LSTM (25 épocas) e integra un factor de sentimiento
+    (gauge_val/100) en cada timestep. Se fija batch_size=32 y window_size=30
+    para simplificar (o se ajusta a la volatilidad).
     """
     df = load_crypto_data(coin_id, start_date, end_date)
     if df is None or df.empty:
         return None
 
     symbol = coinid_to_symbol[coin_id]
-    news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
+    news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(symbol)
     sentiment_factor = gauge_val / 100.0
 
-    # Parámetros dinámicos
-    params = get_dynamic_params(df, horizon_days, coin_id)
-    window_size = params["window_size"]
-    epochs = params["epochs"]  # Se ha fijado en 25
-    batch_size = params["batch_size"]
-    lstm_units1 = params["lstm_units1"]
-    lstm_units2 = params["lstm_units2"]
-    dropout_rate = params["dropout_rate"]
-    dense_units = params["dense_units"]
-    learning_rate = params["learning_rate"]
-    l2_lambda = params["l2_lambda"]
+    # Parámetros fijos (sin Keras Tuner)
+    window_size = 30
+    epochs = 25
+    batch_size = 32
+    lstm_units1 = 100
+    lstm_units2 = 60
+    dropout_rate = 0.3
+    dense_units = 50
+    learning_rate = 0.001
+    l2_lambda = 0.01
 
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(df[["close_price"]])
@@ -303,14 +247,14 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Incorporar el factor de sentimiento en el set de entrenamiento, validación y test
+    # Incorporar el factor de sentimiento
     X_train_adj = np.concatenate([X_train, np.full((X_train.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_val_adj   = np.concatenate([X_val,   np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_test_adj  = np.concatenate([X_test,  np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
 
     input_shape = (window_size, 2)
 
-    # Construir y entrenar el modelo
+    # Construir y entrenar el modelo (25 épocas)
     lstm_model = build_lstm_model(
         input_shape=input_shape,
         learning_rate=learning_rate,
@@ -358,9 +302,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
         "future_preds": future_preds,
         "rmse": lstm_rmse,
         "mape": lstm_mape,
-        "sentiment_factor": sentiment_factor,
         "symbol": symbol,
-        "crypto_sent": news_sent,  # Sentimiento basado en noticias
+        "crypto_sent": news_sent,
         "market_sent": market_sent,
         "gauge_val": gauge_val,
         "future_dates": future_dates,
@@ -376,9 +319,9 @@ def main_app():
     st.title("Predicción de Precios Cripto 🔮")
     st.markdown("""
     **Descripción del Modelo:**  
-    Este dashboard entrena un modelo LSTM (25 épocas) para predecir precios futuros de criptomonedas (p. ej., Bitcoin, Ethereum, Ripple).  
-    Los datos históricos se obtienen de yfinance y los hiperparámetros se ajustan dinámicamente según la volatilidad, pero sin Keras Tuner.  
-    Se calcula un factor de sentimiento combinando noticias (NewsAPI) y Fear & Greed, y se muestran métricas (RMSE, MAPE), predicciones y un gauge de sentimiento.
+    Este dashboard entrena un modelo LSTM (25 épocas) para predecir precios futuros de criptomonedas (por ejemplo, Bitcoin, Ethereum, Ripple).  
+    Se utilizan datos de yfinance y un factor de sentimiento que combina las noticias (NewsAPI) y el índice Fear & Greed.  
+    Se muestran métricas (RMSE, MAPE), gráficos interactivos y las noticias recientes en un scroll horizontal.
     """)
 
     # Panel lateral
@@ -418,7 +361,6 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
 
-    # Cargar datos históricos
     df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     if df_prices is not None and not df_prices.empty:
         fig_hist = px.line(
@@ -438,7 +380,6 @@ def main_app():
     else:
         st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
 
-    # Pestañas
     tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos", "📰 Noticias Recientes"])
 
     # Tab 1: Entrenamiento y Test
@@ -457,6 +398,7 @@ def main_app():
                 col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error medio en USD.")
                 col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error porcentual medio.")
 
+                # Verificar que haya datos suficientes para graficar
                 if not (len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0):
                     st.error("Datos insuficientes para la gráfica de Test.")
                     st.session_state["result"] = result
@@ -535,7 +477,7 @@ def main_app():
                 if result is None or "gauge_val" not in result:
                     st.warning("No se obtuvo un resultado válido. Reentrene el modelo.")
                 else:
-                    news_sent = result["crypto_sent"]
+                    crypto_sent = result["crypto_sent"]
                     market_sent = result["market_sent"]
                     gauge_val = result["gauge_val"]
 
@@ -583,7 +525,7 @@ def main_app():
                     )
                     st.plotly_chart(fig_sentiment, use_container_width=True)
 
-                    st.write(f"**Sentimiento Noticias ({result['symbol']}):** {news_sent:.2f}")
+                    st.write(f"**Sentimiento Noticias ({result['symbol']}):** {crypto_sent:.2f}")
                     st.write(f"**Sentimiento Mercado (Fear & Greed):** {market_sent:.2f}")
                     st.write(f"**Gauge Value:** {gauge_val:.2f} → **{gauge_text}**")
 
@@ -609,8 +551,10 @@ def main_app():
                 <style>
                 .news-container {
                     display: flex;
+                    flex-wrap: nowrap;
                     overflow-x: auto;
                     gap: 1rem;
+                    white-space: nowrap;
                 }
                 .news-item {
                     flex: 0 0 auto;
@@ -619,6 +563,8 @@ def main_app():
                     padding: 1rem;
                     border-radius: 5px;
                     border: 1px solid #4a4a6a;
+                    display: inline-block;
+                    vertical-align: top;
                 }
                 .news-item img {
                     width: 100%;
