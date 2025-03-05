@@ -22,7 +22,7 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-import talib  # Asegúrate de que TA-Lib esté instalado
+import ta 
 
 # ------------------------------------------------------------------------------
 # Configuración SSL y sesión HTTP
