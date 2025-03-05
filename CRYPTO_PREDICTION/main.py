@@ -61,7 +61,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # =============================================================================
-# INDICADORES TÉCNICOS CON LA LIBRERÍA TA
+# INDICADORES TÉCNICOS CON TA
 # =============================================================================
 
 def compute_indicators(df):
@@ -142,6 +142,23 @@ def create_sequences(data, window_size):
     return np.array(X), np.array(y)
 
 # =============================================================================
+# FUNCIÓN BUILD_LSTM_MODEL
+# =============================================================================
+
+def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
+                     lstm_units1=128, lstm_units2=64, dropout_rate=0.3, dense_units=100):
+    model = Sequential([
+        LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
+        Dropout(dropout_rate),
+        LSTM(lstm_units2, kernel_regularizer=l2(l2_lambda)),
+        Dropout(dropout_rate),
+        Dense(dense_units, activation="relu", kernel_regularizer=l2(l2_lambda)),
+        Dense(1)
+    ])
+    model.compile(optimizer=Adam(learning_rate), loss="mse")
+    return model
+
+# =============================================================================
 # TUNING DE HIPERPARÁMETROS CON OPTUNA
 # =============================================================================
 
@@ -174,7 +191,7 @@ def tune_hyperparameters(X_train, y_train, X_val, y_val, input_shape):
     return study.best_params
 
 # =============================================================================
-# MODELO PROPHET PARA TENDENCIAS A LARGO PLAZO
+# MODELO PROPHET
 # =============================================================================
 
 @st.cache_data
@@ -418,7 +435,7 @@ def main_app():
     Se analiza el sentimiento del mercado mediante la agregación de noticias relevantes (NewsAPI) y el índice **Fear & Greed**; para ello se emplea un análisis avanzado basado en Transformers y TextBlob.  
     Se entrena un modelo LSTM para predecir precios a corto plazo y se complementa con un modelo Prophet para captar tendencias a medio-largo plazo; ambas predicciones se combinan mediante un ensamble ponderado.  
     La herramienta muestra intervalos de predicción y señales de trading simples, permitiendo tomar decisiones informadas en un entorno volátil.  
-    La interfaz es responsive y permite descargar las predicciones en CSV.
+    La interfaz es responsive y permite descargar la predicción en CSV.
     """)
 
     st.sidebar.title("Configuración de Predicción")
@@ -484,16 +501,13 @@ def main_app():
                 st.write(f"Sentimiento Noticias ({result['symbol']}): {result['crypto_sent']:.2f}")
                 st.write(f"Sentimiento Mercado (Fear & Greed): {result['market_sent']:.2f}")
                 st.write(f"Gauge Combinado: {result['gauge_val']:.2f}")
-
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error medio en USD.")
                 col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error porcentual medio.")
-
                 min_len = min(len(result["test_dates"]), len(result["real_prices"]), len(result["test_preds"]))
                 result["test_dates"] = result["test_dates"][:min_len]
                 result["real_prices"] = result["real_prices"][:min_len]
                 result["test_preds"] = result["test_preds"][:min_len]
-
                 fig_test = go.Figure()
                 fig_test.add_trace(go.Scatter(
                     x=result["test_dates"],
