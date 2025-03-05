@@ -11,7 +11,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
 
-# Activar mixed precision si hay GPU compatible
+# Activar mixed precision si hay GPU compatible (se ignorará en CPU)
 if tf.config.list_physical_devices('GPU'):
     from tensorflow.keras.mixed_precision import set_global_policy
     set_global_policy('mixed_float16')
@@ -93,7 +93,7 @@ def get_advanced_sentiment(text):
         return 50 - (result["score"] * 50)
 
 # =============================================================================
-# Carga y preprocesamiento de datos históricos
+# Carga y preprocesamiento de datos históricos desde yfinance
 # =============================================================================
 @st.cache_data
 def load_crypto_data(coin_id, start_date=None, end_date=None):
@@ -203,13 +203,14 @@ def apply_shock_factor(df, base_sentiment):
     df.drop(columns=["pct_change"], inplace=True)
     return np.array(sentiment_array)
 
-# Para acelerar el tuning, usamos una muestra de los datos
 def sample_for_tuning(X, y, sample_size=200):
     if len(X) > sample_size:
         return X[-sample_size:], y[-sample_size:]
     return X, y
 
-# Optimización de hiperparámetros con Optuna (3 ensayos, 5 epochs en tuning)
+# =============================================================================
+# Optimización de hiperparámetros con Optuna (3 ensayos, 5 epochs para tuning)
+# =============================================================================
 def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
     trial_num = trial.number + 1
     progress_text.write(f"Ensayo {trial_num}: Entrenando (5 epochs) con batch_size={trial.suggest_int('batch_size', 16, 64, step=16)} ...")
@@ -230,7 +231,6 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     return loss
 
 def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    # Usar una muestra de los datos para tuning
     X_train_sample, y_train_sample = sample_for_tuning(X_train_adj, y_train, sample_size=200)
     X_val_sample, y_val_sample = sample_for_tuning(X_val_adj, y_val, sample_size=200)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=1, n_warmup_steps=2)
@@ -240,7 +240,7 @@ def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     progress_text.write(f"Optimización completada. Mejor pérdida: {study.best_value:.4f}")
     return study.best_params
 
-@st.cache_data(ttl=43200)  # Cachear durante 12 horas
+@st.cache_data(ttl=43200)
 def get_newsapi_articles(coin_id):
     newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
@@ -332,7 +332,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("Datos históricos no disponibles.")
         return None
 
-    st.write(f"Datos cargados: {df.shape[0]} registros, {df.shape[1]} columnas.")
+    st.write(f"Datos históricos cargados: {df.shape[0]} registros, {df.shape[1]} columnas.")
 
     progress_text.write("Calculando shock factor y sentimiento base...")
     progress_bar.progress(15)
@@ -406,7 +406,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     preds_test_log = reconst_test_inv[:, 0]
     lstm_test_preds = np.expm1(preds_test_log)
 
-    reconst_y = np.concatenate([y_test.reshape(-1,1), np.zeros((len(y_test),4))], axis=1)
+    reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), 4))], axis=1)
     reconst_y_inv = scaler.inverse_transform(reconst_y)
     y_test_log = reconst_y_inv[:, 0]
     y_test_real = np.expm1(y_test_log)
@@ -508,10 +508,10 @@ def main_app():
     **Descripción del Dashboard:**  
     - Integra datos históricos (yfinance) y múltiples indicadores técnicos (RSI, MACD, ATR, etc.).  
     - Analiza el sentimiento del mercado a través de NewsAPI, Fear & Greed, Transformers y TextBlob.  
-    - Entrena un modelo LSTM, XGBoost y Prophet con optimización automática (Optuna) y aplica un shock factor en días críticos.  
+    - Entrena un ensamble de modelos (LSTM, XGBoost y Prophet) con optimización automática (Optuna) y aplica un shock factor en días críticos.  
     - Ensamble final (50% LSTM, 30% XGBoost, 20% Prophet) para predicciones de corto plazo.  
     - La pestaña de “Predicción a Medio/Largo Plazo” solo se muestra si ya se ha entrenado el modelo.  
-    - Mientras se entrena, puedes consultar las secciones de Análisis de Sentimientos y Noticias Recientes.
+    - Mientras se entrena, puedes consultar Análisis de Sentimientos y Noticias Recientes.
     """)
 
     st.sidebar.title("Configuración de Predicción")
