@@ -47,7 +47,6 @@ coincap_ids = {
     "TRON (TRX)": "tron",
     "Stellar (XLM)": "stellar"
 }
-# Extrae el símbolo, por ejemplo: "xrp" → "XRP"
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # ------------------------------------------------------------------------------
@@ -72,14 +71,15 @@ crypto_characteristics = {
 # Funciones de utilidad
 # ------------------------------------------------------------------------------
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """Calcula el Error Porcentual Absoluto Medio (MAPE) evitando división por cero."""
+    """Calcula el MAPE evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
 @st.cache_data
-def load_crypto_data(coin_id, start_date, end_date):
+def load_crypto_data(coin_id, start_date=None, end_date=None):
     """
     Descarga datos históricos de una criptomoneda utilizando yfinance.
-    Se utiliza el ticker correspondiente (por ejemplo, "BTC-USD").
+    - Si no se especifica rango (start_date y end_date son None), se usa period="max".
+    - De lo contrario, se usa el rango especificado.
     """
     ticker_ids = {
         "bitcoin": "BTC-USD",
@@ -97,13 +97,19 @@ def load_crypto_data(coin_id, start_date, end_date):
     }
     ticker = ticker_ids.get(coin_id)
     if not ticker:
-        st.error("Ticker no encontrado para la criptomoneda.")
+        st.error("No se encontró el ticker para la criptomoneda.")
         return None
-    # Se añade progress=False para evitar el log del progreso
-    df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+    
+    # Si no se pasa rango, se descarga todo el histórico
+    if start_date is None or end_date is None:
+        df = yf.download(ticker, period="max", progress=False)
+    else:
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+
     if df.empty:
         st.warning("No se obtuvieron datos de yfinance.")
         return None
+    
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -156,29 +162,6 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=32)
     return model
 
 # ------------------------------------------------------------------------------
-# Hiperparámetros fijos (sin Keras Tuner)
-# ------------------------------------------------------------------------------
-def get_dynamic_params(df, horizon_days, coin_id):
-    """
-    Devuelve un diccionario con hiperparámetros fijos:
-      - window_size: 30
-      - epochs: 25
-      - batch_size: 32
-      - lstm_units1: 100, lstm_units2: 60, etc.
-    """
-    return {
-        "window_size": 30,
-        "epochs": 25,
-        "batch_size": 32,
-        "lstm_units1": 100,
-        "lstm_units2": 60,
-        "dropout_rate": 0.3,
-        "dense_units": 50,
-        "learning_rate": 0.001,
-        "l2_lambda": 0.01
-    }
-
-# ------------------------------------------------------------------------------
 # Fear & Greed Index
 # ------------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
@@ -195,26 +178,36 @@ def get_fear_greed_index():
 # NewsAPI: artículos y sentimiento
 # ------------------------------------------------------------------------------
 @st.cache_data(ttl=300)
-def get_newsapi_articles(coin_symbol):
+def get_newsapi_articles(coin_id):
     """
     Obtiene hasta 10 artículos de noticias recientes usando NewsAPI.
+    Para la consulta, se usa el coin_id (por ejemplo, "xrp") y se agregan palabras clave.
     """
     newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
         st.error("No se encontró la clave 'newsapi_key' en Secrets.")
         return []
     try:
+        # Agregamos algo de contexto para la búsqueda
+        query = f"{coin_id} crypto"  # Ej: "xrp crypto"
         newsapi = NewsApiClient(api_key=newsapi_key)
-        data = newsapi.get_everything(q=coin_symbol, language="en", sort_by="relevancy", page_size=10)
+        data = newsapi.get_everything(q=query, language="en", sort_by="relevancy", page_size=10)
         articles = []
         if data.get("articles"):
             for art in data["articles"]:
                 image_url = art.get("urlToImage", "")
+                # Control de errores si algún campo está vacío
+                title = art.get("title") or "Sin título"
+                description = art.get("description") or "Sin descripción"
+                pub_date = art.get("publishedAt") or "Fecha no disponible"
+                pub_date = pub_date[:19].replace("T", " ")
+                link = art.get("url") or "#"
+                
                 articles.append({
-                    "title": art.get("title", "Sin título"),
-                    "description": art.get("description", ""),
-                    "pubDate": art.get("publishedAt", "")[:19].replace("T", " "),
-                    "link": art.get("url", "#"),
+                    "title": title,
+                    "description": description,
+                    "pubDate": pub_date,
+                    "link": link,
                     "image": image_url
                 })
         return articles
@@ -222,9 +215,9 @@ def get_newsapi_articles(coin_symbol):
         st.error(f"Error al obtener noticias: {e}")
         return []
 
-def get_news_sentiment(coin_symbol):
+def get_news_sentiment(coin_id):
     """Calcula el sentimiento promedio (0-100) a partir de los artículos."""
-    articles = get_newsapi_articles(coin_symbol)
+    articles = get_newsapi_articles(coin_id)
     if not articles:
         return 50.0
     sentiments = []
@@ -238,47 +231,49 @@ def get_news_sentiment(coin_symbol):
 def get_crypto_sentiment_combined(coin_id):
     """
     Combina el sentimiento de las noticias (NewsAPI) y el índice Fear & Greed para generar un gauge.
-    Se calcula: gauge_val = 50 + (news_sent - market_sent)
+    gauge_val = 50 + (news_sent - market_sent)
     """
-    # Usamos coin_id directamente para obtener el símbolo del diccionario
-    symbol = coinid_to_symbol[coin_id]
-    news_sent = get_news_sentiment(coin_id)  # Usamos coin_id para mantener la coherencia
+    news_sent = get_news_sentiment(coin_id)
     market_sent = get_fear_greed_index()
     gauge_val = 50 + (news_sent - market_sent)
     gauge_val = max(0, min(100, gauge_val))
     return news_sent, market_sent, gauge_val
 
 # ------------------------------------------------------------------------------
-# Entrenamiento y Predicción sin Keras Tuner (25 épocas)
+# Entrenamiento y Predicción (25 épocas)
 # ------------------------------------------------------------------------------
-def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date):
+def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     """
-    Entrena el modelo LSTM (25 épocas) e integra un factor de sentimiento (gauge_val/100)
-    en cada timestep. Usa hiperparámetros fijos.
+    Entrena el modelo LSTM (25 épocas) e integra un factor de sentimiento (gauge_val/100).
+    Usa hiperparámetros fijos, window_size=30, batch_size=32, etc.
     """
     st.write("Cargando datos históricos...")
-    df = load_crypto_data(coin_id, start_date, end_date)
+    if start_date and end_date:
+        df = load_crypto_data(coin_id, start_date, end_date)
+    else:
+        # Si no hay rango, se trae el máximo histórico
+        df = load_crypto_data(coin_id, None, None)
+    
     if df is None or df.empty:
         st.error("No se pudieron obtener datos históricos.")
         return None
 
-    symbol = coinid_to_symbol[coin_id]
     st.write("Calculando sentimiento...")
     news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
     sentiment_factor = gauge_val / 100.0
 
-    # Usamos parámetros fijos
-    params = get_dynamic_params(df, horizon_days, coin_id)
-    window_size = params["window_size"]
-    epochs = params["epochs"]
-    batch_size = params["batch_size"]
-    lstm_units1 = params["lstm_units1"]
-    lstm_units2 = params["lstm_units2"]
-    dropout_rate = params["dropout_rate"]
-    dense_units = params["dense_units"]
-    learning_rate = params["learning_rate"]
-    l2_lambda = params["l2_lambda"]
+    # Parámetros fijos
+    window_size = 30
+    epochs = 25
+    batch_size = 32
+    lstm_units1 = 100
+    lstm_units2 = 60
+    dropout_rate = 0.3
+    dense_units = 50
+    learning_rate = 0.001
+    l2_lambda = 0.01
 
+    st.write("Preprocesando datos para el entrenamiento...")
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(df[["close_price"]])
     X, y = create_sequences(scaled_data, window_size)
@@ -286,7 +281,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
         st.error("No hay suficientes datos para crear secuencias.")
         return None
 
-    st.write("Dividiendo datos...")
+    st.write("Dividiendo datos en train, val y test...")
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -294,13 +289,14 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Incorporar el factor de sentimiento
+    st.write("Incorporando factor de sentimiento...")
     X_train_adj = np.concatenate([X_train, np.full((X_train.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_val_adj   = np.concatenate([X_val,   np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_test_adj  = np.concatenate([X_test,  np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
 
     input_shape = (window_size, 2)
-    st.write("Construyendo y entrenando el modelo LSTM...")
+
+    st.write("Construyendo y entrenando el modelo LSTM (25 épocas)...")
     lstm_model = build_lstm_model(
         input_shape=input_shape,
         learning_rate=learning_rate,
@@ -312,7 +308,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     )
     lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, lstm_model, epochs, batch_size)
 
-    # Predicción en Test
     st.write("Realizando predicción en el conjunto de test...")
     lstm_test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
     lstm_test_preds = scaler.inverse_transform(lstm_test_preds_scaled).flatten()
@@ -321,7 +316,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
     lstm_mape = robust_mape(y_test_real, lstm_test_preds)
 
-    # Predicción futura
     st.write("Realizando predicción futura...")
     last_window = scaled_data[-window_size:]
     future_preds = []
@@ -349,7 +343,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
         "future_preds": future_preds,
         "rmse": lstm_rmse,
         "mape": lstm_mape,
-        "symbol": symbol,
+        "symbol": coinid_to_symbol[coin_id],
         "crypto_sent": news_sent,
         "market_sent": market_sent,
         "gauge_val": gauge_val,
@@ -367,7 +361,7 @@ def main_app():
     st.markdown("""
     **Descripción del Modelo:**  
     Este dashboard entrena un modelo LSTM (25 épocas) para predecir precios futuros de criptomonedas (por ejemplo, Bitcoin, Ethereum, Ripple).  
-    Se utilizan datos de yfinance y se calcula un factor de sentimiento combinando las noticias (NewsAPI) y el índice Fear & Greed.  
+    Se utilizan datos de yfinance (cargando el histórico completo si no se especifica rango), y se calcula un factor de sentimiento que combina las noticias (NewsAPI) y el índice Fear & Greed.  
     Se muestran métricas (RMSE, MAPE), gráficos interactivos y las noticias recientes en un scroll horizontal.
     """)
 
@@ -378,6 +372,7 @@ def main_app():
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
     default_end = datetime.utcnow()
     default_start = default_end - timedelta(days=7)
+
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start.date())
         end_date = st.sidebar.date_input("Fecha de fin", default_end.date())
@@ -395,13 +390,17 @@ def main_app():
             st.sidebar.warning("La fecha de fin no puede ser futura. Se ajusta a hoy.")
         end_date_with_offset = end_date + timedelta(days=1)
     else:
-        start_date = default_start
-        end_date_with_offset = default_end + timedelta(days=1)
+        start_date = None
+        end_date_with_offset = None
 
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
 
-    df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
+    if start_date is not None and end_date_with_offset is not None:
+        df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
+    else:
+        df_prices = load_crypto_data(coin_id, None, None)
+
     if df_prices is not None and not df_prices.empty:
         fig_hist = px.line(
             df_prices,
@@ -413,6 +412,7 @@ def main_app():
         fig_hist.update_layout(template="plotly_dark")
         fig_hist.update_xaxes(tickformat="%Y-%m-%d")
         st.plotly_chart(fig_hist, use_container_width=True)
+
         if show_stats:
             st.subheader("Estadísticas Descriptivas")
             st.write(df_prices["close_price"].describe())
@@ -435,14 +435,17 @@ def main_app():
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error medio en USD.")
                 col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error porcentual medio.")
+
                 if not (len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0):
                     st.error("Datos insuficientes para la gráfica de Test.")
                     st.session_state["result"] = result
                     return
+
                 min_len = min(len(result["test_dates"]), len(result["real_prices"]), len(result["test_preds"]))
                 result["test_dates"] = result["test_dates"][:min_len]
                 result["real_prices"] = result["real_prices"][:min_len]
                 result["test_preds"] = result["test_preds"][:min_len]
+
                 fig_test = go.Figure()
                 fig_test.add_trace(go.Scatter(
                     x=result["test_dates"],
@@ -493,6 +496,7 @@ def main_app():
                     yaxis_title="Precio (USD)"
                 )
                 st.plotly_chart(fig_future, use_container_width=True)
+
                 st.subheader("Resultados Numéricos")
                 df_future = pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series})
                 st.dataframe(df_future.style.format({"Predicción": "{:.2f}"}))
@@ -513,6 +517,7 @@ def main_app():
                     crypto_sent = result["crypto_sent"]
                     market_sent = result["market_sent"]
                     gauge_val = result["gauge_val"]
+
                     if gauge_val < 20:
                         gauge_text = "Muy Bearish"
                     elif gauge_val < 40:
@@ -523,6 +528,7 @@ def main_app():
                         gauge_text = "Bullish"
                     else:
                         gauge_text = "Muy Bullish"
+
                     fig_sentiment = go.Figure(go.Indicator(
                         mode="gauge+number",
                         value=gauge_val,
@@ -565,15 +571,15 @@ def main_app():
             else:
                 st.error("Datos de resultado inválidos. Reentrene el modelo.")
         else:
-            st.info("Entrene el modelo para ver el análisis de sentimientos.")
+            st.info("Entrene el modelo primero.")
 
     # Tab 4: Noticias Recientes (scroll horizontal)
     with tabs[3]:
-        st.header("Noticias Recientes")
+        # Se elimina el encabezado genérico "Noticias Recientes" y solo se muestra el subencabezado
         symbol = coinid_to_symbol[coin_id]
+        st.subheader(f"Últimas noticias sobre {crypto_name} ({symbol})")
         articles = get_newsapi_articles(coin_id)
         if articles:
-            st.subheader(f"Últimas noticias sobre {crypto_name}")
             st.markdown(
                 """
                 <style>
