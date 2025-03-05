@@ -22,26 +22,28 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-# Usamos la librería 'ta' para indicadores técnicos (no TA‑Lib)
+# Importar módulos específicos de la librería ta
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
-# Pipeline para análisis de sentimiento avanzado
+# Pipeline para análisis avanzado de sentimiento
 from transformers import pipeline
 import optuna
 
-# ------------------------------------------------------------------------------
-# Configuración de certificados y sesión HTTP
-# ------------------------------------------------------------------------------
+# =============================================================================
+# CONFIGURACIÓN INICIAL
+# =============================================================================
+
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
 retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
-# ------------------------------------------------------------------------------
-# Diccionarios de criptomonedas y símbolos
-# ------------------------------------------------------------------------------
+# =============================================================================
+# DICCIONARIOS DE CRIPTOMONEDAS
+# =============================================================================
+
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -58,30 +60,27 @@ coincap_ids = {
 }
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
-# ------------------------------------------------------------------------------
-# Indicadores técnicos con la librería ta
-# ------------------------------------------------------------------------------
+# =============================================================================
+# INDICADORES TÉCNICOS CON LA LIBRERÍA TA
+# =============================================================================
+
 def compute_indicators(df):
-    # RSI
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
     df["rsi_norm"] = df["RSI"] / 100.0
-    # MACD
     df["macd"] = MACD(close=df["close_price"], window_fast=12, window_slow=26, window_sign=9).macd()
-    # Bollinger Bands (se calculan, aunque no se usen directamente en el modelo)
     bb = BollingerBands(close=df["close_price"], window=20, window_dev=2)
     df["bollinger_upper"] = bb.bollinger_hband()
     df["bollinger_lower"] = bb.bollinger_lband()
-    # SMA 50
     df["sma50"] = SMAIndicator(close=df["close_price"], window=50).sma_indicator()
-    # ATR
     atr = AverageTrueRange(high=df["high"], low=df["low"], close=df["close_price"], window=14)
     df["atr"] = atr.average_true_range()
     df.ffill(inplace=True)
     return df
 
-# ------------------------------------------------------------------------------
-# Análisis de sentimiento avanzado con Transformers
-# ------------------------------------------------------------------------------
+# =============================================================================
+# ANÁLISIS AVANZADO DE SENTIMIENTO CON TRANSFORMERS
+# =============================================================================
+
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
     return pipeline("sentiment-analysis")
@@ -89,15 +88,15 @@ def load_sentiment_pipeline():
 def get_advanced_sentiment(text):
     sentiment_pipe = load_sentiment_pipeline()
     result = sentiment_pipe(text)[0]
-    # Convertir el score a una escala 0-100 (positivo: 50+score*50, negativo: 50-score*50)
     if result["label"].upper() == "POSITIVE":
         return 50 + (result["score"] * 50)
     else:
         return 50 - (result["score"] * 50)
 
-# ------------------------------------------------------------------------------
-# Carga y procesamiento de datos históricos
-# ------------------------------------------------------------------------------
+# =============================================================================
+# CARGA Y PROCESAMIENTO DE DATOS HISTÓRICOS
+# =============================================================================
+
 @st.cache_data
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     ticker_ids = {
@@ -128,7 +127,8 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df.rename(columns={"Date": "ds", "Close": "close_price", "Volume": "volume", "High": "high", "Low": "low"}, inplace=True)
+    df.rename(columns={"Date": "ds", "Close": "close_price", "Volume": "volume",
+                       "High": "high", "Low": "low"}, inplace=True)
     df = compute_indicators(df)
     return df[["ds", "close_price", "volume", "high", "low", "RSI", "rsi_norm", "macd", "atr"]]
 
@@ -141,9 +141,10 @@ def create_sequences(data, window_size):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
-# ------------------------------------------------------------------------------
-# Tuning de hiperparámetros con Optuna
-# ------------------------------------------------------------------------------
+# =============================================================================
+# TUNING DE HIPERPARÁMETROS CON OPTUNA
+# =============================================================================
+
 def objective(trial, X_train, y_train, X_val, y_val, input_shape):
     lr = trial.suggest_loguniform("learning_rate", 1e-5, 1e-3)
     lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
@@ -164,7 +165,7 @@ def objective(trial, X_train, y_train, X_val, y_val, input_shape):
     model = train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=batch_size)
     preds = model.predict(X_val, verbose=0)
     reconst = np.concatenate([preds, np.zeros((len(preds), 5))], axis=1)
-    loss = np.sqrt(mean_squared_error(y_val, reconst[:,0]))
+    loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
     return loss
 
 def tune_hyperparameters(X_train, y_train, X_val, y_val, input_shape):
@@ -172,9 +173,10 @@ def tune_hyperparameters(X_train, y_train, X_val, y_val, input_shape):
     study.optimize(lambda trial: objective(trial, X_train, y_train, X_val, y_val, input_shape), n_trials=20)
     return study.best_params
 
-# ------------------------------------------------------------------------------
-# Modelo Prophet para tendencias a largo plazo
-# ------------------------------------------------------------------------------
+# =============================================================================
+# MODELO PROPHET PARA TENDENCIAS A LARGO PLAZO
+# =============================================================================
+
 @st.cache_data
 def train_prophet_model(df):
     df_prophet = df[["ds", "close_price"]].copy()
@@ -184,15 +186,17 @@ def train_prophet_model(df):
     model.fit(df_prophet)
     return model
 
-# ------------------------------------------------------------------------------
-# Ensamble de predicciones (LSTM + Prophet)
-# ------------------------------------------------------------------------------
+# =============================================================================
+# ENSAMBLE DE PREDICCIONES (LSTM + PROPHET)
+# =============================================================================
+
 def ensemble_prediction(lstm_pred, prophet_pred, weight_lstm=0.7):
     return weight_lstm * lstm_pred + (1 - weight_lstm) * prophet_pred
 
-# ------------------------------------------------------------------------------
-# Análisis de sentimiento y cálculo combinado
-# ------------------------------------------------------------------------------
+# =============================================================================
+# ANÁLISIS DE SENTIMIENTO Y CÁLCULO COMBINADO
+# =============================================================================
+
 @st.cache_data(ttl=300)
 def get_newsapi_articles(coin_id):
     newsapi_key = st.secrets.get("newsapi_key", "")
@@ -266,9 +270,10 @@ def adjust_predictions_for_sentiment(future_preds, gauge_val):
         return future_preds * 0.97
     return future_preds
 
-# ------------------------------------------------------------------------------
-# Ensamble: Entrenamiento y Predicción
-# ------------------------------------------------------------------------------
+# =============================================================================
+# ENSAMBLE: ENTRENAMIENTO Y PREDICCIÓN
+# =============================================================================
+
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None, use_optuna=False):
     with st.spinner("Esto puede tardar un poco, enseguida estamos..."):
         df = load_crypto_data(coin_id, start_date, end_date)
@@ -278,7 +283,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
         df["log_price"] = np.log1p(df["close_price"])
         df["log_volume"] = np.log1p(df["volume"] + 1)
-
         data_array = df[["log_price", "log_volume", "rsi_norm", "macd", "atr"]].values
         scaler = MinMaxScaler()
         scaled_data = scaler.fit_transform(data_array)
@@ -400,9 +404,10 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
             "real_prices": real_prices
         }
 
-# ------------------------------------------------------------------------------
-# Aplicación principal
-# ------------------------------------------------------------------------------
+# =============================================================================
+# APLICACIÓN STREAMLIT
+# =============================================================================
+
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
@@ -413,7 +418,7 @@ def main_app():
     Se analiza el sentimiento del mercado mediante la agregación de noticias relevantes (NewsAPI) y el índice **Fear & Greed**; para ello se emplea un análisis avanzado basado en Transformers y TextBlob.  
     Se entrena un modelo LSTM para predecir precios a corto plazo y se complementa con un modelo Prophet para captar tendencias a medio-largo plazo; ambas predicciones se combinan mediante un ensamble ponderado.  
     La herramienta muestra intervalos de predicción y señales de trading simples, permitiendo tomar decisiones informadas en un entorno volátil.  
-    La interfaz es responsive y se puede descargar la predicción en CSV.
+    La interfaz es responsive y permite descargar las predicciones en CSV.
     """)
 
     st.sidebar.title("Configuración de Predicción")
