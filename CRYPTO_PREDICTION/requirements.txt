@@ -10,6 +10,5 @@ statsmodels
 prophet
 textblob
 keras-tuner
-tweepy
 yfinance
 newsapi-python

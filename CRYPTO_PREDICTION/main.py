@@ -21,7 +21,6 @@ import socket
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import keras_tuner as kt
-import tweepy
 from newsapi import NewsApiClient
 
 # ------------------------------------------------------------------------------
@@ -54,7 +53,7 @@ coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 coinid_to_coingecko = {v: v if v != "xrp" else "ripple" for v in coincap_ids.values()}
 
 # ------------------------------------------------------------------------------
-# Características predefinidas de volatilidad
+# Características predefinidas de volatilidad por criptomoneda
 # ------------------------------------------------------------------------------
 crypto_characteristics = {
     "bitcoin": {"volatility": 0.03},
@@ -78,12 +77,12 @@ def robust_mape(y_true, y_pred, eps=1e-9):
     """Calcula el Error Porcentual Absoluto Medio (MAPE) evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
-# Cargar datos históricos usando yfinance; se aplanan las columnas si es necesario.
+# Cargar datos históricos mediante yfinance
 @st.cache_data
 def load_crypto_data(coin_id, start_date, end_date):
     """
-    Descarga datos históricos de una criptomoneda mediante yfinance.
-    Se utiliza el ticker correspondiente (ej. "BTC-USD").
+    Descarga datos históricos de una criptomoneda utilizando yfinance.
+    Se utiliza el ticker correspondiente (por ejemplo, "BTC-USD").
     """
     ticker_ids = {
         "bitcoin": "BTC-USD",
@@ -108,7 +107,6 @@ def load_crypto_data(coin_id, start_date, end_date):
         st.warning("No se obtuvieron datos de yfinance.")
         return None
     df = df.reset_index()
-    # Aplanar columnas si existe MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
     df.rename(columns={"Date": "ds", "Close": "close_price"}, inplace=True)
@@ -162,7 +160,6 @@ def get_dynamic_params(df, horizon_days, coin_id):
     real_volatility = df["close_price"].pct_change().std()
     base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
     combined_volatility = (real_volatility + base_volatility) / 2.0
-
     window_size = int(max(15, min(60, horizon_days * (1.0 + combined_volatility * 5))))
     epochs = int(max(40, min(250, (len(df) / 70) + combined_volatility * 400)))
     batch_size = int(max(16, min(64, (combined_volatility * 500) + 16)))
@@ -172,7 +169,6 @@ def get_dynamic_params(df, horizon_days, coin_id):
     dense_units = int(max(30, min(100, 50 + (combined_volatility * 100))))
     learning_rate = 0.0005 if combined_volatility < 0.08 else 0.0002
     l2_lambda = 0.01 if combined_volatility < 0.07 else 0.02
-
     return {
         "window_size": window_size,
         "epochs": epochs,
@@ -210,76 +206,6 @@ def get_coingecko_community_activity(coin_id):
         return 50.0
 
 # ------------------------------------------------------------------------------
-# Integración con la API de Twitter mediante Tweepy
-# ------------------------------------------------------------------------------
-def get_twitter_bearer():
-    """
-    Obtiene el token Bearer de Twitter desde st.secrets o las variables de entorno.
-    """
-    token = st.secrets.get("twitter_bearer")
-    if not token:
-        token = os.environ.get("twitter_bearer")
-    if not token:
-        st.error("No se encontró el token 'twitter_bearer'.")
-    return token
-
-@st.cache_data(ttl=300)
-def get_twitter_news(coin_symbol):
-    """
-    Obtiene tweets recientes utilizando Tweepy (API de Twitter v2 gratuita).
-    Se buscan tweets que contengan el símbolo de la criptomoneda y "crypto", se excluyen retweets y se filtra por inglés.
-    """
-    bearer_token = get_twitter_bearer()
-    if not bearer_token:
-        return []
-    try:
-        client = tweepy.Client(bearer_token=bearer_token)
-        query = f"{coin_symbol} crypto -is:retweet lang:en"
-        response = client.search_recent_tweets(query=query, tweet_fields=["created_at", "text", "id"], max_results=10)
-        tweets = []
-        if response.data:
-            for tweet in response.data:
-                tweets.append({
-                    "text": tweet.text,
-                    "pubDate": tweet.created_at.strftime("%Y-%m-%d %H:%M:%S") if tweet.created_at else "",
-                    "link": f"https://twitter.com/i/web/status/{tweet.id}"
-                })
-        return tweets
-    except Exception as e:
-        st.error(f"Error al obtener tweets: {e}")
-        return []
-
-def get_twitter_sentiment(coin_symbol):
-    """
-    Calcula el sentimiento promedio a partir de los tweets obtenidos mediante Tweepy.
-    Retorna un puntaje en el rango [0, 100].
-    """
-    tweets = get_twitter_news(coin_symbol)
-    if not tweets:
-        return 50.0
-    sentiments = []
-    for tweet in tweets:
-        blob = TextBlob(tweet["text"])
-        sentiment = blob.sentiment.polarity
-        sentiment_score = 50 + (sentiment * 50)
-        sentiments.append(sentiment_score)
-    return np.mean(sentiments) if sentiments else 50.0
-
-def get_crypto_sentiment_combined(coin_id):
-    """
-    Combina el sentimiento de la criptomoneda (extraído de Twitter) con el índice Fear & Greed
-    para calcular un valor gauge:
-        gauge_val = 50 + (crypto_sent - market_sent)
-    El valor se ajusta al rango [0, 100].
-    """
-    symbol = coinid_to_symbol[coin_id]
-    crypto_sent = get_twitter_sentiment(symbol)
-    market_sent = get_fear_greed_index()
-    gauge_val = 50 + (crypto_sent - market_sent)
-    gauge_val = max(0, min(100, gauge_val))
-    return crypto_sent, market_sent, gauge_val
-
-# ------------------------------------------------------------------------------
 # Integración con NewsAPI para obtener noticias gratuitas
 # ------------------------------------------------------------------------------
 @st.cache_data(ttl=300)
@@ -311,6 +237,35 @@ def get_newsapi_articles(coin_symbol):
     except Exception as e:
         st.error(f"Error al obtener noticias: {e}")
         return []
+
+def get_news_sentiment(coin_symbol):
+    """
+    Calcula el sentimiento promedio a partir de los artículos obtenidos mediante NewsAPI.
+    Retorna un puntaje en el rango [0, 100].
+    """
+    articles = get_newsapi_articles(coin_symbol)
+    if not articles:
+        return 50.0
+    sentiments = []
+    for article in articles:
+        text = (article["title"] or "") + " " + (article["description"] or "")
+        blob = TextBlob(text)
+        sentiments.append(50 + (blob.sentiment.polarity * 50))
+    return np.mean(sentiments) if sentiments else 50.0
+
+def get_crypto_sentiment_combined(coin_id):
+    """
+    Combina el sentimiento de las noticias (extraído de NewsAPI) con el índice Fear & Greed
+    para calcular un valor gauge:
+        gauge_val = 50 + (news_sent - market_sent)
+    El valor se ajusta al rango [0, 100].
+    """
+    symbol = coinid_to_symbol[coin_id]
+    news_sent = get_news_sentiment(symbol)
+    market_sent = get_fear_greed_index()
+    gauge_val = 50 + (news_sent - market_sent)
+    gauge_val = max(0, min(100, gauge_val))
+    return news_sent, market_sent, gauge_val
 
 # ------------------------------------------------------------------------------
 # Keras Tuner (Hyperband)
@@ -350,7 +305,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     if df is None or df.empty:
         return None
     symbol = coinid_to_symbol[coin_id]
-    crypto_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
+    news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
     sentiment_factor = gauge_val / 100.0
     params = get_dynamic_params(df, horizon_days, coin_id)
     window_size = params["window_size"]
@@ -430,7 +385,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
         "mape": lstm_mape,
         "sentiment_factor": sentiment_factor,
         "symbol": symbol,
-        "crypto_sent": crypto_sent,
+        "crypto_sent": news_sent,  # Sentimiento basado en noticias
         "market_sent": market_sent,
         "gauge_val": gauge_val,
         "future_dates": future_dates,
@@ -448,8 +403,8 @@ def main_app():
     **Descripción del Modelo:**  
     Esta aplicación utiliza un avanzado modelo LSTM para predecir precios futuros de criptomonedas (por ejemplo, Bitcoin, Ethereum, Ripple).  
     Los datos históricos se obtienen mediante yfinance y los hiperparámetros se ajustan dinámicamente (con optimización opcional mediante Keras Tuner Hyperband) según la volatilidad.  
-    Además, se estima el sentimiento del mercado combinando el índice Fear & Greed con el sentimiento extraído de tweets (usando Tweepy)  
-    y se obtienen noticias recientes mediante NewsAPI. Las predicciones se evalúan utilizando RMSE y MAPE, y se visualizan en gráficos interactivos.
+    Además, se estima el sentimiento del mercado combinando el índice Fear & Greed con el sentimiento extraído de noticias (obtenidas mediante NewsAPI).  
+    Las predicciones se evalúan utilizando RMSE y MAPE, y se visualizan en gráficos interactivos.
     """)
     st.sidebar.title("Configuración de Predicción")
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
@@ -504,7 +459,7 @@ def main_app():
                 result = train_and_predict_with_sentiment(coin_id, horizon, start_date, end_date_with_offset, tune=optimize_hp)
             if result:
                 st.success("¡Entrenamiento y predicción completados!")
-                st.write(f"Sentimiento Cripto ({result['symbol']}): {result['crypto_sent']:.2f}")
+                st.write(f"Sentimiento Noticias ({result['symbol']}): {result['crypto_sent']:.2f}")
                 st.write(f"Sentimiento Mercado (Fear & Greed): {result['market_sent']:.2f}")
                 st.write(f"Gauge Combinado: {result['gauge_val']:.2f}")
                 col1, col2 = st.columns(2)
@@ -626,7 +581,7 @@ def main_app():
                         margin=dict(l=20, r=20, t=80, b=20)
                     )
                     st.plotly_chart(fig_sentiment, use_container_width=True)
-                    st.write(f"**Sentimiento Cripto ({result['symbol']}):** {crypto_sent:.2f}")
+                    st.write(f"**Sentimiento Noticias ({result['symbol']}):** {crypto_sent:.2f}")
                     st.write(f"**Sentimiento Mercado (Fear & Greed):** {market_sent:.2f}")
                     st.write(f"**Gauge Value:** {gauge_val:.2f} → **{gauge_text}**")
                     if gauge_val > 50:
