@@ -11,7 +11,7 @@ prophet
 textblob
 yfinance
 newsapi-python
-pip install ta
+ta
 transformers
 torch
 optuna
