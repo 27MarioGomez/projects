@@ -21,6 +21,8 @@ from dateutil.parser import parse as date_parse
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
+from prophet import Prophet
+import talib  # Asegúrate de que TA-Lib esté instalado
 
 # ------------------------------------------------------------------------------
 # Configuración SSL y sesión HTTP
@@ -32,7 +34,7 @@ adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
 # ------------------------------------------------------------------------------
-# Diccionarios de criptomonedas
+# Diccionarios de criptomonedas y sus símbolos
 # ------------------------------------------------------------------------------
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
@@ -51,50 +53,31 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # ------------------------------------------------------------------------------
-# Características predefinidas (no se usan directamente)
+# Función para calcular indicadores técnicos con TA‑Lib
 # ------------------------------------------------------------------------------
-crypto_characteristics = {
-    "bitcoin": {"volatility": 0.03},
-    "ethereum": {"volatility": 0.05},
-    "xrp": {"volatility": 0.08},
-    "binance-coin": {"volatility": 0.06},
-    "cardano": {"volatility": 0.07},
-    "solana": {"volatility": 0.09},
-    "dogecoin": {"volatility": 0.12},
-    "polkadot": {"volatility": 0.07},
-    "polygon": {"volatility": 0.06},
-    "litecoin": {"volatility": 0.04},
-    "tron": {"volatility": 0.06},
-    "stellar": {"volatility": 0.05}
-}
+def compute_indicators(df):
+    # Asumimos que df contiene 'close_price', 'high' y 'low'
+    df["RSI"] = talib.RSI(df["close_price"], timeperiod=14)
+    df["rsi_norm"] = df["RSI"] / 100.0
+    df["macd"], df["macdsignal"], df["macdhist"] = talib.MACD(df["close_price"], fastperiod=12, slowperiod=26, signalperiod=9)
+    upper, middle, lower = talib.BBANDS(df["close_price"], timeperiod=20)
+    df["bollinger_upper"] = upper
+    df["bollinger_lower"] = lower
+    df["sma50"] = talib.SMA(df["close_price"], timeperiod=50)
+    df["atr"] = talib.ATR(df["high"], df["low"], df["close_price"], timeperiod=14)
+    # Se pueden añadir más indicadores si se desea
+    df.fillna(method="bfill", inplace=True)
+    return df
 
 # ------------------------------------------------------------------------------
-# Funciones de utilidad
+# Funciones de carga y procesamiento de datos
 # ------------------------------------------------------------------------------
-def robust_mape(y_true, y_pred, eps=1e-9):
-    """Calcula el MAPE evitando división por cero."""
-    return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
-
-def compute_rsi(series, period=14):
-    """
-    Computa el RSI (Relative Strength Index) para una serie de precios.
-    Usamos media simple de ganancias/pérdidas, se podría usar un EWMA.
-    """
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50.0)  # Por defecto, 50 si no hay suficientes datos
-    return rsi
-
 @st.cache_data
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     """
-    Descarga datos históricos (precio y volumen) de una criptomoneda usando yfinance.
-    - Si no se especifica rango, se descarga todo el histórico (period="max").
+    Descarga datos históricos de una criptomoneda usando yfinance.
+    Incluye High y Low para indicadores técnicos.
+    Si no se especifica rango, descarga todo el histórico.
     """
     ticker_ids = {
         "bitcoin": "BTC-USD",
@@ -119,36 +102,33 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
         df = yf.download(ticker, period="max", progress=False)
     else:
         df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-
     if df.empty:
         st.warning("No se obtuvieron datos de yfinance.")
         return None
-    
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df.rename(columns={"Date": "ds", "Close": "close_price", "Volume": "volume"}, inplace=True)
-    if "volume" not in df.columns:
-        df["volume"] = 0.0
-
-    # Computamos RSI (opcional) con base en close_price
-    df["RSI"] = compute_rsi(df["close_price"], period=14).fillna(50.0)
-
-    return df[["ds", "close_price", "volume", "RSI"]]
+    df.rename(columns={"Date": "ds", "Close": "close_price", "Volume": "volume", "High": "high", "Low": "low"}, inplace=True)
+    df = compute_indicators(df)
+    return df[["ds", "close_price", "volume", "high", "low", "RSI", "rsi_norm", "macd", "atr"]]
 
 def create_sequences(data, window_size):
     """
-    data: Nx3 => [log_price, log_volume, RSI_normalizado]
-    y => log_price
+    Genera secuencias para el modelo LSTM.
+    data: array con columnas [log_price, log_volume, rsi_norm, macd, atr]
+    y: log_price
     """
     if len(data) <= window_size:
         return None, None
     X, y = [], []
     for i in range(window_size, len(data)):
         X.append(data[i - window_size:i])
-        y.append(data[i, 0])  # la primera columna es log_price
+        y.append(data[i, 0])
     return np.array(X), np.array(y)
 
+# ------------------------------------------------------------------------------
+# Modelo LSTM y entrenamiento
+# ------------------------------------------------------------------------------
 def build_lstm_model(input_shape,
                      learning_rate=0.0005,
                      l2_lambda=0.01,
@@ -156,24 +136,18 @@ def build_lstm_model(input_shape,
                      lstm_units2=64,
                      dropout_rate=0.3,
                      dense_units=100):
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    from tensorflow.keras.optimizers import Adam
-    from tensorflow.keras.regularizers import l2
-
     model = Sequential([
         LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
         Dropout(dropout_rate),
         LSTM(lstm_units2, kernel_regularizer=l2(l2_lambda)),
         Dropout(dropout_rate),
         Dense(dense_units, activation="relu", kernel_regularizer=l2(l2_lambda)),
-        Dense(1)  # predecimos log_price
+        Dense(1)
     ])
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
 def train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=32):
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
     tf.keras.backend.clear_session()
     callbacks = [
         EarlyStopping(patience=10, restore_best_weights=True),
@@ -189,21 +163,35 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=32)
     )
     return model
 
-@st.cache_data(ttl=3600)
-def get_fear_greed_index():
-    """Obtiene el índice Fear & Greed."""
-    try:
-        data = requests.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
-        return float(data["data"][0]["value"])
-    except Exception:
-        st.warning("No se pudo obtener el índice Fear & Greed. Se usará 50.0 por defecto.")
-        return 50.0
+# ------------------------------------------------------------------------------
+# Modelo Prophet para tendencias a largo plazo
+# ------------------------------------------------------------------------------
+@st.cache_data
+def train_prophet_model(df):
+    """
+    Entrena un modelo Prophet usando el histórico de precios (logarithmizado).
+    """
+    df_prophet = df[["ds", "close_price"]].copy()
+    df_prophet["y"] = np.log1p(df_prophet["close_price"])
+    model = Prophet()
+    model.fit(df_prophet)
+    return model
 
+# ------------------------------------------------------------------------------
+# Ensamble de modelos: LSTM y Prophet
+# ------------------------------------------------------------------------------
+def ensemble_prediction(lstm_pred, prophet_pred, weight_lstm=0.7):
+    """Combina la predicción de LSTM y Prophet con un promedio ponderado."""
+    return weight_lstm * lstm_pred + (1 - weight_lstm) * prophet_pred
+
+# ------------------------------------------------------------------------------
+# NewsAPI y Sentimiento
+# ------------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_newsapi_articles(coin_id):
     """
-    Obtiene hasta 10 artículos de noticias recientes usando NewsAPI, 
-    ordenados de más reciente a más antiguo.
+    Obtiene hasta 10 artículos de noticias usando NewsAPI.
+    Ordena los artículos de más reciente a más antiguo.
     """
     newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
@@ -221,13 +209,11 @@ def get_newsapi_articles(coin_id):
                 description = art.get("description") or "Sin descripción"
                 pub_date = art.get("publishedAt") or "Fecha no disponible"
                 link = art.get("url") or "#"
-
                 try:
                     parsed_date = date_parse(pub_date)
                 except:
                     parsed_date = datetime(1970, 1, 1)
                 pub_date_str = parsed_date.strftime("%Y-%m-%d %H:%M:%S")
-
                 articles.append({
                     "title": title,
                     "description": description,
@@ -236,7 +222,6 @@ def get_newsapi_articles(coin_id):
                     "image": image_url,
                     "parsed_date": parsed_date
                 })
-            # Ordenar de más reciente a más antiguo
             articles = sorted(articles, key=lambda x: x["parsed_date"], reverse=True)
         return articles
     except Exception as e:
@@ -244,6 +229,7 @@ def get_newsapi_articles(coin_id):
         return []
 
 def get_news_sentiment(coin_id):
+    """Calcula el sentimiento (0..100) a partir de los artículos de NewsAPI."""
     articles = get_newsapi_articles(coin_id)
     if not articles:
         return 50.0
@@ -256,6 +242,10 @@ def get_news_sentiment(coin_id):
     return np.mean(sentiments) if sentiments else 50.0
 
 def get_crypto_sentiment_combined(coin_id):
+    """
+    Combina el sentimiento de las noticias y el índice Fear & Greed.
+    gauge_val = 50 + (news_sent - market_sent)
+    """
     news_sent = get_news_sentiment(coin_id)
     market_sent = get_fear_greed_index()
     gauge_val = 50 + (news_sent - market_sent)
@@ -263,56 +253,54 @@ def get_crypto_sentiment_combined(coin_id):
     return news_sent, market_sent, gauge_val
 
 def adjust_predictions_for_sentiment(future_preds, gauge_val):
-    """
-    Ajuste final de predicciones si el gauge es Very Bullish (>80) o Very Bearish (<20).
-    """
+    """Ajusta las predicciones si el gauge es Very Bullish (>80) o Very Bearish (<20)."""
     if gauge_val > 80:
         return future_preds * 1.03
     elif gauge_val < 20:
         return future_preds * 0.97
     return future_preds
 
+# ------------------------------------------------------------------------------
+# Ensamble: Entrenamiento y predicción
+# ------------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     with st.spinner("Esto puede tardar un poco, enseguida estamos..."):
+        # 1) Cargar datos históricos
         df = load_crypto_data(coin_id, start_date, end_date)
         if df is None or df.empty:
             st.error("No se pudieron obtener datos históricos.")
             return None
 
-        # Calculamos RSI
-        # df ya tiene RSI, price, volume
-
-        # Transformaciones log
+        # 2) Transformación logarítmica de precio y volumen
         df["log_price"] = np.log1p(df["close_price"])
         df["log_volume"] = np.log1p(df["volume"] + 1)
-        # Normalizamos RSI en [0,1] de forma simple
-        df["rsi_norm"] = df["RSI"] / 100.0
 
-        # Sentimiento
+        # Los indicadores técnicos ya se calcularon en compute_indicators y RSI está normalizado en df["rsi_norm"]
+        # Usaremos: log_price, log_volume, rsi_norm, macd y atr.
+        # Rellenamos NaN si existen
+        df.fillna(method="bfill", inplace=True)
+
+        # 3) Entrenar modelo Prophet para largo plazo
+        prophet_model = train_prophet_model(df)
+
+        # 4) Sentimiento
         news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
         sentiment_factor = gauge_val / 100.0
 
-        # Hiperparámetros fijos
-        window_size = 60
-        epochs = 25
-        batch_size = 32
-        lstm_units1 = 128
-        lstm_units2 = 64
-        dropout_rate = 0.3
-        dense_units = 100
-        learning_rate = 0.0005
-        l2_lambda = 0.01
-
-        # Data array Nx3 => [log_price, log_volume, rsi_norm]
-        data_array = df[["log_price", "log_volume", "rsi_norm"]].values
+        # 5) Construir array de features para LSTM:
+        # Usamos columnas: log_price, log_volume, rsi_norm, macd, atr
+        data_array = df[["log_price", "log_volume", "rsi_norm", "macd", "atr"]].values
         scaler = MinMaxScaler()
         scaled_data = scaler.fit_transform(data_array)
 
+        # 6) Crear secuencias
+        window_size = 60
         X, y = create_sequences(scaled_data, window_size)
         if X is None:
             st.error("No hay suficientes datos para crear secuencias.")
             return None
 
+        # 7) Dividir datos en train/val/test
         split = int(len(X) * 0.8)
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
@@ -320,66 +308,79 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         X_val, y_val = X_train[val_split:], y_train[val_split:]
         X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-        # Añadimos el sentimiento como cuarta columna
+        # 8) Incorporar el factor de sentimiento (como columna adicional)
         X_train_adj = np.concatenate([X_train, np.full((X_train.shape[0], window_size, 1), sentiment_factor)], axis=-1)
         X_val_adj   = np.concatenate([X_val,   np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
         X_test_adj  = np.concatenate([X_test,  np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
+        input_shape = (window_size, 6)  # 5 features + 1 de sentimiento
 
-        input_shape = (window_size, 4)
-
-        model = build_lstm_model(
+        # 9) Construir y entrenar modelo LSTM
+        lstm_model = build_lstm_model(
             input_shape=input_shape,
-            learning_rate=learning_rate,
-            l2_lambda=l2_lambda,
-            lstm_units1=lstm_units1,
-            lstm_units2=lstm_units2,
-            dropout_rate=dropout_rate,
-            dense_units=dense_units
+            learning_rate=0.0005,
+            l2_lambda=0.01,
+            lstm_units1=128,
+            lstm_units2=64,
+            dropout_rate=0.3,
+            dense_units=100
         )
-        model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs, batch_size)
+        lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, lstm_model, epochs=25, batch_size=32)
 
-        # Predicción en test
-        preds_test_scaled = model.predict(X_test_adj, verbose=0)
-        # Reconstruimos Nx3 para revertir la escala
-        reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), 2))], axis=1)
+        # 10) Predicción en Test (LSTM)
+        preds_test_scaled = lstm_model.predict(X_test_adj, verbose=0)
+        # Reconstruir para revertir escala; rellenamos columnas dummy para las demás features
+        reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), 5))], axis=1)
         reconst_test_inv = scaler.inverse_transform(reconst_test)
         preds_test_log = reconst_test_inv[:, 0]
         lstm_test_preds = np.expm1(preds_test_log)
 
-        # Reconstruir y_test
-        reconst_y = np.concatenate([y_test.reshape(-1,1), np.zeros((len(y_test),2))], axis=1)
+        reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), 5))], axis=1)
         reconst_y_inv = scaler.inverse_transform(reconst_y)
-        y_test_log = reconst_y_inv[:,0]
+        y_test_log = reconst_y_inv[:, 0]
         y_test_real = np.expm1(y_test_log)
 
         lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
         lstm_mape = robust_mape(y_test_real, lstm_test_preds)
 
-        # Predicción futura
+        # 11) Predicción futura con LSTM
         future_preds_log = []
         last_window = scaled_data[-window_size:]
         current_input = np.concatenate([
-            last_window.reshape(1, window_size, 3),
+            last_window.reshape(1, window_size, 5),
             np.full((1, window_size, 1), sentiment_factor)
-        ], axis=-1)  # shape => (1, window_size, 4)
-
+        ], axis=-1)  # shape: (1, window_size, 6)
         for _ in range(horizon_days):
-            pred_scaled = model.predict(current_input, verbose=0)[0][0]
-            # Reconstruimos Nx3
-            reconst_future = np.array([[pred_scaled, 0.0, 0.0]])
+            pred_scaled = lstm_model.predict(current_input, verbose=0)[0][0]
+            reconst_future = np.array([[pred_scaled, 0, 0, 0, 0, 0]])
             reconst_future_inv = scaler.inverse_transform(reconst_future)
             pred_log = reconst_future_inv[0, 0]
             future_preds_log.append(pred_log)
-            # Actualizamos
             new_feature = np.copy(current_input[:, -1:, :])
-            new_feature[0, 0, 0] = pred_scaled  # la prediccion escalada
-            new_feature[0, 0, 1] = current_input[0, -1, 1]  # se mantiene
-            new_feature[0, 0, 2] = current_input[0, -1, 2]  # se mantiene
-            new_feature[0, 0, 3] = sentiment_factor
+            new_feature[0, 0, 0] = pred_scaled
+            new_feature[0, 0, 1] = current_input[0, -1, 1]  # volumen
+            new_feature[0, 0, 2] = current_input[0, -1, 2]  # RSI
+            new_feature[0, 0, 3] = current_input[0, -1, 3]  # MACD
+            new_feature[0, 0, 4] = current_input[0, -1, 4]  # ATR
+            new_feature[0, 0, 5] = sentiment_factor
             current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
+        lstm_future_preds = np.expm1(np.array(future_preds_log))
 
-        future_preds = np.expm1(np.array(future_preds_log))
-        # Ajuste por gauge
+        # 12) Predicción con Prophet (sobre todo el histórico)
+        df_prophet = df[["ds", "close_price"]].copy()
+        df_prophet.rename(columns={"close_price": "y"}, inplace=True)
+        df_prophet["y"] = np.log1p(df_prophet["y"])
+        prophet_model = Prophet()
+        prophet_model.fit(df_prophet)
+        future_prophet = prophet_model.make_future_dataframe(periods=horizon_days)
+        forecast = prophet_model.predict(future_prophet)
+        # Usamos la predicción de los últimos 'horizon_days'
+        prophet_preds_log = forecast["yhat"].tail(horizon_days).values
+        prophet_preds = np.expm1(prophet_preds_log)
+
+        # 13) Ensamble de predicciones: ponderamos 70% LSTM y 30% Prophet
+        future_preds = ensemble_prediction(lstm_future_preds, prophet_preds, weight_lstm=0.7)
+
+        # 14) Ajuste final por sentimiento (si gauge es muy extremo)
         future_preds = adjust_predictions_for_sentiment(future_preds, gauge_val)
 
         last_date = df["ds"].iloc[-1]
@@ -402,21 +403,20 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
             "real_prices": real_prices
         }
 
+# ------------------------------------------------------------------------------
+# Aplicación Streamlit
+# ------------------------------------------------------------------------------
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
 
-    # Descripción del dashboard
     st.markdown("""
     **Descripción del Dashboard:**  
-    Este panel integra **datos históricos** de criptomonedas (precio, volumen, RSI) obtenidos desde *yfinance*, 
-    junto con un **análisis de sentimiento** derivado de las noticias (NewsAPI) y el índice **Fear & Greed**.  
-    Empleamos un modelo LSTM con **25 épocas** y **transformación logarítmica** para mejorar la precisión en mercados volátiles.  
-    Además, contemplamos un ligero ajuste adicional en la predicción si el sentimiento de mercado 
-    es extremadamente positivo o negativo, reflejando así la influencia de noticias geopolíticas y económicas, 
-    aunque no se muestren explícitamente en el grid de noticias.  
-    Con ello buscamos **aproximar** los precios futuros lo mejor posible, pero el mercado cripto 
-    sigue siendo impredecible y sujeto a eventos externos no siempre captados por nuestras fuentes de datos.
+    Este panel integra datos históricos de criptomonedas obtenidos desde *yfinance* y complementados con numerosos indicadores técnicos (precio, volumen, RSI, MACD, ATR, entre otros) – calculados en parte con TA‑Lib.  
+    Además, se analiza el sentimiento del mercado mediante la agregación de noticias relevantes (NewsAPI) y el índice **Fear & Greed**.  
+    Se entrena un modelo LSTM para predecir precios a corto plazo y se combina con un modelo Prophet para captar tendencias a medio-largo plazo, generando un ensamble de modelos cuya predicción final se obtiene mediante un promedio ponderado.  
+    La herramienta ofrece además intervalos de predicción y señales de trading simples para ayudar a tomar decisiones informadas.  
+    Este dashboard está diseñado para ser intuitivo y responsive, adaptándose tanto a usuarios técnicos como no técnicos.
     """)
 
     st.sidebar.title("Configuración de Predicción")
@@ -450,13 +450,11 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
 
-    # Carga de datos
-    if start_date is not None and end_date_with_offset is not None:
+    if start_date and end_date_with_offset:
         df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     else:
         df_prices = load_crypto_data(coin_id, None, None)
 
-    # Sección histórico
     if df_prices is not None and not df_prices.empty:
         fig_hist = px.line(
             df_prices,
@@ -468,14 +466,13 @@ def main_app():
         fig_hist.update_layout(template="plotly_dark")
         fig_hist.update_xaxes(tickformat="%Y-%m-%d")
         st.plotly_chart(fig_hist, use_container_width=True)
-
         if show_stats:
             st.subheader("Estadísticas Descriptivas")
             st.write(df_prices["close_price"].describe())
     else:
         st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
 
-    # Pestañas
+    # Pestañas principales
     tabs = st.tabs(["Entrenamiento y Test", "Predicción de Precios", "Análisis de Sentimientos", "Noticias Recientes"])
 
     # Tab 1: Entrenamiento y Test
@@ -491,11 +488,6 @@ def main_app():
                 col1, col2 = st.columns(2)
                 col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error medio en USD.")
                 col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error porcentual medio.")
-
-                if not (len(result["test_dates"]) > 0 and len(result["real_prices"]) > 0 and len(result["test_preds"]) > 0):
-                    st.error("Datos insuficientes para la gráfica de Test.")
-                    st.session_state["result"] = result
-                    return
 
                 min_len = min(len(result["test_dates"]), len(result["real_prices"]), len(result["test_preds"]))
                 result["test_dates"] = result["test_dates"][:min_len]
@@ -533,12 +525,11 @@ def main_app():
             result = st.session_state["result"]
             if result is not None:
                 st.header(f"Predicción de Precios - {crypto_name}")
-                last_date = result["df"]["ds"].iloc[-1]
+                last_date = result["df"]["ds"].iloc[-1].date()  # Solo la fecha, sin hora
                 current_price = result["df"]["close_price"].iloc[-1]
                 pred_series = np.concatenate(([current_price], result["future_preds"]))
-
                 fig_future = go.Figure()
-                future_dates_display = [last_date] + result["future_dates"]
+                future_dates_display = [last_date] + [fd.date() for fd in result["future_dates"]]
                 fig_future.add_trace(go.Scatter(
                     x=future_dates_display,
                     y=pred_series,
@@ -553,7 +544,6 @@ def main_app():
                     yaxis_title="Precio (USD)"
                 )
                 st.plotly_chart(fig_future, use_container_width=True)
-
                 st.subheader("Resultados Numéricos")
                 df_future = pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series})
                 st.dataframe(df_future.style.format({"Predicción": "{:.2f}"}))
@@ -571,7 +561,6 @@ def main_app():
                 crypto_sent = result["crypto_sent"]
                 market_sent = result["market_sent"]
                 gauge_val = result["gauge_val"]
-
                 if gauge_val < 20:
                     gauge_text = "Very Bearish"
                 elif gauge_val < 40:
@@ -582,7 +571,6 @@ def main_app():
                     gauge_text = "Bullish"
                 else:
                     gauge_text = "Very Bullish"
-
                 fig_sentiment = go.Figure(go.Indicator(
                     mode="gauge+number",
                     value=gauge_val,
@@ -615,20 +603,24 @@ def main_app():
                     margin=dict(l=20, r=20, t=80, b=20)
                 )
                 st.plotly_chart(fig_sentiment, use_container_width=True)
-
                 st.write(f"**Sentimiento Noticias ({result['symbol']}):** {crypto_sent:.2f}")
                 st.write(f"**Sentimiento Mercado (Fear & Greed):** {market_sent:.2f}")
                 st.write(f"**Gauge Value:** {gauge_val:.2f} → **{gauge_text}**")
-                if gauge_val > 50:
-                    st.write("**Tendencia:** El sentimiento de la cripto supera al del mercado. Posible escenario bullish.")
+                # Señal de trading simple:
+                current_price = result["df"]["close_price"].iloc[-1]
+                future_mean = np.mean(result["future_preds"])
+                if future_mean > current_price * 1.05 and gauge_val > 80:
+                    st.write("**Señal:** Buy (la predicción supera el precio actual en más de un 5% y el sentimiento es Very Bullish)")
+                elif future_mean < current_price * 0.95 and gauge_val < 20:
+                    st.write("**Señal:** Sell (la predicción es inferior al precio actual en más de un 5% y el sentimiento es Very Bearish)")
                 else:
-                    st.write("**Tendencia:** El sentimiento de la cripto es igual o inferior al del mercado. Se recomienda precaución.")
+                    st.write("**Señal:** Neutral")
             else:
                 st.warning("No se obtuvo un resultado válido. Reentrene el modelo.")
         else:
             st.info("Entrene el modelo primero.")
 
-    # Tab 4: Noticias Recientes en formato “grid” 3 por fila
+    # Tab 4: Noticias Recientes en formato grid (4 tarjetas por fila)
     with tabs[3]:
         symbol = coinid_to_symbol[coin_id]
         st.subheader(f"Últimas noticias sobre {crypto_name} ({symbol})")
@@ -639,16 +631,14 @@ def main_app():
                 <style>
                 .news-container {
                     display: grid;
-                    grid-template-columns: repeat(3, 1fr); /* 3 tarjetas por fila */
-                    grid-gap: 1rem;
+                    grid-template-columns: repeat(4, 1fr);
+                    gap: 1rem;
                 }
                 .news-item {
                     background-color: #2c2c3e;
                     padding: 0.5rem;
                     border-radius: 5px;
                     border: 1px solid #4a4a6a;
-                    display: inline-block;
-                    vertical-align: top;
                 }
                 .news-item img {
                     width: 100%;
@@ -664,7 +654,12 @@ def main_app():
                     font-size: 0.8rem;
                     margin: 0 0 0.3rem 0;
                 }
-                @media (max-width: 768px) {
+                @media (max-width: 1024px) {
+                    .news-container {
+                        grid-template-columns: repeat(2, 1fr);
+                    }
+                }
+                @media (max-width: 600px) {
                     .news-container {
                         grid-template-columns: 1fr;
                     }
@@ -691,6 +686,22 @@ def main_app():
             st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.warning("No se encontraron noticias recientes o ocurrió un error.")
+
+    # Opción de descarga de resultados (CSV)
+    if "result" in st.session_state:
+        result = st.session_state["result"]
+        if result:
+            df_download = pd.DataFrame({
+                "Fecha": result["future_dates"],
+                "Predicción": result["future_preds"]
+            })
+            csv = df_download.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Descargar predicciones en CSV",
+                data=csv,
+                file_name="predicciones.csv",
+                mime="text/csv"
+            )
 
 if __name__ == "__main__":
     main_app()

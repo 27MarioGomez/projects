@@ -11,3 +11,7 @@ prophet
 textblob
 yfinance
 newsapi-python
+ta-lib
+transformers
+torch
+optuna
