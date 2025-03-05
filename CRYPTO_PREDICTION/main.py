@@ -11,7 +11,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
 
-# Activar mixed precision si hay GPU compatible (se ignorará en CPU)
+# Activar mixed precision si hay GPU compatible (en CPU se ignora)
 if tf.config.list_physical_devices('GPU'):
     from tensorflow.keras.mixed_precision import set_global_policy
     set_global_policy('mixed_float16')
@@ -93,7 +93,7 @@ def get_advanced_sentiment(text):
         return 50 - (result["score"] * 50)
 
 # =============================================================================
-# Carga y preprocesamiento de datos históricos desde yfinance
+# Carga y preprocesamiento de datos históricos (yfinance)
 # =============================================================================
 @st.cache_data
 def load_crypto_data(coin_id, start_date=None, end_date=None):
@@ -162,8 +162,9 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs=20, batch_size=32)
         EarlyStopping(patience=10, restore_best_weights=True),
         ReduceLROnPlateau(patience=5, factor=0.5, min_lr=1e-6)
     ]
+    # Para el tuning final se usan 20 epochs
     model.fit(X_train, y_train, validation_data=(X_val, y_val),
-              epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
+              epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=1)
     return model
 
 # =============================================================================
@@ -182,7 +183,7 @@ def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.5, w_xgb=0.3
     return w_lstm * lstm_pred + w_xgb * xgb_pred + w_prophet * prophet_pred
 
 def medium_long_term_prediction(df, days=180):
-    df_prophet = df[["ds","close_price"]].copy()
+    df_prophet = df[["ds", "close_price"]].copy()
     df_prophet.rename(columns={"close_price": "y"}, inplace=True)
     df_prophet["y"] = np.log1p(df_prophet["y"])
     model = Prophet()
@@ -203,26 +204,30 @@ def apply_shock_factor(df, base_sentiment):
     df.drop(columns=["pct_change"], inplace=True)
     return np.array(sentiment_array)
 
-def sample_for_tuning(X, y, sample_size=200):
+# =============================================================================
+# Para acelerar el tuning, usamos una muestra más pequeña
+def sample_for_tuning(X, y, sample_size=100):
     if len(X) > sample_size:
         return X[-sample_size:], y[-sample_size:]
     return X, y
 
 # =============================================================================
-# Optimización de hiperparámetros con Optuna (3 ensayos, 5 epochs para tuning)
+# Optimización de hiperparámetros con Optuna
+# Durante el tuning, se entrena solo 1 época por ensayo para acelerar el proceso
 # =============================================================================
 def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
     trial_num = trial.number + 1
-    progress_text.write(f"Ensayo {trial_num}: Entrenando (5 epochs) con batch_size={trial.suggest_int('batch_size', 16, 64, step=16)} ...")
+    batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
+    progress_text.write(f"Ensayo {trial_num}: Entrenando (1 epoch) con batch_size={batch_size} ...")
     lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
     lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
     dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5, step=0.05)
     dense_units = trial.suggest_int("dense_units", 50, 150, step=10)
-    batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
 
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=5, batch_size=batch_size)
+    # Solo 1 epoch para el tuning rápido
+    model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=1, batch_size=batch_size)
     preds = model.predict(X_val_adj, verbose=0)
     reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)
     loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
@@ -231,8 +236,8 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     return loss
 
 def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    X_train_sample, y_train_sample = sample_for_tuning(X_train_adj, y_train, sample_size=200)
-    X_val_sample, y_val_sample = sample_for_tuning(X_val_adj, y_val, sample_size=200)
+    X_train_sample, y_train_sample = sample_for_tuning(X_train_adj, y_train, sample_size=100)
+    X_val_sample, y_val_sample = sample_for_tuning(X_val_adj, y_val, sample_size=100)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=1, n_warmup_steps=2)
     study = optuna.create_study(direction="minimize", pruner=pruner)
     study.optimize(lambda trial: objective(trial, X_train_sample, y_train_sample, X_val_sample, y_val_sample, input_shape, progress_text, progress_bar),
