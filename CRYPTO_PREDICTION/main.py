@@ -33,7 +33,7 @@ adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
 # ------------------------------------------------------------------------------
-# Diccionarios: Identificadores y símbolos de criptomonedas
+# Diccionarios de criptomonedas y sus símbolos
 # ------------------------------------------------------------------------------
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
@@ -82,8 +82,8 @@ def robust_mape(y_true, y_pred, eps=1e-9):
 @st.cache_data
 def load_crypto_data(coin_id, start_date, end_date):
     """
-    Descarga datos históricos de una criptomoneda utilizando yfinance.
-    Se utiliza el ticker correspondiente (por ejemplo, "BTC-USD").
+    Descarga datos históricos de una criptomoneda mediante yfinance.
+    Se utiliza el ticker correspondiente (ej. "BTC-USD").
     """
     ticker_ids = {
         "bitcoin": "BTC-USD",
@@ -119,7 +119,7 @@ def load_crypto_data(coin_id, start_date, end_date):
 def create_sequences(data, window_size):
     """
     Genera secuencias de datos para el modelo LSTM.
-    Retorna (X, y) donde X son subsecuencias y y los valores a predecir.
+    Retorna (X, y) donde X son subsecuencias y y son los valores a predecir.
     """
     if len(data) <= window_size:
         return None, None
@@ -291,7 +291,7 @@ def get_crypto_sentiment_combined(coin_id):
     return news_sent, market_sent, gauge_val
 
 # ------------------------------------------------------------------------------
-# Keras Tuner (Hyperband) - siempre se optimiza
+# Keras Tuner (Hyperband) - Optimización predeterminada
 # ------------------------------------------------------------------------------
 def build_model_tuner(input_shape):
     """
@@ -304,7 +304,6 @@ def build_model_tuner(input_shape):
         dense_units = hp.Int('dense_units', min_value=30, max_value=100, step=10, default=50)
         learning_rate = hp.Float('learning_rate', min_value=1e-4, max_value=1e-3, sampling='log', default=1e-4)
         l2_lambda = hp.Float('l2_lambda', min_value=1e-4, max_value=2e-2, sampling='log', default=1e-2)
-
         model = Sequential([
             LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
             Dropout(dropout_rate),
@@ -315,7 +314,6 @@ def build_model_tuner(input_shape):
         ])
         model.compile(optimizer=Adam(learning_rate), loss='mse')
         return model
-
     return model_builder
 
 # ------------------------------------------------------------------------------
@@ -323,8 +321,8 @@ def build_model_tuner(input_shape):
 # ------------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date, tune=True):
     """
-    Entrena el modelo LSTM y realiza predicciones futuras integrando el factor de sentimiento (gauge_val/100)
-    en cada timestep. Se optimizan los hiperparámetros con Keras Tuner (Hyperband) de forma predeterminada.
+    Entrena el modelo LSTM y realiza predicciones futuras integrando el factor de sentimiento
+    (gauge_val/100) en cada timestep. Se optimizan los hiperparámetros utilizando Keras Tuner.
     """
     df = load_crypto_data(coin_id, start_date, end_date)
     if df is None or df.empty:
@@ -336,6 +334,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
 
     params = get_dynamic_params(df, horizon_days, coin_id)
     window_size = params["window_size"]
+    # Para acelerar el entrenamiento, se usan 10 épocas en la optimización
     epochs = params["epochs"]
     batch_size = params["batch_size"]
     lstm_units1 = params["lstm_units1"]
@@ -364,18 +363,19 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
 
     input_shape = (window_size, 2)
 
-    # Optimización de hiperparámetros con Keras Tuner (siempre se optimiza)
+    # Se optimizan los hiperparámetros con Keras Tuner (se usan 10 épocas para acelerar)
+    st.info("Optimizando hiperparámetros con Keras Tuner (esto puede tardar unos segundos)...")
     tuner = kt.Hyperband(
         build_model_tuner(input_shape),
         objective='val_loss',
-        max_epochs=50,
+        max_epochs=10,
         factor=3,
         directory='kt_dir',
         project_name='crypto_prediction_hb'
     )
-    stop_early = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    stop_early = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
     tuner.search(X_train_adj, y_train, validation_data=(X_val_adj, y_val),
-                 epochs=50, batch_size=batch_size, callbacks=[stop_early], verbose=0)
+                 epochs=10, batch_size=batch_size, callbacks=[stop_early], verbose=0)
     lstm_model = tuner.get_best_models(num_models=1)[0]
 
     # Predicción en el conjunto de test
@@ -474,7 +474,6 @@ def main_app():
         start_date = default_start
         end_date_with_offset = default_end + timedelta(days=1)
 
-    # Se elimina la opción de optimizar hiperparámetros; se optimiza por defecto.
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
 
@@ -575,6 +574,7 @@ def main_app():
                     yaxis_title="Precio (USD)"
                 )
                 st.plotly_chart(fig_future, use_container_width=True)
+
                 st.subheader("Resultados Numéricos")
                 df_future = pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series})
                 st.dataframe(df_future.style.format({"Predicción": "{:.2f}"}))
@@ -639,6 +639,7 @@ def main_app():
                         margin=dict(l=20, r=20, t=80, b=20)
                     )
                     st.plotly_chart(fig_sentiment, use_container_width=True)
+
                     st.write(f"**Sentimiento Noticias ({result['symbol']}):** {news_sent:.2f}")
                     st.write(f"**Sentimiento Mercado (Fear & Greed):** {market_sent:.2f}")
                     st.write(f"**Gauge Value:** {gauge_val:.2f} → **{gauge_text}**")
@@ -704,36 +705,5 @@ def main_app():
         else:
             st.warning("No se encontraron noticias recientes o ocurrió un error.")
 
-# ------------------------------------------------------------------------------
-# Función de prueba opcional para verificar la clave de NewsAPI
-# ------------------------------------------------------------------------------
-def test_newsapi():
-    """
-    Función de prueba para verificar si se está leyendo la clave de NewsAPI
-    y si la API responde adecuadamente.
-    """
-    st.write("Probando lectura de newsapi_key...")
-    newsapi_key = st.secrets.get("newsapi_key", "") or os.environ.get("newsapi_key")
-    if not newsapi_key:
-        st.error("No se encontró 'newsapi_key' en secrets ni en variables de entorno.")
-        return
-
-    st.success("Se leyó la clave de NewsAPI. Probando obtener artículos de 'crypto'...")
-    try:
-        newsapi = NewsApiClient(api_key=newsapi_key)
-        data = newsapi.get_everything(q="crypto", language="en", sort_by="relevancy", page_size=5)
-        articles = data.get("articles", [])
-        if articles:
-            st.success("Se obtuvieron artículos de NewsAPI:")
-            for art in articles:
-                st.write("- ", art.get("title", "Sin título"))
-        else:
-            st.warning("No se encontraron artículos. Verifica la API key o las restricciones del plan.")
-    except Exception as e:
-        st.error(f"Error al obtener noticias: {e}")
-
-# ------------------------------------------------------------------------------
-# MAIN
-# ------------------------------------------------------------------------------
 if __name__ == "__main__":
     main_app()
