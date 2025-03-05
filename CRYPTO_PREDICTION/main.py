@@ -22,17 +22,13 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-# Importar módulos específicos de la librería ta
+# Librería ta para indicadores
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
-# Pipeline para análisis avanzado de sentimiento
+# Transformers para análisis de sentimiento avanzado
 from transformers import pipeline
 import optuna
-
-# =============================================================================
-# CONFIGURACIÓN INICIAL
-# =============================================================================
 
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
@@ -40,10 +36,7 @@ retry = Retry(total=5, backoff_factor=1, status_forcelist=[429,500,502,503,504])
 adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
-# =============================================================================
-# DICCIONARIOS DE CRIPTOMONEDAS
-# =============================================================================
-
+# Diccionarios de criptomonedas
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -60,10 +53,6 @@ coincap_ids = {
 }
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
-# =============================================================================
-# INDICADORES TÉCNICOS CON LA LIBRERÍA TA
-# =============================================================================
-
 def compute_indicators(df):
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
     df["rsi_norm"] = df["RSI"] / 100.0
@@ -77,10 +66,6 @@ def compute_indicators(df):
     df.ffill(inplace=True)
     return df
 
-# =============================================================================
-# ANÁLISIS AVANZADO DE SENTIMIENTO CON TRANSFORMERS
-# =============================================================================
-
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
     return pipeline("sentiment-analysis")
@@ -92,10 +77,6 @@ def get_advanced_sentiment(text):
         return 50 + (result["score"] * 50)
     else:
         return 50 - (result["score"] * 50)
-
-# =============================================================================
-# CARGA Y PROCESAMIENTO DE DATOS HISTÓRICOS
-# =============================================================================
 
 @st.cache_data
 def load_crypto_data(coin_id, start_date=None, end_date=None):
@@ -130,7 +111,7 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     df.rename(columns={"Date": "ds", "Close": "close_price", "Volume": "volume",
                        "High": "high", "Low": "low"}, inplace=True)
     df = compute_indicators(df)
-    # Eliminar filas con NaN para evitar problemas posteriores
+    # Eliminar filas con NaN
     df.dropna(inplace=True)
     return df[["ds", "close_price", "volume", "high", "low", "RSI", "rsi_norm", "macd", "atr"]]
 
@@ -139,13 +120,9 @@ def create_sequences(data, window_size):
         return None, None
     X, y = [], []
     for i in range(window_size, len(data)):
-        X.append(data[i-window_size:i])
+        X.append(data[i - window_size:i])
         y.append(data[i, 0])
     return np.array(X), np.array(y)
-
-# =============================================================================
-# BUILD_LSTM_MODEL Y TRAIN_MODEL
-# =============================================================================
 
 def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
                      lstm_units1=128, lstm_units2=64, dropout_rate=0.3, dense_units=100):
@@ -176,10 +153,6 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=32)
     )
     return model
 
-# =============================================================================
-# TUNING CON OPTUNA
-# =============================================================================
-
 def objective(trial, X_train, y_train, X_val, y_val, input_shape):
     lr = trial.suggest_loguniform("learning_rate", 1e-5, 1e-3)
     lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
@@ -187,7 +160,7 @@ def objective(trial, X_train, y_train, X_val, y_val, input_shape):
     dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5, step=0.05)
     dense_units = trial.suggest_int("dense_units", 50, 150, step=10)
     batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
-    
+
     model = build_lstm_model(
         input_shape=input_shape,
         learning_rate=lr,
@@ -199,7 +172,7 @@ def objective(trial, X_train, y_train, X_val, y_val, input_shape):
     )
     model = train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=batch_size)
     preds = model.predict(X_val, verbose=0)
-    reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)  # 1+4 = 5 columnas
+    reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)
     loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
     return loss
 
@@ -207,10 +180,6 @@ def tune_hyperparameters(X_train, y_train, X_val, y_val, input_shape):
     study = optuna.create_study(direction="minimize")
     study.optimize(lambda trial: objective(trial, X_train, y_train, X_val, y_val, input_shape), n_trials=20)
     return study.best_params
-
-# =============================================================================
-# MODELO PROPHET
-# =============================================================================
 
 @st.cache_data
 def train_prophet_model(df):
@@ -221,16 +190,8 @@ def train_prophet_model(df):
     model.fit(df_prophet)
     return model
 
-# =============================================================================
-# ENSAMBLE DE PREDICCIONES (LSTM + PROPHET)
-# =============================================================================
-
 def ensemble_prediction(lstm_pred, prophet_pred, weight_lstm=0.7):
     return weight_lstm * lstm_pred + (1 - weight_lstm) * prophet_pred
-
-# =============================================================================
-# ANÁLISIS DE SENTIMIENTO Y CÁLCULO COMBINADO
-# =============================================================================
 
 @st.cache_data(ttl=300)
 def get_newsapi_articles(coin_id):
@@ -305,9 +266,19 @@ def adjust_predictions_for_sentiment(future_preds, gauge_val):
         return future_preds * 0.97
     return future_preds
 
-# =============================================================================
-# ENSAMBLE: ENTRENAMIENTO Y PREDICCIÓN
-# =============================================================================
+# ------------------------------------------------------------------------------
+# Predicción a medio-largo plazo con Prophet (ejemplo 180 días)
+# ------------------------------------------------------------------------------
+def medium_long_term_prediction(df, days=180):
+    df_prophet = df[["ds", "close_price"]].copy()
+    df_prophet.rename(columns={"close_price": "y"}, inplace=True)
+    df_prophet["y"] = np.log1p(df_prophet["y"])
+    model = Prophet()
+    model.fit(df_prophet)
+    future_dates = model.make_future_dataframe(periods=days)
+    forecast = model.predict(future_dates)
+    forecast["exp_yhat"] = np.expm1(forecast["yhat"])
+    return model, forecast
 
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None, use_optuna=False):
     with st.spinner("Esto puede tardar un poco, enseguida estamos..."):
@@ -384,6 +355,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
         lstm_mape = np.mean(np.abs((y_test_real - lstm_test_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
 
+        # Predicción futura con LSTM
         future_preds_log = []
         last_window = scaled_data[-window_size:]
         current_input = np.concatenate([
@@ -392,7 +364,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         ], axis=-1)
         for _ in range(horizon_days):
             pred_scaled = lstm_model.predict(current_input, verbose=0)[0][0]
-            reconst_future = np.array([[pred_scaled, 0, 0, 0, 0]])  # 5 columnas: 1 predicción + 4 ceros
+            reconst_future = np.array([[pred_scaled, 0, 0, 0, 0]])  # 5 columnas
             reconst_future_inv = scaler.inverse_transform(reconst_future)
             pred_log = reconst_future_inv[0, 0]
             future_preds_log.append(pred_log)
@@ -402,6 +374,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
             current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
         lstm_future_preds = np.expm1(np.array(future_preds_log))
 
+        # Entrenamiento Prophet (corto plazo)
         df_prophet = df[["ds", "close_price"]].copy()
         df_prophet.rename(columns={"close_price": "y"}, inplace=True)
         df_prophet["y"] = np.log1p(df_prophet["y"])
@@ -412,6 +385,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         prophet_preds_log = forecast["yhat"].tail(horizon_days).values
         prophet_preds = np.expm1(prophet_preds_log)
 
+        # Ensamble final (70% LSTM, 30% Prophet)
         future_preds = ensemble_prediction(lstm_future_preds, prophet_preds, weight_lstm=0.7)
         future_preds = adjust_predictions_for_sentiment(future_preds, gauge_val)
 
@@ -429,15 +403,11 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
             "symbol": coinid_to_symbol[coin_id],
             "crypto_sent": get_news_sentiment(coin_id),
             "market_sent": get_fear_greed_index(),
-            "gauge_val": get_crypto_sentiment_combined(coin_id)[2],
+            "gauge_val": gauge_val,
             "future_dates": future_dates,
             "test_dates": test_dates,
             "real_prices": real_prices
         }
-
-# =============================================================================
-# APLICACIÓN STREAMLIT
-# =============================================================================
 
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
@@ -445,11 +415,10 @@ def main_app():
 
     st.markdown("""
     **Descripción del Dashboard:**  
-    Este panel integra datos históricos de criptomonedas obtenidos desde *yfinance*, enriquecidos con múltiples indicadores técnicos (precio, volumen, RSI, MACD, ATR, entre otros) calculados con **ta**.  
-    Se analiza el sentimiento del mercado mediante la agregación de noticias relevantes (NewsAPI) y el índice **Fear & Greed**; para ello se emplea un análisis avanzado basado en Transformers y TextBlob.  
-    Se entrena un modelo LSTM para predecir precios a corto plazo y se complementa con un modelo Prophet para captar tendencias a medio-largo plazo; ambas predicciones se combinan mediante un ensamble ponderado.  
-    La herramienta muestra intervalos de predicción y señales de trading simples, permitiendo tomar decisiones informadas en un entorno volátil.  
-    La interfaz es responsive y permite descargar la predicción en CSV.
+    Este panel integra datos históricos de criptomonedas (yfinance) con múltiples indicadores técnicos (RSI, MACD, ATR, etc.) y analiza el sentimiento (NewsAPI, Fear & Greed, Transformers, TextBlob).  
+    Se entrena un modelo LSTM para predicción de corto plazo y se combina con un modelo Prophet para captar tendencias, generando un ensamble final.  
+    Además, se incluyen predicciones a medio-largo plazo (ejemplo de 180 días) en una pestaña separada, y se muestran señales de trading simples según el sentimiento.  
+    La interfaz es responsive, con tarjetas de noticias más pequeñas, y se pueden descargar los resultados en CSV.
     """)
 
     st.sidebar.title("Configuración de Predicción")
@@ -479,10 +448,11 @@ def main_app():
         start_date = None
         end_date_with_offset = None
 
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
+    horizon = st.sidebar.slider("Días a predecir (corto plazo):", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
     use_optuna = st.sidebar.checkbox("Optimizar hiperparámetros con Optuna", value=False)
 
+    # Cargar datos
     if start_date and end_date_with_offset:
         df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     else:
@@ -505,8 +475,9 @@ def main_app():
     else:
         st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
 
-    tabs = st.tabs(["Entrenamiento y Test", "Predicción de Precios", "Análisis de Sentimientos", "Noticias Recientes"])
+    tabs = st.tabs(["Entrenamiento y Test", "Predicción de Precios", "Análisis de Sentimientos", "Predicción a Medio/Largo Plazo", "Noticias Recientes"])
 
+    # Entrenamiento y Test
     with tabs[0]:
         if st.button("Entrenar Modelo y Predecir"):
             result = train_and_predict_with_sentiment(coin_id, horizon, start_date, end_date_with_offset, use_optuna)
@@ -547,11 +518,12 @@ def main_app():
                 st.plotly_chart(fig_test, use_container_width=True)
                 st.session_state["result"] = result
 
+    # Predicción de Precios
     with tabs[1]:
         if "result" in st.session_state and isinstance(st.session_state["result"], dict):
             result = st.session_state["result"]
             if result is not None:
-                st.header(f"Predicción de Precios - {crypto_name}")
+                st.header(f"Predicción de Precios (Corto Plazo) - {crypto_name}")
                 last_date = result["df"]["ds"].iloc[-1].date()
                 current_price = result["df"]["close_price"].iloc[-1]
                 pred_series = np.concatenate(([current_price], result["future_preds"]))
@@ -574,11 +546,18 @@ def main_app():
                 st.subheader("Resultados Numéricos")
                 df_future = pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series})
                 st.dataframe(df_future.style.format({"Predicción": "{:.2f}"}))
+                st.download_button(
+                    label="Descargar predicciones (corto plazo) en CSV",
+                    data=df_future.to_csv(index=False).encode('utf-8'),
+                    file_name="predicciones_corto_plazo.csv",
+                    mime="text/csv"
+                )
             else:
                 st.info("No se obtuvo resultado. Entrene el modelo primero.")
         else:
             st.info("Entrene el modelo primero.")
 
+    # Análisis de Sentimientos
     with tabs[2]:
         if "result" in st.session_state and isinstance(st.session_state["result"], dict):
             result = st.session_state["result"]
@@ -645,9 +624,52 @@ def main_app():
         else:
             st.info("Entrene el modelo primero.")
 
+    # Predicción a Medio/Largo Plazo
     with tabs[3]:
-        symbol = coinid_to_symbol[coin_id]
-        st.subheader(f"Últimas noticias sobre {crypto_name} ({symbol})")
+        st.header("Predicción a Medio/Largo Plazo")
+        st.info("Esta sección usa principalmente Prophet para predecir un horizonte de 180 días (ejemplo).")
+        if df_prices is not None and not df_prices.empty:
+            model_long, forecast_long = medium_long_term_prediction(df_prices, days=180)
+            fig_long = go.Figure()
+            fig_long.add_trace(go.Scatter(
+                x=df_prices["ds"],
+                y=df_prices["close_price"],
+                mode="lines",
+                name="Histórico",
+                line=dict(color="#1f77b4", width=2)
+            ))
+            # Predicción
+            forecast_long_part = forecast_long[["ds", "exp_yhat"]].tail(180)
+            fig_long.add_trace(go.Scatter(
+                x=forecast_long_part["ds"],
+                y=forecast_long_part["exp_yhat"],
+                mode="lines",
+                name="Predicción a 180 días",
+                line=dict(color="#ff7f0e", width=2, dash="dash")
+            ))
+            fig_long.update_layout(
+                title="Predicción a 180 días (Medio/Largo Plazo) - Prophet",
+                template="plotly_dark",
+                xaxis_title="Fecha",
+                yaxis_title="Precio (USD)"
+            )
+            st.plotly_chart(fig_long, use_container_width=True)
+
+            st.subheader("Valores Numéricos (Horizonte 180 días)")
+            st.dataframe(forecast_long_part.rename(columns={"exp_yhat": "Predicción (USD)"})
+                         .style.format({"Predicción (USD)": "{:.2f}"}))
+            st.download_button(
+                label="Descargar predicción (medio/largo plazo) en CSV",
+                data=forecast_long_part.to_csv(index=False).encode('utf-8'),
+                file_name="predicciones_medio_largo_plazo.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("No se encontraron datos para la predicción a medio/largo plazo.")
+
+    # Noticias Recientes
+    with tabs[4]:
+        st.subheader(f"Últimas noticias sobre {crypto_name} ({coinid_to_symbol[coin_id]})")
         articles = get_newsapi_articles(coin_id)
         if articles:
             st.markdown(
@@ -655,7 +677,7 @@ def main_app():
                 <style>
                 .news-container {
                     display: grid;
-                    grid-template-columns: repeat(4, 1fr);
+                    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
                     gap: 1rem;
                 }
                 .news-item {
@@ -663,6 +685,7 @@ def main_app():
                     padding: 0.5rem;
                     border-radius: 5px;
                     border: 1px solid #4a4a6a;
+                    max-width: 280px;
                 }
                 .news-item img {
                     width: 100%;
@@ -680,7 +703,7 @@ def main_app():
                 }
                 @media (max-width: 1024px) {
                     .news-container {
-                        grid-template-columns: repeat(2, 1fr);
+                        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
                     }
                 }
                 @media (max-width: 600px) {
@@ -710,21 +733,6 @@ def main_app():
             st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.warning("No se encontraron noticias recientes o ocurrió un error.")
-
-    if "result" in st.session_state:
-        result = st.session_state["result"]
-        if result:
-            df_download = pd.DataFrame({
-                "Fecha": result["future_dates"],
-                "Predicción": result["future_preds"]
-            })
-            csv = df_download.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="Descargar predicciones en CSV",
-                data=csv,
-                file_name="predicciones.csv",
-                mime="text/csv"
-            )
 
 if __name__ == "__main__":
     main_app()
