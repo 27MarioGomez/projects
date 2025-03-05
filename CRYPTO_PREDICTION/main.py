@@ -20,11 +20,10 @@ from textblob import TextBlob
 import socket
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-import keras_tuner as kt
 from newsapi import NewsApiClient
 
 # ------------------------------------------------------------------------------
-# Configuración inicial: Certificados SSL y sesión HTTP
+# Configuración SSL y sesión HTTP
 # ------------------------------------------------------------------------------
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
@@ -52,9 +51,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 coinid_to_coingecko = {v: v if v != "xrp" else "ripple" for v in coincap_ids.values()}
 
-# ------------------------------------------------------------------------------
-# Características predefinidas de volatilidad por criptomoneda
-# ------------------------------------------------------------------------------
+# Características de volatilidad por criptomoneda
 crypto_characteristics = {
     "bitcoin": {"volatility": 0.03},
     "ethereum": {"volatility": 0.05},
@@ -74,15 +71,13 @@ crypto_characteristics = {
 # Funciones de utilidad
 # ------------------------------------------------------------------------------
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """
-    Calcula el Error Porcentual Absoluto Medio (MAPE) evitando división por cero.
-    """
+    """Calcula el Error Porcentual Absoluto Medio (MAPE) evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
 @st.cache_data
 def load_crypto_data(coin_id, start_date, end_date):
     """
-    Descarga datos históricos de una criptomoneda utilizando yfinance.
+    Descarga datos históricos de una criptomoneda usando yfinance.
     Se utiliza el ticker correspondiente (ej. "BTC-USD").
     """
     ticker_ids = {
@@ -117,10 +112,7 @@ def load_crypto_data(coin_id, start_date, end_date):
     return df
 
 def create_sequences(data, window_size):
-    """
-    Genera secuencias de datos para el modelo LSTM.
-    Retorna (X, y) donde X son subsecuencias y y los valores a predecir.
-    """
+    """Genera secuencias de datos para el modelo LSTM."""
     if len(data) <= window_size:
         return None, None
     X, y = [], []
@@ -129,14 +121,16 @@ def create_sequences(data, window_size):
         y.append(data[i, 0])
     return np.array(X), np.array(y)
 
-# ------------------------------------------------------------------------------
-# Modelado: LSTM y ajuste dinámico de hiperparámetros
-# ------------------------------------------------------------------------------
-def build_lstm_model(input_shape, learning_rate=0.001, l2_lambda=0.01,
-                     lstm_units1=100, lstm_units2=80, dropout_rate=0.3, dense_units=50):
-    """
-    Construye un modelo LSTM con regularización L2 y dropout.
-    """
+def build_lstm_model(
+    input_shape,
+    learning_rate=0.001,
+    l2_lambda=0.01,
+    lstm_units1=100,
+    lstm_units2=80,
+    dropout_rate=0.3,
+    dense_units=50
+):
+    """Construye un modelo LSTM con regularización L2 y dropout."""
     model = Sequential([
         LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
         Dropout(dropout_rate),
@@ -149,15 +143,13 @@ def build_lstm_model(input_shape, learning_rate=0.001, l2_lambda=0.01,
     return model
 
 def train_model(X_train, y_train, X_val, y_val, model, epochs, batch_size):
-    """
-    Entrena el modelo LSTM utilizando early stopping y reducción de la tasa de aprendizaje.
-    """
+    """Entrena el modelo LSTM con early stopping y reducción de la LR."""
     tf.keras.backend.clear_session()
     callbacks = [
         EarlyStopping(patience=10, restore_best_weights=True),
         ReduceLROnPlateau(patience=5, factor=0.5, min_lr=1e-6)
     ]
-    history = model.fit(
+    model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
         epochs=epochs,
@@ -165,24 +157,27 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs, batch_size):
         callbacks=callbacks,
         verbose=0
     )
-    return model, history
+    return model
 
 def get_dynamic_params(df, horizon_days, coin_id):
     """
-    Ajusta dinámicamente los hiperparámetros del modelo en función de la volatilidad y datos históricos.
-    Devuelve un diccionario con los hiperparámetros.
+    Ajusta hiperparámetros dinámicamente según la volatilidad y datos históricos.
+    Devuelve un diccionario con los hiperparámetros, pero establecemos epochs=25
+    para intentar reducir RMSE y MAPE al máximo.
     """
     real_volatility = df["close_price"].pct_change().std()
     base_volatility = crypto_characteristics.get(coin_id, {"volatility": 0.05})["volatility"]
     combined_volatility = (real_volatility + base_volatility) / 2.0
 
+    # Ajustes dinámicos
     window_size = int(max(15, min(60, horizon_days * (1.0 + combined_volatility * 5))))
-    epochs = int(max(40, min(250, (len(df) / 70) + combined_volatility * 400)))
-    batch_size = int(max(16, min(64, (combined_volatility * 500) + 16)))
-    lstm_units1 = int(max(50, min(200, 100 + (combined_volatility * 400))))
-    lstm_units2 = int(max(30, min(150, 80 + (combined_volatility * 200))))
+    # Se fija a 25 epochs
+    epochs = 25
+    batch_size = int(max(16, min(32, (combined_volatility * 200) + 16)))
+    lstm_units1 = int(max(50, min(150, 100 + (combined_volatility * 200))))
+    lstm_units2 = int(max(30, min(100, 80 + (combined_volatility * 100))))
     dropout_rate = 0.3 if combined_volatility < 0.1 else 0.4
-    dense_units = int(max(30, min(100, 50 + (combined_volatility * 100))))
+    dense_units = int(max(30, min(80, 50 + (combined_volatility * 60))))
     learning_rate = 0.0005 if combined_volatility < 0.08 else 0.0002
     l2_lambda = 0.01 if combined_volatility < 0.07 else 0.02
 
@@ -198,14 +193,9 @@ def get_dynamic_params(df, horizon_days, coin_id):
         "l2_lambda": l2_lambda
     }
 
-# ------------------------------------------------------------------------------
-# Datos de sentimiento del mercado
-# ------------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_fear_greed_index():
-    """
-    Obtiene el índice Fear & Greed del mercado.
-    """
+    """Obtiene el índice Fear & Greed del mercado."""
     try:
         data = session.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
         return float(data["data"][0]["value"])
@@ -213,27 +203,14 @@ def get_fear_greed_index():
         st.warning("No se pudo obtener el índice Fear & Greed. Se usará 50.0 por defecto.")
         return 50.0
 
-@st.cache_data(ttl=3600)
-def get_coingecko_community_activity(coin_id):
-    """
-    Obtiene la actividad comunitaria desde CoinGecko (opcional).
-    """
-    try:
-        cg_id = coinid_to_coingecko.get(coin_id, coin_id)
-        data = session.get(f"https://api.coingecko.com/api/v3/coins/{cg_id}?community_data=true", timeout=10).json()["community_data"]
-        activity = max(data.get("twitter_followers", 0), data.get("reddit_average_posts_48h", 0) * 1000)
-        return min(100, (activity / 20000000) * 100) if activity > 0 else 50.0
-    except Exception:
-        return 50.0
-
 # ------------------------------------------------------------------------------
-# Integración con NewsAPI para obtener noticias y calcular sentimiento
+# Integración con NewsAPI para noticias y sentimiento
 # ------------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_newsapi_articles(coin_symbol):
     """
-    Obtiene artículos de noticias recientes utilizando NewsAPI.
-    Se buscan artículos en inglés ordenados por relevancia.
+    Obtiene artículos de noticias recientes usando NewsAPI.
+    Se buscan artículos en inglés, ordenados por relevancia, con un máximo de 10.
     """
     newsapi_key = st.secrets.get("newsapi_key", "") or os.environ.get("newsapi_key")
     if not newsapi_key:
@@ -242,18 +219,17 @@ def get_newsapi_articles(coin_symbol):
 
     try:
         newsapi = NewsApiClient(api_key=newsapi_key)
-        data = newsapi.get_everything(q=coin_symbol,
-                                      language="en",
-                                      sort_by="relevancy",
-                                      page_size=10)
+        data = newsapi.get_everything(q=coin_symbol, language="en", sort_by="relevancy", page_size=10)
         articles = []
         if data.get("articles"):
             for art in data["articles"]:
+                image_url = art.get("urlToImage", "")
                 articles.append({
                     "title": art.get("title", "Sin título"),
                     "description": art.get("description", ""),
                     "pubDate": art.get("publishedAt", "")[:19].replace("T", " "),
-                    "link": art.get("url", "#")
+                    "link": art.get("url", "#"),
+                    "image": image_url
                 })
         return articles
     except Exception as e:
@@ -261,10 +237,7 @@ def get_newsapi_articles(coin_symbol):
         return []
 
 def get_news_sentiment(coin_symbol):
-    """
-    Calcula el sentimiento promedio a partir de los artículos obtenidos mediante NewsAPI.
-    Retorna un puntaje en el rango [0, 100].
-    """
+    """Calcula el sentimiento promedio a partir de artículos de NewsAPI."""
     articles = get_newsapi_articles(coin_symbol)
     if not articles:
         return 50.0
@@ -272,16 +245,15 @@ def get_news_sentiment(coin_symbol):
     for article in articles:
         text = (article["title"] or "") + " " + (article["description"] or "")
         blob = TextBlob(text)
-        polarity = blob.sentiment.polarity  # Valor entre -1 y 1
+        polarity = blob.sentiment.polarity  # -1..1
         sentiments.append(50 + (polarity * 50))
     return np.mean(sentiments) if sentiments else 50.0
 
 def get_crypto_sentiment_combined(coin_id):
     """
-    Combina el sentimiento de las noticias (NewsAPI) y el índice Fear & Greed
+    Combina el sentimiento de noticias (NewsAPI) y el índice Fear & Greed
     para generar un valor gauge:
-        gauge_val = 50 + (news_sent - market_sent)
-    El valor se ajusta al rango [0, 100].
+    gauge_val = 50 + (news_sent - market_sent)
     """
     symbol = coinid_to_symbol[coin_id]
     news_sent = get_news_sentiment(symbol)
@@ -291,38 +263,12 @@ def get_crypto_sentiment_combined(coin_id):
     return news_sent, market_sent, gauge_val
 
 # ------------------------------------------------------------------------------
-# Keras Tuner (Hyperband) - Optimización predeterminada
+# Entrenamiento y Predicción sin Keras Tuner
 # ------------------------------------------------------------------------------
-def build_model_tuner(input_shape):
+def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date):
     """
-    Función modelo para Keras Tuner. Ajusta los hiperparámetros del modelo LSTM usando Hyperband.
-    """
-    def model_builder(hp):
-        lstm_units1 = hp.Int('lstm_units1', min_value=50, max_value=200, step=50, default=100)
-        lstm_units2 = hp.Int('lstm_units2', min_value=30, max_value=150, step=30, default=60)
-        dropout_rate = hp.Float('dropout_rate', min_value=0.2, max_value=0.5, step=0.1, default=0.3)
-        dense_units = hp.Int('dense_units', min_value=30, max_value=100, step=10, default=50)
-        learning_rate = hp.Float('learning_rate', min_value=1e-4, max_value=1e-3, sampling='log', default=1e-4)
-        l2_lambda = hp.Float('l2_lambda', min_value=1e-4, max_value=2e-2, sampling='log', default=1e-2)
-        model = Sequential([
-            LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
-            Dropout(dropout_rate),
-            LSTM(lstm_units2, kernel_regularizer=l2(l2_lambda)),
-            Dropout(dropout_rate),
-            Dense(dense_units, activation='relu', kernel_regularizer=l2(l2_lambda)),
-            Dense(1)
-        ])
-        model.compile(optimizer=Adam(learning_rate), loss='mse')
-        return model
-    return model_builder
-
-# ------------------------------------------------------------------------------
-# Pipeline de Entrenamiento y Predicción con Sentimiento
-# ------------------------------------------------------------------------------
-def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date, tune=True):
-    """
-    Entrena el modelo LSTM y realiza predicciones futuras integrando el factor de sentimiento
-    (gauge_val/100) en cada timestep. Se optimizan los hiperparámetros utilizando Keras Tuner.
+    Entrena el modelo LSTM y realiza predicciones futuras integrando el factor de sentimiento (gauge_val/100)
+    en cada timestep. Se establecen 25 epochs para intentar reducir RMSE y MAPE al máximo.
     """
     df = load_crypto_data(coin_id, start_date, end_date)
     if df is None or df.empty:
@@ -332,9 +278,10 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
     sentiment_factor = gauge_val / 100.0
 
+    # Parámetros dinámicos
     params = get_dynamic_params(df, horizon_days, coin_id)
     window_size = params["window_size"]
-    # Se ignora el parámetro de épocas obtenido para el tuner, se usan 3 épocas para acelerar
+    epochs = params["epochs"]  # Se ha fijado en 25
     batch_size = params["batch_size"]
     lstm_units1 = params["lstm_units1"]
     lstm_units2 = params["lstm_units2"]
@@ -356,27 +303,26 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
+    # Incorporar el factor de sentimiento en el set de entrenamiento, validación y test
     X_train_adj = np.concatenate([X_train, np.full((X_train.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_val_adj   = np.concatenate([X_val,   np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_test_adj  = np.concatenate([X_test,  np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
 
     input_shape = (window_size, 2)
 
-    st.info("Optimizando hiperparámetros con Keras Tuner (esto puede tardar unos segundos)...")
-    tuner = kt.Hyperband(
-        build_model_tuner(input_shape),
-        objective='val_loss',
-        max_epochs=3,
-        factor=3,
-        directory='kt_dir',
-        project_name='crypto_prediction_hb'
+    # Construir y entrenar el modelo
+    lstm_model = build_lstm_model(
+        input_shape=input_shape,
+        learning_rate=learning_rate,
+        l2_lambda=l2_lambda,
+        lstm_units1=lstm_units1,
+        lstm_units2=lstm_units2,
+        dropout_rate=dropout_rate,
+        dense_units=dense_units
     )
-    stop_early = EarlyStopping(monitor='val_loss', patience=2, restore_best_weights=True)
-    tuner.search(X_train_adj, y_train, validation_data=(X_val_adj, y_val),
-                 epochs=3, batch_size=batch_size, callbacks=[stop_early], verbose=1)
-    lstm_model = tuner.get_best_models(num_models=1)[0]
+    lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, lstm_model, epochs, batch_size)
 
-    # Predicción en el conjunto de test
+    # Predicción en Test
     lstm_test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
     lstm_test_preds = scaler.inverse_transform(lstm_test_preds_scaled).flatten()
     y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
@@ -430,15 +376,12 @@ def main_app():
     st.title("Predicción de Precios Cripto 🔮")
     st.markdown("""
     **Descripción del Modelo:**  
-    Esta aplicación utiliza un avanzado modelo LSTM para predecir precios futuros de criptomonedas (por ejemplo, Bitcoin, Ethereum, Ripple).  
-    Los datos históricos se obtienen mediante yfinance y los hiperparámetros se ajustan dinámicamente (optimización predeterminada con Keras Tuner Hyperband) según la volatilidad.  
-    Además, se estima el sentimiento del mercado combinando el índice Fear & Greed con el sentimiento extraído de noticias (obtenidas mediante NewsAPI).  
-    Las predicciones se evalúan utilizando RMSE y MAPE, y se visualizan en gráficos interactivos.
+    Este dashboard entrena un modelo LSTM (25 épocas) para predecir precios futuros de criptomonedas (p. ej., Bitcoin, Ethereum, Ripple).  
+    Los datos históricos se obtienen de yfinance y los hiperparámetros se ajustan dinámicamente según la volatilidad, pero sin Keras Tuner.  
+    Se calcula un factor de sentimiento combinando noticias (NewsAPI) y Fear & Greed, y se muestran métricas (RMSE, MAPE), predicciones y un gauge de sentimiento.
     """)
 
-    # Para probar la lectura de la clave de NewsAPI, descomenta la siguiente línea:
-    # test_newsapi()
-
+    # Panel lateral
     st.sidebar.title("Configuración de Predicción")
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
@@ -475,6 +418,7 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
 
+    # Cargar datos históricos
     df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     if df_prices is not None and not df_prices.empty:
         fig_hist = px.line(
@@ -494,14 +438,15 @@ def main_app():
     else:
         st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
 
+    # Pestañas
     tabs = st.tabs(["🤖 Entrenamiento y Test", "🔮 Predicción de Precios", "📊 Análisis de Sentimientos", "📰 Noticias Recientes"])
 
     # Tab 1: Entrenamiento y Test
     with tabs[0]:
         st.header("Entrenamiento y Evaluación en Test")
         if st.button("Entrenar Modelo y Predecir"):
-            with st.spinner("Entrenando el modelo..."):
-                result = train_and_predict_with_sentiment(coin_id, horizon, start_date, end_date_with_offset, tune=True)
+            with st.spinner("Entrenando el modelo (25 épocas)..."):
+                result = train_and_predict_with_sentiment(coin_id, horizon, start_date, end_date_with_offset)
             if result:
                 st.success("¡Entrenamiento y predicción completados!")
                 st.write(f"Sentimiento Noticias ({result['symbol']}): {result['crypto_sent']:.2f}")
@@ -649,15 +594,16 @@ def main_app():
             else:
                 st.error("Datos de resultado inválidos. Reentrene el modelo.")
         else:
-            st.info("Entrene el modelo para ver el análisis de sentimientos.")
+            st.info("Entrene el modelo primero.")
 
-    # Tab 4: Noticias Recientes (NewsAPI)
+    # Tab 4: Noticias Recientes
     with tabs[3]:
         st.header("Noticias Recientes")
         symbol = coinid_to_symbol[coin_id]
         articles = get_newsapi_articles(symbol)
         if articles:
             st.subheader(f"Últimas noticias sobre {crypto_name}")
+            # Scroll horizontal y tarjetas con imagen
             st.markdown(
                 """
                 <style>
@@ -674,6 +620,12 @@ def main_app():
                     border-radius: 5px;
                     border: 1px solid #4a4a6a;
                 }
+                .news-item img {
+                    width: 100%;
+                    height: auto;
+                    border-radius: 5px;
+                    margin-bottom: 0.5rem;
+                }
                 .news-item h4 {
                     margin: 0 0 0.5rem 0;
                     font-size: 1.1rem;
@@ -688,9 +640,11 @@ def main_app():
             )
             st.markdown("<div class='news-container'>", unsafe_allow_html=True)
             for article in articles:
+                image_tag = f"<img src='{article['image']}' alt='News Image' />" if article['image'] else ""
                 st.markdown(
                     f"""
                     <div class='news-item'>
+                        {image_tag}
                         <h4>{article['title']}</h4>
                         <p><em>{article['pubDate']}</em></p>
                         <p>{article['description']}</p>

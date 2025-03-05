@@ -9,6 +9,5 @@ certifi
 statsmodels
 prophet
 textblob
-keras-tuner
 yfinance
 newsapi-python
