@@ -10,7 +10,7 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
-# Activar Mixed Precision para acelerar el entrenamiento (si la plataforma lo soporta)
+# Activar Mixed Precision (si tienes GPU compatible, de lo contrario se ignorará)
 from tensorflow.keras.mixed_precision import set_global_policy
 set_global_policy('mixed_float16')
 
@@ -33,12 +33,12 @@ from transformers import pipeline
 import optuna
 from xgboost import XGBRegressor
 
-# Reducir verbosidad de Optuna
+# Reducir la verbosidad de Optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
-retry = Retry(total=5, backoff_factor=1, status_forcelist=[429,500,502,503,504])
+retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
@@ -186,7 +186,7 @@ def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.5, w_xgb=0.3
 # Predicción a medio/largo plazo con Prophet
 # =============================================================================
 def medium_long_term_prediction(df, days=180):
-    df_prophet = df[["ds", "close_price"]].copy()
+    df_prophet = df[["ds","close_price"]].copy()
     df_prophet.rename(columns={"close_price": "y"}, inplace=True)
     df_prophet["y"] = np.log1p(df_prophet["y"])
     model = Prophet()
@@ -211,13 +211,10 @@ def apply_shock_factor(df, base_sentiment):
     return np.array(sentiment_array)
 
 # =============================================================================
-# Optimización de hiperparámetros con Optuna (MedianPruner, 5 ensayos, 25 epochs)
+# Optimización de hiperparámetros con Optuna (MedianPruner, 5 ensayos, 10 epochs)
 # =============================================================================
 def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    # Mostrar información adicional: número de ensayo y parámetros propuestos
-    trial_number = trial.number
-    progress_text.write(f"Ensayo {trial_number + 1}: Probando nuevos hiperparámetros...")
-
+    progress_text.write(f"Ensayo {trial.number + 1}: Probando nuevos hiperparámetros...")
     lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
     lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
@@ -226,26 +223,21 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
 
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    # Usamos 25 epochs para acelerar el tuning
-    model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=25, batch_size=batch_size)
+    # Usamos 10 epochs para la fase de tuning
+    model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=10, batch_size=batch_size)
     preds = model.predict(X_val_adj, verbose=0)
     reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)
     loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
-    
-    # Actualizamos la barra de progreso (por ejemplo, incrementamos 1/n_trials cada ensayo)
-    progress_bar.progress(min(100, 40 + int((trial_number+1)*10)))
-    progress_text.write(f"Ensayo {trial_number + 1}: Pérdida obtenida = {loss:.4f}")
+    progress_bar.progress(min(100, 40 + int((trial.number + 1) * 20)))
+    progress_text.write(f"Ensayo {trial.number + 1}: Pérdida obtenida = {loss:.4f}")
     return loss
 
 def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=2, n_warmup_steps=5)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=1, n_warmup_steps=3)
     study = optuna.create_study(direction="minimize", pruner=pruner)
-    study.optimize(
-        lambda trial: objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar),
-        n_trials=5
-    )
-    best_loss = study.best_value
-    progress_text.write(f"Optimización completada. Mejor pérdida: {best_loss:.4f}")
+    study.optimize(lambda trial: objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar),
+                   n_trials=3)
+    progress_text.write(f"Optimización completada. Mejor pérdida: {study.best_value:.4f}")
     return study.best_params
 
 # =============================================================================
@@ -416,9 +408,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     preds_test_log = reconst_test_inv[:, 0]
     lstm_test_preds = np.expm1(preds_test_log)
 
-    reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), 4))], axis=1)
+    reconst_y = np.concatenate([y_test.reshape(-1,1), np.zeros((len(y_test),4))], axis=1)
     reconst_y_inv = scaler.inverse_transform(reconst_y)
-    y_test_log = reconst_y_inv[:, 0]
+    y_test_log = reconst_y_inv[:,0]
     y_test_real = np.expm1(y_test_log)
 
     lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
@@ -433,13 +425,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     X_test_flat = flatten_sequences(X_test)
     xgb_test_scaled = xgb_model.predict(X_test_flat)
-    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1, 1), np.zeros((len(xgb_test_scaled), 4))], axis=1)
+    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1,1), np.zeros((len(xgb_test_scaled),4))], axis=1)
     xgb_test_inv = scaler.inverse_transform(xgb_reconst)
-    xgb_test_log = xgb_test_inv[:, 0]
+    xgb_test_log = xgb_test_inv[:,0]
     xgb_test_preds = np.expm1(xgb_test_log)
 
-    df_prophet = df[["ds", "close_price"]].copy()
-    df_prophet.rename(columns={"close_price": "y"}, inplace=True)
+    df_prophet = df[["ds","close_price"]].copy()
+    df_prophet.rename(columns={"close_price":"y"}, inplace=True)
     df_prophet["y"] = np.log1p(df_prophet["y"])
     prophet_model = Prophet()
     prophet_model.fit(df_prophet)
@@ -463,23 +455,23 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     future_preds_log_lstm = []
     for _ in range(horizon_days):
         p_scaled = lstm_model.predict(current_input, verbose=0)[0][0]
-        reconst_f = np.concatenate([[p_scaled], np.zeros(4)]).reshape(1, -1)
+        reconst_f = np.concatenate([[p_scaled], np.zeros(4)]).reshape(1,-1)
         inv_f = scaler.inverse_transform(reconst_f)
-        plog = inv_f[0, 0]
+        plog = inv_f[0,0]
         future_preds_log_lstm.append(plog)
         new_feature = np.copy(current_input[:, -1:, :])
-        new_feature[0, 0, 0] = p_scaled
-        new_feature[0, 0, 5] = last_shock
-        current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
+        new_feature[0,0,0] = p_scaled
+        new_feature[0,0,5] = last_shock
+        current_input = np.append(current_input[:,1:,:], new_feature, axis=1)
     lstm_future_preds = np.expm1(np.array(future_preds_log_lstm))
 
     X_last_flat = flatten_sequences(current_input)
     xgb_future_preds_log = []
     for _ in range(horizon_days):
         xgb_p = xgb_model.predict(X_last_flat)[0]
-        reconst_xgb = np.concatenate([[xgb_p], np.zeros((4,))]).reshape(1, -1)
+        reconst_xgb = np.concatenate([[xgb_p], np.zeros((4,))]).reshape(1,-1)
         inv_xgb = scaler.inverse_transform(reconst_xgb)
-        xgb_log = inv_xgb[0, 0]
+        xgb_log = inv_xgb[0,0]
         xgb_future_preds_log.append(xgb_log)
     xgb_future_preds = np.expm1(np.array(xgb_future_preds_log))
 
