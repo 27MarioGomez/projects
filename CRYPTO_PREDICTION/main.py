@@ -47,7 +47,7 @@ coincap_ids = {
     "TRON (TRX)": "tron",
     "Stellar (XLM)": "stellar"
 }
-# Se extrae el símbolo, por ejemplo, "Bitcoin (BTC)" → "BTC"
+# Extrae el símbolo, por ejemplo: "xrp" → "XRP"
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # ------------------------------------------------------------------------------
@@ -99,12 +99,11 @@ def load_crypto_data(coin_id, start_date, end_date):
     if not ticker:
         st.error("Ticker no encontrado para la criptomoneda.")
         return None
-
-    df = yf.download(ticker, start=start_date, end=end_date)
+    # Se añade progress=False para evitar el log del progreso
+    df = yf.download(ticker, start=start_date, end=end_date, progress=False)
     if df.empty:
         st.warning("No se obtuvieron datos de yfinance.")
         return None
-
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -123,11 +122,11 @@ def create_sequences(data, window_size):
     return np.array(X), np.array(y)
 
 # ------------------------------------------------------------------------------
-# Modelo LSTM con hiperparámetros fijos (25 épocas)
+# Modelo LSTM (25 épocas)
 # ------------------------------------------------------------------------------
 def build_lstm_model(input_shape, learning_rate=0.001, l2_lambda=0.01,
                      lstm_units1=100, lstm_units2=60, dropout_rate=0.3, dense_units=50):
-    """Construye el modelo LSTM."""
+    """Construye el modelo LSTM con hiperparámetros fijos."""
     model = Sequential([
         LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
         Dropout(dropout_rate),
@@ -238,34 +237,37 @@ def get_news_sentiment(coin_symbol):
 
 def get_crypto_sentiment_combined(coin_id):
     """
-    Combina el sentimiento obtenido de NewsAPI y el índice Fear & Greed para generar un gauge.
+    Combina el sentimiento de las noticias (NewsAPI) y el índice Fear & Greed para generar un gauge.
     Se calcula: gauge_val = 50 + (news_sent - market_sent)
     """
-    # Se espera que coin_id sea el identificador en minúsculas (ej: "xrp")
-    symbol = coinid_to_symbol[coin_id]  # Por ejemplo, "xrp" -> "XRP"
-    news_sent = get_news_sentiment(symbol)
+    # Usamos coin_id directamente para obtener el símbolo del diccionario
+    symbol = coinid_to_symbol[coin_id]
+    news_sent = get_news_sentiment(coin_id)  # Usamos coin_id para mantener la coherencia
     market_sent = get_fear_greed_index()
     gauge_val = 50 + (news_sent - market_sent)
     gauge_val = max(0, min(100, gauge_val))
     return news_sent, market_sent, gauge_val
 
 # ------------------------------------------------------------------------------
-# Entrenamiento y Predicción (sin Keras Tuner)
+# Entrenamiento y Predicción sin Keras Tuner (25 épocas)
 # ------------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date):
     """
-    Entrena el modelo LSTM (25 épocas) e integra un factor de sentimiento
-    (gauge_val/100) en cada timestep. Se utilizan hiperparámetros fijos.
+    Entrena el modelo LSTM (25 épocas) e integra un factor de sentimiento (gauge_val/100)
+    en cada timestep. Usa hiperparámetros fijos.
     """
+    st.write("Cargando datos históricos...")
     df = load_crypto_data(coin_id, start_date, end_date)
     if df is None or df.empty:
+        st.error("No se pudieron obtener datos históricos.")
         return None
 
-    # Se usa el coin_id original (por ejemplo, "xrp")
     symbol = coinid_to_symbol[coin_id]
+    st.write("Calculando sentimiento...")
     news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
     sentiment_factor = gauge_val / 100.0
 
+    # Usamos parámetros fijos
     params = get_dynamic_params(df, horizon_days, coin_id)
     window_size = params["window_size"]
     epochs = params["epochs"]
@@ -281,8 +283,10 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     scaled_data = scaler.fit_transform(df[["close_price"]])
     X, y = create_sequences(scaled_data, window_size)
     if X is None:
+        st.error("No hay suficientes datos para crear secuencias.")
         return None
 
+    st.write("Dividiendo datos...")
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -290,13 +294,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Incorporar el factor de sentimiento en cada muestra
+    # Incorporar el factor de sentimiento
     X_train_adj = np.concatenate([X_train, np.full((X_train.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_val_adj   = np.concatenate([X_val,   np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_test_adj  = np.concatenate([X_test,  np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
 
     input_shape = (window_size, 2)
-
+    st.write("Construyendo y entrenando el modelo LSTM...")
     lstm_model = build_lstm_model(
         input_shape=input_shape,
         learning_rate=learning_rate,
@@ -308,7 +312,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     )
     lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, lstm_model, epochs, batch_size)
 
-    # Predicción en el conjunto de test
+    # Predicción en Test
+    st.write("Realizando predicción en el conjunto de test...")
     lstm_test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
     lstm_test_preds = scaler.inverse_transform(lstm_test_preds_scaled).flatten()
     y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
@@ -317,6 +322,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     lstm_mape = robust_mape(y_test_real, lstm_test_preds)
 
     # Predicción futura
+    st.write("Realizando predicción futura...")
     last_window = scaled_data[-window_size:]
     future_preds = []
     current_input = np.concatenate([
@@ -361,7 +367,7 @@ def main_app():
     st.markdown("""
     **Descripción del Modelo:**  
     Este dashboard entrena un modelo LSTM (25 épocas) para predecir precios futuros de criptomonedas (por ejemplo, Bitcoin, Ethereum, Ripple).  
-    Se utilizan datos de yfinance y se calcula un factor de sentimiento que combina las noticias (NewsAPI) y el índice Fear & Greed.  
+    Se utilizan datos de yfinance y se calcula un factor de sentimiento combinando las noticias (NewsAPI) y el índice Fear & Greed.  
     Se muestran métricas (RMSE, MAPE), gráficos interactivos y las noticias recientes en un scroll horizontal.
     """)
 
@@ -507,7 +513,6 @@ def main_app():
                     crypto_sent = result["crypto_sent"]
                     market_sent = result["market_sent"]
                     gauge_val = result["gauge_val"]
-
                     if gauge_val < 20:
                         gauge_text = "Muy Bearish"
                     elif gauge_val < 40:
@@ -518,7 +523,6 @@ def main_app():
                         gauge_text = "Bullish"
                     else:
                         gauge_text = "Muy Bullish"
-
                     fig_sentiment = go.Figure(go.Indicator(
                         mode="gauge+number",
                         value=gauge_val,
@@ -563,11 +567,11 @@ def main_app():
         else:
             st.info("Entrene el modelo para ver el análisis de sentimientos.")
 
-    # Tab 4: Noticias Recientes con scroll horizontal
+    # Tab 4: Noticias Recientes (scroll horizontal)
     with tabs[3]:
         st.header("Noticias Recientes")
         symbol = coinid_to_symbol[coin_id]
-        articles = get_newsapi_articles(symbol)
+        articles = get_newsapi_articles(coin_id)
         if articles:
             st.subheader(f"Últimas noticias sobre {crypto_name}")
             st.markdown(
@@ -610,7 +614,7 @@ def main_app():
             )
             st.markdown("<div class='news-container'>", unsafe_allow_html=True)
             for article in articles:
-                image_tag = f"<img src='{article['image']}' alt='News Image' />" if article['image'] else ""
+                image_tag = f"<img src='{article['image']}' alt='Imagen de la noticia' />" if article['image'] else ""
                 st.markdown(
                     f"""
                     <div class='news-item'>
