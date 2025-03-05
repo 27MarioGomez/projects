@@ -11,4 +11,5 @@ prophet
 textblob
 keras-tuner
 tweepy
-yfinance==0.2.40
+yfinance
+newsapi-python
