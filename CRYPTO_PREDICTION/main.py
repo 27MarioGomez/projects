@@ -1,3 +1,4 @@
+import threading
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -34,7 +35,7 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
-retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+retry = Retry(total=5, backoff_factor=1, status_forcelist=[429,500,502,503,504])
 adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
@@ -131,7 +132,7 @@ def create_sequences(data, window_size):
     X, y = [], []
     for i in range(window_size, len(data)):
         X.append(data[i-window_size:i])
-        y.append(data[i, 0])
+        y.append(data[i,0])
     return np.array(X), np.array(y)
 
 # =============================================================================
@@ -182,8 +183,8 @@ def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.5, w_xgb=0.3
 # Predicción a medio/largo plazo con Prophet
 # =============================================================================
 def medium_long_term_prediction(df, days=180):
-    df_prophet = df[["ds", "close_price"]].copy()
-    df_prophet.rename(columns={"close_price": "y"}, inplace=True)
+    df_prophet = df[["ds","close_price"]].copy()
+    df_prophet.rename(columns={"close_price":"y"}, inplace=True)
     df_prophet["y"] = np.log1p(df_prophet["y"])
     model = Prophet()
     model.fit(df_prophet)
@@ -207,7 +208,7 @@ def apply_shock_factor(df, base_sentiment):
     return np.array(sentiment_array)
 
 # =============================================================================
-# Optimización de hiperparámetros con Optuna (con MedianPruner y 5 ensayos)
+# Optuna para optimizar hiperparámetros (MedianPruner, 5 ensayos, 25 epochs)
 # =============================================================================
 def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
     progress_text.write("Optimizando hiperparámetros...")
@@ -219,18 +220,16 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
 
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    # Usamos 25 epochs en tuning para acelerar
     model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=25, batch_size=batch_size)
     preds = model.predict(X_val_adj, verbose=0)
     reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)
-    loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
+    loss = np.sqrt(mean_squared_error(y_val, reconst[:,0]))
     return loss
 
 def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
     pruner = optuna.pruners.MedianPruner(n_startup_trials=2, n_warmup_steps=5)
     study = optuna.create_study(direction="minimize", pruner=pruner)
-    study.optimize(lambda trial: objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar),
-                   n_trials=5)
+    study.optimize(lambda trial: objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar), n_trials=5)
     return study.best_params
 
 # =============================================================================
@@ -401,13 +400,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     preds_test_log = reconst_test_inv[:, 0]
     lstm_test_preds = np.expm1(preds_test_log)
 
-    reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), 4))], axis=1)
+    reconst_y = np.concatenate([y_test.reshape(-1,1), np.zeros((len(y_test),4))], axis=1)
     reconst_y_inv = scaler.inverse_transform(reconst_y)
-    y_test_log = reconst_y_inv[:, 0]
+    y_test_log = reconst_y_inv[:,0]
     y_test_real = np.expm1(y_test_log)
 
     lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
-    lstm_mape = np.mean(np.abs((y_test_real - lstm_test_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
+    lstm_mape = np.mean(np.abs((y_test_real - lstm_test_preds)/np.maximum(np.abs(y_test_real),1e-9)))*100
 
     progress_text.write("Entrenando XGBoost y Prophet para ensamble...")
     progress_bar.progress(80)
@@ -418,13 +417,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     X_test_flat = flatten_sequences(X_test)
     xgb_test_scaled = xgb_model.predict(X_test_flat)
-    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1, 1), np.zeros((len(xgb_test_scaled), 4))], axis=1)
+    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1,1), np.zeros((len(xgb_test_scaled),4))], axis=1)
     xgb_test_inv = scaler.inverse_transform(xgb_reconst)
-    xgb_test_log = xgb_test_inv[:, 0]
+    xgb_test_log = xgb_test_inv[:,0]
     xgb_test_preds = np.expm1(xgb_test_log)
 
-    df_prophet = df[["ds", "close_price"]].copy()
-    df_prophet.rename(columns={"close_price": "y"}, inplace=True)
+    df_prophet = df[["ds","close_price"]].copy()
+    df_prophet.rename(columns={"close_price":"y"}, inplace=True)
     df_prophet["y"] = np.log1p(df_prophet["y"])
     prophet_model = Prophet()
     prophet_model.fit(df_prophet)
@@ -435,7 +434,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     test_ens_preds = ensemble_prediction(lstm_test_preds, xgb_test_preds, prophet_test_preds, 0.5, 0.3, 0.2)
     ens_rmse = np.sqrt(mean_squared_error(y_test_real, test_ens_preds))
-    ens_mape = np.mean(np.abs((y_test_real - test_ens_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
+    ens_mape = np.mean(np.abs((y_test_real - test_ens_preds)/np.maximum(np.abs(y_test_real),1e-9)))*100
 
     progress_text.write("Realizando predicción futura...")
     progress_bar.progress(90)
@@ -453,8 +452,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         plog = inv_f[0, 0]
         future_preds_log_lstm.append(plog)
         new_feature = np.copy(current_input[:, -1:, :])
-        new_feature[0, 0, 0] = p_scaled
-        new_feature[0, 0, 5] = last_shock
+        new_feature[0,0,0] = p_scaled
+        new_feature[0,0,5] = last_shock
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     lstm_future_preds = np.expm1(np.array(future_preds_log_lstm))
 
@@ -505,7 +504,7 @@ def main_app():
     - Analiza el sentimiento del mercado a través de NewsAPI, Fear & Greed, Transformers y TextBlob.  
     - Entrena un modelo LSTM, XGBoost y Prophet con optimización automática (Optuna) y aplica un shock factor en días críticos.  
     - Ensamble final (50% LSTM, 30% XGBoost, 20% Prophet) para predicciones de corto plazo.  
-    - Predicción a medio/largo plazo (ej. 180 días) solo accesible si se ha entrenado el modelo.  
+    - La pestaña de “Predicción a Medio/Largo Plazo” solo se muestra si ya se ha entrenado el modelo.  
     - Mientras se entrena, puedes ver Análisis de Sentimientos y Noticias Recientes.
     """)
 
@@ -539,7 +538,7 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir (corto plazo):", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
 
-    # Los datos históricos se usan para las secciones de sentimiento y noticias
+    # Los datos históricos se usan para análisis de sentimiento y noticias (accesibles siempre)
     df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     if df_prices is not None and not df_prices.empty:
         fig_hist = px.line(df_prices, x="ds", y="close_price", title=f"Histórico de {crypto_name}",
@@ -567,44 +566,15 @@ def main_app():
         "Noticias Recientes"
     ])
 
+    # Pestañas que requieren entrenamiento
     with tabs[0]:
         if st.button("Entrenar Modelo y Predecir"):
-            result = train_and_predict_with_sentiment(coin_id, horizon, start_date, end_date_with_offset)
-            if result:
-                st.success("Entrenamiento y predicción completados!")
-                st.write(f"Sentimiento Noticias ({result['symbol']}): {result['crypto_sent']:.2f}")
-                st.write(f"Sentimiento Mercado (Fear & Greed): {result['market_sent']:.2f}")
-                st.write(f"Gauge Combinado: {result['gauge_val']:.2f}")
-                col1, col2 = st.columns(2)
-                col1.metric("RMSE (Test)", f"{result['rmse']:.2f}", help="Error medio en USD.")
-                col2.metric("MAPE (Test)", f"{result['mape']:.2f}%", help="Error porcentual medio.")
-                test_dates = result["test_dates"][:min(len(result["test_dates"]), len(result["real_prices"]), len(result["test_preds"]))]
-                real_prices = result["real_prices"][:len(test_dates)]
-                test_preds = result["test_preds"][:len(test_dates)]
-                fig_test = go.Figure()
-                fig_test.add_trace(go.Scatter(
-                    x=test_dates,
-                    y=real_prices,
-                    mode="lines",
-                    name="Precio Real",
-                    line=dict(color="#1f77b4", width=3, shape="spline")
-                ))
-                fig_test.add_trace(go.Scatter(
-                    x=test_dates,
-                    y=test_preds,
-                    mode="lines",
-                    name="Predicción (Ensamble)",
-                    line=dict(color="#ff7f0e", width=3, dash="dash", shape="spline")
-                ))
-                fig_test.update_layout(
-                    title=f"Precio Real vs. Predicción (Ensamble) - {result['symbol']}",
-                    xaxis=dict(tickformat="%Y-%m-%d"),
-                    template="plotly_dark",
-                    xaxis_title="Fecha",
-                    yaxis_title="Precio (USD)"
-                )
-                st.plotly_chart(fig_test, use_container_width=True)
+            # Ejecutamos el entrenamiento en segundo plano
+            def run_training():
+                result = train_and_predict_with_sentiment(coin_id, horizon, start_date, end_date_with_offset)
                 st.session_state["result"] = result
+            threading.Thread(target=run_training).start()
+            st.info("El entrenamiento se está ejecutando en segundo plano. Puedes ver Análisis de Sentimientos y Noticias Recientes mientras esperas.")
 
     with tabs[1]:
         if "result" in st.session_state and isinstance(st.session_state["result"], dict):
@@ -690,6 +660,7 @@ def main_app():
         else:
             st.info("Entrene el modelo para ver la predicción a medio/largo plazo.")
 
+    # Las dos últimas pestañas siempre son accesibles sin entrenamiento
     with tabs[3]:
         st.header("Análisis de Sentimientos")
         crypto_sent = get_news_sentiment(coin_id)
