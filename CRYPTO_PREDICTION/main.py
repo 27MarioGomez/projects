@@ -33,6 +33,7 @@ import optuna
 # =============================================================================
 # CONFIGURACIÓN INICIAL
 # =============================================================================
+
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
 retry = Retry(total=5, backoff_factor=1, status_forcelist=[429,500,502,503,504])
@@ -42,6 +43,7 @@ session.mount("https://", adapter)
 # =============================================================================
 # DICCIONARIOS DE CRIPTOMONEDAS
 # =============================================================================
+
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -61,6 +63,7 @@ coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 # =============================================================================
 # INDICADORES TÉCNICOS CON LA LIBRERÍA TA
 # =============================================================================
+
 def compute_indicators(df):
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
     df["rsi_norm"] = df["RSI"] / 100.0
@@ -77,6 +80,7 @@ def compute_indicators(df):
 # =============================================================================
 # ANÁLISIS AVANZADO DE SENTIMIENTO CON TRANSFORMERS
 # =============================================================================
+
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
     return pipeline("sentiment-analysis")
@@ -92,6 +96,7 @@ def get_advanced_sentiment(text):
 # =============================================================================
 # CARGA Y PROCESAMIENTO DE DATOS HISTÓRICOS
 # =============================================================================
+
 @st.cache_data
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     ticker_ids = {
@@ -125,6 +130,8 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     df.rename(columns={"Date": "ds", "Close": "close_price", "Volume": "volume",
                        "High": "high", "Low": "low"}, inplace=True)
     df = compute_indicators(df)
+    # Eliminar filas con NaN para evitar problemas posteriores
+    df.dropna(inplace=True)
     return df[["ds", "close_price", "volume", "high", "low", "RSI", "rsi_norm", "macd", "atr"]]
 
 def create_sequences(data, window_size):
@@ -139,6 +146,7 @@ def create_sequences(data, window_size):
 # =============================================================================
 # BUILD_LSTM_MODEL Y TRAIN_MODEL
 # =============================================================================
+
 def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
                      lstm_units1=128, lstm_units2=64, dropout_rate=0.3, dense_units=100):
     model = Sequential([
@@ -171,6 +179,7 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=32)
 # =============================================================================
 # TUNING CON OPTUNA
 # =============================================================================
+
 def objective(trial, X_train, y_train, X_val, y_val, input_shape):
     lr = trial.suggest_loguniform("learning_rate", 1e-5, 1e-3)
     lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
@@ -191,7 +200,7 @@ def objective(trial, X_train, y_train, X_val, y_val, input_shape):
     model = train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=batch_size)
     preds = model.predict(X_val, verbose=0)
     reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)  # 1+4 = 5 columnas
-    loss = np.sqrt(mean_squared_error(y_val, reconst[:,0]))
+    loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
     return loss
 
 def tune_hyperparameters(X_train, y_train, X_val, y_val, input_shape):
@@ -202,6 +211,7 @@ def tune_hyperparameters(X_train, y_train, X_val, y_val, input_shape):
 # =============================================================================
 # MODELO PROPHET
 # =============================================================================
+
 @st.cache_data
 def train_prophet_model(df):
     df_prophet = df[["ds", "close_price"]].copy()
@@ -214,12 +224,14 @@ def train_prophet_model(df):
 # =============================================================================
 # ENSAMBLE DE PREDICCIONES (LSTM + PROPHET)
 # =============================================================================
+
 def ensemble_prediction(lstm_pred, prophet_pred, weight_lstm=0.7):
     return weight_lstm * lstm_pred + (1 - weight_lstm) * prophet_pred
 
 # =============================================================================
 # ANÁLISIS DE SENTIMIENTO Y CÁLCULO COMBINADO
 # =============================================================================
+
 @st.cache_data(ttl=300)
 def get_newsapi_articles(coin_id):
     newsapi_key = st.secrets.get("newsapi_key", "")
@@ -296,6 +308,7 @@ def adjust_predictions_for_sentiment(future_preds, gauge_val):
 # =============================================================================
 # ENSAMBLE: ENTRENAMIENTO Y PREDICCIÓN
 # =============================================================================
+
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None, use_optuna=False):
     with st.spinner("Esto puede tardar un poco, enseguida estamos..."):
         df = load_crypto_data(coin_id, start_date, end_date)
@@ -358,7 +371,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, lstm_model, epochs=25, batch_size=batch_size)
 
         preds_test_scaled = lstm_model.predict(X_test_adj, verbose=0)
-        # Concatenar con ceros de 4 columnas para formar 5 columnas
         reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), 4))], axis=1)
         reconst_test_inv = scaler.inverse_transform(reconst_test)
         preds_test_log = reconst_test_inv[:, 0]
@@ -380,14 +392,12 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         ], axis=-1)
         for _ in range(horizon_days):
             pred_scaled = lstm_model.predict(current_input, verbose=0)[0][0]
-            # Concatenar con ceros de 4 columnas para tener 5 columnas
-            reconst_future = np.array([[pred_scaled, 0, 0, 0, 0]])
+            reconst_future = np.array([[pred_scaled, 0, 0, 0, 0]])  # 5 columnas: 1 predicción + 4 ceros
             reconst_future_inv = scaler.inverse_transform(reconst_future)
             pred_log = reconst_future_inv[0, 0]
             future_preds_log.append(pred_log)
             new_feature = np.copy(current_input[:, -1:, :])
             new_feature[0, 0, 0] = pred_scaled
-            # Se mantienen las demás columnas (no se modifican)
             new_feature[0, 0, 5] = sentiment_factor
             current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
         lstm_future_preds = np.expm1(np.array(future_preds_log))
@@ -428,6 +438,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 # =============================================================================
 # APLICACIÓN STREAMLIT
 # =============================================================================
+
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
