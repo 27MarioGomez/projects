@@ -214,7 +214,10 @@ def apply_shock_factor(df, base_sentiment):
 # Optimización de hiperparámetros con Optuna (MedianPruner, 5 ensayos, 25 epochs)
 # =============================================================================
 def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    progress_text.write("Optimizando hiperparámetros...")
+    # Mostrar información adicional: número de ensayo y parámetros propuestos
+    trial_number = trial.number
+    progress_text.write(f"Ensayo {trial_number + 1}: Probando nuevos hiperparámetros...")
+
     lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
     lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
@@ -223,17 +226,26 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
 
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
+    # Usamos 25 epochs para acelerar el tuning
     model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=25, batch_size=batch_size)
     preds = model.predict(X_val_adj, verbose=0)
     reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)
     loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
+    
+    # Actualizamos la barra de progreso (por ejemplo, incrementamos 1/n_trials cada ensayo)
+    progress_bar.progress(min(100, 40 + int((trial_number+1)*10)))
+    progress_text.write(f"Ensayo {trial_number + 1}: Pérdida obtenida = {loss:.4f}")
     return loss
 
 def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
     pruner = optuna.pruners.MedianPruner(n_startup_trials=2, n_warmup_steps=5)
     study = optuna.create_study(direction="minimize", pruner=pruner)
-    study.optimize(lambda trial: objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar),
-                   n_trials=5)
+    study.optimize(
+        lambda trial: objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar),
+        n_trials=5
+    )
+    best_loss = study.best_value
+    progress_text.write(f"Optimización completada. Mejor pérdida: {best_loss:.4f}")
     return study.best_params
 
 # =============================================================================
