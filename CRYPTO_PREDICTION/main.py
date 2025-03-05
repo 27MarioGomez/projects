@@ -82,7 +82,7 @@ def robust_mape(y_true, y_pred, eps=1e-9):
 @st.cache_data
 def load_crypto_data(coin_id, start_date, end_date):
     """
-    Descarga datos históricos de una criptomoneda mediante yfinance.
+    Descarga datos históricos de una criptomoneda utilizando yfinance.
     Se utiliza el ticker correspondiente (ej. "BTC-USD").
     """
     ticker_ids = {
@@ -119,7 +119,7 @@ def load_crypto_data(coin_id, start_date, end_date):
 def create_sequences(data, window_size):
     """
     Genera secuencias de datos para el modelo LSTM.
-    Retorna (X, y) donde X son subsecuencias y y son los valores a predecir.
+    Retorna (X, y) donde X son subsecuencias y y los valores a predecir.
     """
     if len(data) <= window_size:
         return None, None
@@ -334,8 +334,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
 
     params = get_dynamic_params(df, horizon_days, coin_id)
     window_size = params["window_size"]
-    # Para acelerar el entrenamiento, se usan 10 épocas en la optimización
-    epochs = params["epochs"]
+    # Se ignora el parámetro de épocas obtenido para el tuner, se usan 3 épocas para acelerar
     batch_size = params["batch_size"]
     lstm_units1 = params["lstm_units1"]
     lstm_units2 = params["lstm_units2"]
@@ -363,19 +362,18 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
 
     input_shape = (window_size, 2)
 
-    # Se optimizan los hiperparámetros con Keras Tuner (se usan 10 épocas para acelerar)
     st.info("Optimizando hiperparámetros con Keras Tuner (esto puede tardar unos segundos)...")
     tuner = kt.Hyperband(
         build_model_tuner(input_shape),
         objective='val_loss',
-        max_epochs=10,
+        max_epochs=3,
         factor=3,
         directory='kt_dir',
         project_name='crypto_prediction_hb'
     )
-    stop_early = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+    stop_early = EarlyStopping(monitor='val_loss', patience=2, restore_best_weights=True)
     tuner.search(X_train_adj, y_train, validation_data=(X_val_adj, y_val),
-                 epochs=10, batch_size=batch_size, callbacks=[stop_early], verbose=0)
+                 epochs=3, batch_size=batch_size, callbacks=[stop_early], verbose=1)
     lstm_model = tuner.get_best_models(num_models=1)[0]
 
     # Predicción en el conjunto de test
@@ -438,7 +436,7 @@ def main_app():
     Las predicciones se evalúan utilizando RMSE y MAPE, y se visualizan en gráficos interactivos.
     """)
 
-    # Descomenta la siguiente línea para probar la lectura de newsapi_key:
+    # Para probar la lectura de la clave de NewsAPI, descomenta la siguiente línea:
     # test_newsapi()
 
     st.sidebar.title("Configuración de Predicción")
