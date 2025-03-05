@@ -57,14 +57,14 @@ coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 # ------------------------------------------------------------------------------
 def compute_indicators(df):
     # Asumimos que df contiene 'close_price', 'high' y 'low'
-    df["RSI"] = talib.RSI(df["close_price"], timeperiod=14)
+    df["RSI"] = ta.RSI(df["close_price"], timeperiod=14)
     df["rsi_norm"] = df["RSI"] / 100.0
-    df["macd"], df["macdsignal"], df["macdhist"] = talib.MACD(df["close_price"], fastperiod=12, slowperiod=26, signalperiod=9)
-    upper, middle, lower = talib.BBANDS(df["close_price"], timeperiod=20)
+    df["macd"], df["macdsignal"], df["macdhist"] = ta.MACD(df["close_price"], fastperiod=12, slowperiod=26, signalperiod=9)
+    upper, middle, lower = ta.BBANDS(df["close_price"], timeperiod=20)
     df["bollinger_upper"] = upper
     df["bollinger_lower"] = lower
-    df["sma50"] = talib.SMA(df["close_price"], timeperiod=50)
-    df["atr"] = talib.ATR(df["high"], df["low"], df["close_price"], timeperiod=14)
+    df["sma50"] = ta.SMA(df["close_price"], timeperiod=50)
+    df["atr"] = ta.ATR(df["high"], df["low"], df["close_price"], timeperiod=14)
     # Se pueden añadir más indicadores si se desea
     df.fillna(method="bfill", inplace=True)
     return df
