@@ -31,7 +31,7 @@ adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
 # ------------------------------------------------------------------------------
-# Diccionarios de criptomonedas y símbolos
+# Diccionarios de criptomonedas y sus símbolos
 # ------------------------------------------------------------------------------
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
@@ -47,10 +47,11 @@ coincap_ids = {
     "TRON (TRX)": "tron",
     "Stellar (XLM)": "stellar"
 }
+# Se extrae el símbolo, por ejemplo, "Bitcoin (BTC)" → "BTC"
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # ------------------------------------------------------------------------------
-# Características de volatilidad predefinidas
+# Características predefinidas de volatilidad
 # ------------------------------------------------------------------------------
 crypto_characteristics = {
     "bitcoin": {"volatility": 0.03},
@@ -71,14 +72,14 @@ crypto_characteristics = {
 # Funciones de utilidad
 # ------------------------------------------------------------------------------
 def robust_mape(y_true, y_pred, eps=1e-9):
-    """Calcula el MAPE evitando división por cero."""
+    """Calcula el Error Porcentual Absoluto Medio (MAPE) evitando división por cero."""
     return np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100
 
 @st.cache_data
 def load_crypto_data(coin_id, start_date, end_date):
     """
     Descarga datos históricos de una criptomoneda utilizando yfinance.
-    Se utiliza el ticker correspondiente (ej. "BTC-USD") y se aplanan las columnas en caso de MultiIndex.
+    Se utiliza el ticker correspondiente (por ejemplo, "BTC-USD").
     """
     ticker_ids = {
         "bitcoin": "BTC-USD",
@@ -106,7 +107,6 @@ def load_crypto_data(coin_id, start_date, end_date):
 
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
-        # Aplanamos las columnas tomando el primer nivel
         df.columns = df.columns.get_level_values(0)
     df.rename(columns={"Date": "ds", "Close": "close_price"}, inplace=True)
     df = df[["ds", "close_price"]]
@@ -157,12 +157,15 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs=25, batch_size=32)
     return model
 
 # ------------------------------------------------------------------------------
-# Hiperparámetros dinámicos (aunque en este ejemplo usaremos valores fijos para el entrenamiento)
+# Hiperparámetros fijos (sin Keras Tuner)
 # ------------------------------------------------------------------------------
 def get_dynamic_params(df, horizon_days, coin_id):
     """
-    Ajusta hiperparámetros dinámicamente según volatilidad y datos históricos.
-    En este ejemplo, se fijan epochs=25, batch_size=32 y window_size=30.
+    Devuelve un diccionario con hiperparámetros fijos:
+      - window_size: 30
+      - epochs: 25
+      - batch_size: 32
+      - lstm_units1: 100, lstm_units2: 60, etc.
     """
     return {
         "window_size": 30,
@@ -177,11 +180,11 @@ def get_dynamic_params(df, horizon_days, coin_id):
     }
 
 # ------------------------------------------------------------------------------
-# Índice Fear & Greed
+# Fear & Greed Index
 # ------------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_fear_greed_index():
-    """Obtiene el índice Fear & Greed."""
+    """Obtiene el índice Fear & Greed del mercado."""
     try:
         data = requests.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
         return float(data["data"][0]["value"])
@@ -190,7 +193,7 @@ def get_fear_greed_index():
         return 50.0
 
 # ------------------------------------------------------------------------------
-# NewsAPI para noticias y sentimiento
+# NewsAPI: artículos y sentimiento
 # ------------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_newsapi_articles(coin_symbol):
@@ -221,7 +224,7 @@ def get_newsapi_articles(coin_symbol):
         return []
 
 def get_news_sentiment(coin_symbol):
-    """Calcula el sentimiento promedio (0-100) de los artículos obtenidos."""
+    """Calcula el sentimiento promedio (0-100) a partir de los artículos."""
     articles = get_newsapi_articles(coin_symbol)
     if not articles:
         return 50.0
@@ -229,16 +232,17 @@ def get_news_sentiment(coin_symbol):
     for article in articles:
         text = (article["title"] or "") + " " + (article["description"] or "")
         blob = TextBlob(text)
-        polarity = blob.sentiment.polarity  # Valor entre -1 y 1
+        polarity = blob.sentiment.polarity
         sentiments.append(50 + (polarity * 50))
     return np.mean(sentiments) if sentiments else 50.0
 
 def get_crypto_sentiment_combined(coin_id):
     """
-    Combina el sentimiento de las noticias (NewsAPI) y el índice Fear & Greed para generar un gauge.
-    gauge_val = 50 + (news_sent - market_sent)
+    Combina el sentimiento obtenido de NewsAPI y el índice Fear & Greed para generar un gauge.
+    Se calcula: gauge_val = 50 + (news_sent - market_sent)
     """
-    symbol = coinid_to_symbol[coin_id]
+    # Se espera que coin_id sea el identificador en minúsculas (ej: "xrp")
+    symbol = coinid_to_symbol[coin_id]  # Por ejemplo, "xrp" -> "XRP"
     news_sent = get_news_sentiment(symbol)
     market_sent = get_fear_greed_index()
     gauge_val = 50 + (news_sent - market_sent)
@@ -246,18 +250,20 @@ def get_crypto_sentiment_combined(coin_id):
     return news_sent, market_sent, gauge_val
 
 # ------------------------------------------------------------------------------
-# Entrenamiento y Predicción sin Keras Tuner (25 épocas)
+# Entrenamiento y Predicción (sin Keras Tuner)
 # ------------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date):
     """
-    Entrena el modelo LSTM (25 épocas) y realiza predicciones futuras integrando un factor de sentimiento.
+    Entrena el modelo LSTM (25 épocas) e integra un factor de sentimiento
+    (gauge_val/100) en cada timestep. Se utilizan hiperparámetros fijos.
     """
     df = load_crypto_data(coin_id, start_date, end_date)
     if df is None or df.empty:
         return None
 
+    # Se usa el coin_id original (por ejemplo, "xrp")
     symbol = coinid_to_symbol[coin_id]
-    news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(symbol)
+    news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
     sentiment_factor = gauge_val / 100.0
 
     params = get_dynamic_params(df, horizon_days, coin_id)
@@ -284,7 +290,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Agregar factor de sentimiento
+    # Incorporar el factor de sentimiento en cada muestra
     X_train_adj = np.concatenate([X_train, np.full((X_train.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_val_adj   = np.concatenate([X_val,   np.full((X_val.shape[0], window_size, 1), sentiment_factor)], axis=-1)
     X_test_adj  = np.concatenate([X_test,  np.full((X_test.shape[0], window_size, 1), sentiment_factor)], axis=-1)
@@ -302,7 +308,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
     )
     lstm_model = train_model(X_train_adj, y_train, X_val_adj, y_val, lstm_model, epochs, batch_size)
 
-    # Predicción en Test
+    # Predicción en el conjunto de test
     lstm_test_preds_scaled = lstm_model.predict(X_test_adj, verbose=0)
     lstm_test_preds = scaler.inverse_transform(lstm_test_preds_scaled).flatten()
     y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
@@ -325,6 +331,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date, end_date
         new_feature[0, 0, 1] = sentiment_factor
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
     future_preds = scaler.inverse_transform(np.array(future_preds).reshape(-1, 1)).flatten()
+
     last_date = df["ds"].iloc[-1]
     future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=horizon_days).tolist()
     test_dates = df["ds"].iloc[-len(lstm_test_preds):].values
@@ -353,8 +360,8 @@ def main_app():
     st.title("Predicción de Precios Cripto 🔮")
     st.markdown("""
     **Descripción del Modelo:**  
-    Este dashboard entrena un modelo LSTM (25 épocas) para predecir precios futuros de criptomonedas (p. ej., Bitcoin, Ethereum, Ripple).  
-    Se utilizan datos de yfinance y se calcula un factor de sentimiento combinando las noticias (NewsAPI) y el índice Fear & Greed.  
+    Este dashboard entrena un modelo LSTM (25 épocas) para predecir precios futuros de criptomonedas (por ejemplo, Bitcoin, Ethereum, Ripple).  
+    Se utilizan datos de yfinance y se calcula un factor de sentimiento que combina las noticias (NewsAPI) y el índice Fear & Greed.  
     Se muestran métricas (RMSE, MAPE), gráficos interactivos y las noticias recientes en un scroll horizontal.
     """)
 
@@ -365,7 +372,6 @@ def main_app():
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
     default_end = datetime.utcnow()
     default_start = default_end - timedelta(days=7)
-
     if use_custom_range:
         start_date = st.sidebar.date_input("Fecha de inicio", default_start.date())
         end_date = st.sidebar.date_input("Fecha de fin", default_end.date())
@@ -555,7 +561,7 @@ def main_app():
             else:
                 st.error("Datos de resultado inválidos. Reentrene el modelo.")
         else:
-            st.info("Entrene el modelo primero.")
+            st.info("Entrene el modelo para ver el análisis de sentimientos.")
 
     # Tab 4: Noticias Recientes con scroll horizontal
     with tabs[3]:
