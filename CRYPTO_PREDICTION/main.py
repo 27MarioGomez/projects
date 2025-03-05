@@ -154,7 +154,7 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
 def train_model(X_train, y_train, X_val, y_val, model, epochs=20, batch_size=32):
     """
     Entrena el modelo LSTM final.  
-    Se han reducido los epochs a 20 para acelerar el entrenamiento sin perder demasiada precisión.
+    Se han reducido los epochs a 20 para equilibrar velocidad y precisión.
     """
     tf.keras.backend.clear_session()
     callbacks = [
@@ -208,6 +208,7 @@ def apply_shock_factor(df, base_sentiment):
 def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
     trial_num = trial.number + 1
     progress_text.write(f"Ensayo {trial_num}: Ajustando hiperparámetros...")
+
     lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
     lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
@@ -215,13 +216,16 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     dense_units = trial.suggest_int("dense_units", 50, 150, step=10)
     batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
 
+    # Mensaje adicional para indicar que empieza el entrenamiento del ensayo
+    progress_text.write(f"Ensayo {trial_num}: Entrenando (5 epochs) con batch_size={batch_size}, lr={lr:.6f} ...")
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    # Para el tuning, solo 5 epochs
     model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=5, batch_size=batch_size)
+
     preds = model.predict(X_val_adj, verbose=0)
     reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)
     loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
 
+    # Actualizar la barra de progreso
     progress_bar.progress(min(100, 40 + int(trial_num * 20)))
     progress_text.write(f"Ensayo {trial_num}: Pérdida obtenida = {loss:.4f}")
     return loss
@@ -229,14 +233,19 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
 def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
     pruner = optuna.pruners.MedianPruner(n_startup_trials=1, n_warmup_steps=2)
     study = optuna.create_study(direction="minimize", pruner=pruner)
-    study.optimize(lambda trial: objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar),
-                   n_trials=3)
+    study.optimize(
+        lambda trial: objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar),
+        n_trials=3
+    )
     progress_text.write(f"Optimización completada. Mejor pérdida: {study.best_value:.4f}")
     return study.best_params
 
-@st.cache_data(ttl=43200)  # Cachear durante 12 horas
+@st.cache_data(ttl=43200)  # Cachear 12 horas
 def get_newsapi_articles(coin_id):
-    """Obtiene noticias desde NewsAPI con caché de 12 horas y page_size=5."""
+    """
+    Obtiene noticias desde NewsAPI con caché de 12 horas (43200s) y page_size=5.
+    Si se supera el límite de peticiones, muestra mensaje amigable.
+    """
     newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
         st.error("Clave 'newsapi_key' no encontrada.")
@@ -274,9 +283,9 @@ def get_newsapi_articles(coin_id):
             articles = sorted(articles, key=lambda x: x["parsed_date"], reverse=True)
         return articles
     except Exception as e:
-        # Si detectamos un error de límite de peticiones, mostramos un mensaje amigable
+        # Si detectamos un error de límite de peticiones, mensaje amigable
         if "rateLimited" in str(e) or "429" in str(e):
-            st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas :)")
+            st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver solo noticias :)")
         else:
             st.error(f"Error al obtener noticias: {e}")
         return []
@@ -394,7 +403,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_text.write("Entrenando modelo LSTM final...")
     progress_bar.progress(60)
     lstm_model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    # Reducción a 20 epochs para que sea más rápido
+    # 20 epochs para equilibrar tiempo y precisión
     lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=20, batch_size=batch_size)
 
     progress_text.write("Realizando predicción en test (LSTM)...")
@@ -543,7 +552,7 @@ def main_app():
     horizon = st.sidebar.slider("Días a predecir (corto plazo):", 1, 60, 5)
     show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
 
-    # Datos históricos para análisis de sentimientos y noticias
+    # Datos históricos para análisis de sentimientos y noticias (siempre accesibles)
     df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     if df_prices is not None and not df_prices.empty:
         fig_hist = px.line(
@@ -562,6 +571,7 @@ def main_app():
     else:
         st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
 
+    # Pestañas
     tabs = st.tabs([
         "Entrenamiento y Test",
         "Predicción de Precios (Corto Plazo)",
