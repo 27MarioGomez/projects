@@ -11,7 +11,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
 
-# Si se detecta GPU se puede activar mixed precision (en CPU se ignora)
+# Activar mixed precision si se detecta GPU (en CPU se ignora)
 if tf.config.list_physical_devices('GPU'):
     from tensorflow.keras.mixed_precision import set_global_policy
     set_global_policy('mixed_float16')
@@ -35,7 +35,7 @@ from transformers import pipeline
 import time
 from xgboost import XGBRegressor
 
-# Configuración inicial de la página (llamada primero en el script)
+# Configuración inicial de la página (debe ser llamada como primera instrucción)
 st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
 
 # Configuración SSL y sesión HTTP
@@ -63,7 +63,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # =============================================================================
-# Función para calcular indicadores técnicos (RSI, MACD, Bollinger Bands, SMA, ATR)
+# Función para calcular indicadores técnicos
 # =============================================================================
 def compute_indicators(df):
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
@@ -141,7 +141,7 @@ def create_sequences(data, window_size):
 # =============================================================================
 # Modelos y entrenamiento
 # =============================================================================
-# Modelo LSTM: parámetros fijos basados en la literatura
+# Modelo LSTM basado en recomendaciones de la literatura
 def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
                      lstm_units1=128, lstm_units2=64, dropout_rate=0.3, dense_units=100):
     model = Sequential([
@@ -155,7 +155,7 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
-# Función para entrenar el modelo con early stopping y reducción de LR
+# Entrenamiento con early stopping y reducción de la tasa de aprendizaje
 def train_model(X_train, y_train, X_val, y_val, model, epochs=5, batch_size=32):
     tf.keras.backend.clear_session()
     callbacks = [
@@ -166,14 +166,14 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs=5, batch_size=32):
               epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
     return model
 
-# XGBoost: parámetros recomendados
+# XGBoost con parámetros recomendados
 def train_xgboost(X, y):
     model_xgb = XGBRegressor(n_estimators=150, max_depth=6, learning_rate=0.05,
                              subsample=0.8, colsample_bytree=0.8)
     model_xgb.fit(X, y)
     return model_xgb
 
-# Función para combinar las predicciones de LSTM, XGBoost y Prophet
+# Combina las predicciones de LSTM, XGBoost y Prophet
 def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.5, w_xgb=0.3, w_prophet=0.2):
     return w_lstm * lstm_pred + w_xgb * xgb_pred + w_prophet * prophet_pred
 
@@ -189,7 +189,7 @@ def medium_long_term_prediction(df, days=180):
     forecast["exp_yhat"] = np.expm1(forecast["yhat"])
     return model, forecast
 
-# Función para aplicar un “shock factor” basado en cambios bruscos
+# Aplica un "shock factor" basado en cambios bruscos en el precio
 def apply_shock_factor(df, base_sentiment):
     df["pct_change"] = df["close_price"].pct_change().fillna(0)
     sentiment_array = []
@@ -202,7 +202,7 @@ def apply_shock_factor(df, base_sentiment):
     return np.array(sentiment_array)
 
 # =============================================================================
-# Función para obtener artículos de NewsAPI (aviso de rate limit solo en esta pestaña)
+# Función para obtener artículos de NewsAPI (rate limit solo en Noticias)
 # =============================================================================
 @st.cache_data(ttl=43200)
 def get_newsapi_articles(coin_id, show_warning=True):
@@ -345,7 +345,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Seleccionar hiperparámetros fijos según el activo (basados en la literatura)
+    # Fijación de hiperparámetros basados en la literatura
     if coin_id == "xrp":
         fixed_params = {
             "learning_rate": 0.0004,
@@ -370,7 +370,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     dropout_rate = fixed_params["dropout_rate"]
     dense_units = fixed_params["dense_units"]
     batch_size = fixed_params["batch_size"]
-    progress_text.text("Usando hiperparámetros fijos basados en la literatura.")
+    progress_text.text("Usando hiperparámetros fijos.")
 
     progress_text.text("Entrenando modelo LSTM final...")
     progress_bar.progress(60)
@@ -487,11 +487,24 @@ def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Dashboard:**  
-    Este dashboard predice el precio futuro de criptomonedas utilizando:
-    - **Datos Históricos e Indicadores Técnicos:** Se extraen datos de yfinance y se calculan indicadores (RSI, MACD, ATR, Bollinger Bands, SMA) para analizar el mercado.
-    - **Análisis de Sentimiento:** Se evalúa el “estado de ánimo” combinando información de noticias (NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.
-    - **Ensamble de Modelos:** Se entrenan un modelo LSTM (con hiperparámetros fijos recomendados según la literatura), un modelo XGBoost y Prophet; sus predicciones se combinan (50% LSTM, 30% XGBoost, 20% Prophet) para obtener un resultado robusto.
-    - **Optimización Offline:** Los hiperparámetros se han optimizado previamente en entornos experimentales, lo que permite acelerar el entrenamiento en CPU.
+    Este dashboard predice el precio futuro de criptomonedas utilizando un enfoque integral que combina datos históricos, indicadores técnicos y análisis de sentimiento. En concreto:
+    
+    - **Datos Históricos e Indicadores Técnicos:**  
+      Extraemos datos desde yfinance y calculamos indicadores como RSI, MACD, ATR, Bollinger Bands y SMA para capturar la dinámica del mercado.
+    
+    - **Análisis de Sentimiento:**  
+      Evaluamos el sentimiento del mercado mediante la combinación de información de noticias (a través de NewsAPI) y el índice Fear & Greed, utilizando técnicas de NLP (Transformers y TextBlob).
+    
+    - **Ensamble de Modelos:**  
+      Combinamos las predicciones de tres modelos:
+        - Un modelo LSTM para captar patrones secuenciales.
+        - Un modelo XGBoost para aprovechar técnicas basadas en árboles.
+        - Prophet para identificar tendencias y estacionalidades a medio y largo plazo.
+      
+      La predicción final se obtiene ponderando 50% LSTM, 30% XGBoost y 20% Prophet.
+    
+    - **Optimización Offline:**  
+      Los hiperparámetros han sido ajustados previamente (offline) basándonos en recomendaciones de la literatura, lo que nos permite usar parámetros fijos y acelerar el entrenamiento en entornos CPU.
     """)
     st.sidebar.title("Configuración de Predicción")
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
@@ -790,7 +803,7 @@ def main_app():
             st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver noticias :)")
 
 # =============================================================================
-# Ejecución principal del dashboard
+# Ejecución principal
 # =============================================================================
 if __name__ == "__main__":
     main_app()

@@ -13,6 +13,4 @@ yfinance
 newsapi-python
 ta
 transformers
-torch
-optuna
 xgboost
