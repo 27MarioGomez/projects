@@ -157,7 +157,7 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
-def train_model(X_train, y_train, X_val, y_val, model, epochs=10, batch_size=32):
+def train_model(X_train, y_train, X_val, y_val, model, epochs=5, batch_size=32):
     tf.keras.backend.clear_session()
     callbacks = [
         EarlyStopping(patience=8, restore_best_weights=True),
@@ -225,7 +225,7 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
     dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5, step=0.05)
     dense_units = trial.suggest_int("dense_units", 50, 150, step=10)
-    
+
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
     model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=1, batch_size=batch_size)
     preds = model.predict(X_val_adj, verbose=0)
@@ -401,7 +401,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_text.text("Entrenando modelo LSTM final...")
     progress_bar.progress(60)
     lstm_model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=10, batch_size=batch_size)
+    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=5, batch_size=batch_size)
 
     progress_text.text("Realizando predicción en test (LSTM)...")
     progress_bar.progress(70)
@@ -535,12 +535,11 @@ def splash_screen():
       Se entrenan un modelo LSTM, uno XGBoost y Prophet. Estos se combinan (50% LSTM, 30% XGBoost, 20% Prophet) para obtener una predicción robusta.
 
     - **Optimización Automática:**  
-      Con Optuna se ajustan automáticamente los hiperparámetros del modelo LSTM en un proceso ligero, descartando rápidamente configuraciones no prometedoras para acelerar el entrenamiento.
+      Con Optuna se ajustan automáticamente los hiperparámetros del modelo LSTM en un proceso ligero para acelerar el entrenamiento.
 
     ¡Explora el dashboard y descubre las predicciones para tu criptomoneda favorita!
     """)
     if st.button("Comenzar"):
-        # Mostrar una breve animación de transición
         st.markdown("<div class='fade-out'>Cargando dashboard...</div>", unsafe_allow_html=True)
         time.sleep(1.5)
         st.experimental_set_query_params(page="dashboard")
