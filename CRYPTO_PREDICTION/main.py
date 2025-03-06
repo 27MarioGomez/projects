@@ -11,7 +11,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
 
-# Activar mixed precision si hay GPU compatible (en CPU se ignora)
+# Activar mixed precision si hay GPU (en CPU se ignora)
 if tf.config.list_physical_devices('GPU'):
     from tensorflow.keras.mixed_precision import set_global_policy
     set_global_policy('mixed_float16')
@@ -62,7 +62,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # =============================================================================
-# Funciones de indicadores técnicos
+# Funciones para indicadores técnicos
 # =============================================================================
 def compute_indicators(df):
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
@@ -78,7 +78,7 @@ def compute_indicators(df):
     return df
 
 # =============================================================================
-# Sentimiento avanzado con Transformers y TextBlob
+# Análisis de Sentimiento con Transformers y TextBlob
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
@@ -156,15 +156,14 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
-def train_model(X_train, y_train, X_val, y_val, model, epochs=20, batch_size=32):
+def train_model(X_train, y_train, X_val, y_val, model, epochs=15, batch_size=32):
     tf.keras.backend.clear_session()
     callbacks = [
         EarlyStopping(patience=10, restore_best_weights=True),
         ReduceLROnPlateau(patience=5, factor=0.5, min_lr=1e-6)
     ]
-    # Para el tuning final se usan 20 epochs
     model.fit(X_train, y_train, validation_data=(X_val, y_val),
-              epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=1)
+              epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
     return model
 
 # =============================================================================
@@ -205,20 +204,21 @@ def apply_shock_factor(df, base_sentiment):
     return np.array(sentiment_array)
 
 # =============================================================================
-# Para acelerar el tuning, usamos una muestra más pequeña
-def sample_for_tuning(X, y, sample_size=100):
+# Para acelerar el tuning, usamos una muestra pequeña (sample_size=50)
+# =============================================================================
+def sample_for_tuning(X, y, sample_size=50):
     if len(X) > sample_size:
         return X[-sample_size:], y[-sample_size:]
     return X, y
 
 # =============================================================================
 # Optimización de hiperparámetros con Optuna
-# Durante el tuning, se entrena solo 1 época por ensayo para acelerar el proceso
+# Durante el tuning se entrena solo 1 época por ensayo, descartando caminos no viables
 # =============================================================================
 def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
     trial_num = trial.number + 1
     batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
-    progress_text.write(f"Ensayo {trial_num}: Entrenando (1 epoch) con batch_size={batch_size} ...")
+    progress_text.text(f"Esto puede tardar un poco, por favor espera...\nEnsayo {trial_num}: Entrenando (1 epoch) con batch_size={batch_size} ...")
     lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
     lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
@@ -226,23 +226,22 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     dense_units = trial.suggest_int("dense_units", 50, 150, step=10)
 
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    # Solo 1 epoch para el tuning rápido
     model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=1, batch_size=batch_size)
     preds = model.predict(X_val_adj, verbose=0)
     reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)
     loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
     progress_bar.progress(min(100, 40 + int(trial_num * 20)))
-    progress_text.write(f"Ensayo {trial_num}: Pérdida obtenida = {loss:.4f}")
+    progress_text.text(f"Ensayo {trial_num}: Pérdida obtenida = {loss:.4f}")
     return loss
 
 def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    X_train_sample, y_train_sample = sample_for_tuning(X_train_adj, y_train, sample_size=100)
-    X_val_sample, y_val_sample = sample_for_tuning(X_val_adj, y_val, sample_size=100)
+    X_train_sample, y_train_sample = sample_for_tuning(X_train_adj, y_train, sample_size=50)
+    X_val_sample, y_val_sample = sample_for_tuning(X_val_adj, y_val, sample_size=50)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=1, n_warmup_steps=2)
     study = optuna.create_study(direction="minimize", pruner=pruner)
     study.optimize(lambda trial: objective(trial, X_train_sample, y_train_sample, X_val_sample, y_val_sample, input_shape, progress_text, progress_bar),
                    n_trials=3)
-    progress_text.write(f"Optimización completada. Mejor pérdida: {study.best_value:.4f}")
+    progress_text.text(f"Optimización completada. Mejor pérdida: {study.best_value:.4f}")
     return study.best_params
 
 @st.cache_data(ttl=43200)
@@ -285,7 +284,7 @@ def get_newsapi_articles(coin_id):
         return articles
     except Exception as e:
         if "rateLimited" in str(e) or "429" in str(e):
-            st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver solo noticias :)")
+            st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver noticias :)")
         else:
             st.error(f"Error al obtener noticias: {e}")
         return []
@@ -326,26 +325,27 @@ def adjust_predictions_for_sentiment(future_preds, gauge_val):
         return future_preds * 0.97
     return future_preds
 
+# =============================================================================
+# Función principal de entrenamiento y predicción con ensamble
+# =============================================================================
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     progress_text = st.empty()
     progress_bar = st.progress(0)
 
-    progress_text.write("Cargando datos históricos...")
+    progress_text.text("Cargando datos históricos...")
     progress_bar.progress(5)
     df = load_crypto_data(coin_id, start_date, end_date)
     if df is None or df.empty:
         st.error("Datos históricos no disponibles.")
         return None
 
-    st.write(f"Datos históricos cargados: {df.shape[0]} registros, {df.shape[1]} columnas.")
-
-    progress_text.write("Calculando shock factor y sentimiento base...")
+    progress_text.text("Calculando shock factor y sentimiento base...")
     progress_bar.progress(15)
     news_sent, market_sent, gauge_val = get_crypto_sentiment_combined(coin_id)
     base_sentiment = gauge_val / 100.0
     shock_array = apply_shock_factor(df.copy(), base_sentiment)
 
-    progress_text.write("Generando secuencias y escalando datos...")
+    progress_text.text("Generando secuencias y escalando datos...")
     progress_bar.progress(25)
     df["log_price"] = np.log1p(df["close_price"])
     df["log_volume"] = np.log1p(df["volume"] + 1)
@@ -362,9 +362,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     if len(shock_array) != len(df):
         st.error("Inconsistencia en longitudes para shock factor.")
         return None
-    shock_list = []
-    for i in range(window_size, len(df)):
-        shock_list.append(shock_array[i])
+    shock_list = [shock_array[i] for i in range(window_size, len(df))]
     shock_list = np.array(shock_list)
     if len(shock_list) != len(X):
         st.error("Error en el tamaño de shock list.")
@@ -387,7 +385,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    progress_text.write("Optimizando hiperparámetros con Optuna...")
+    progress_text.text("Optimizando hiperparámetros con Optuna...")
     progress_bar.progress(40)
     input_shape = (window_size, 6)
     best_params = tune_lstm_params(X_train, y_train, X_val, y_val, input_shape, progress_text, progress_bar)
@@ -398,12 +396,12 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     dense_units = best_params["dense_units"]
     batch_size = best_params["batch_size"]
 
-    progress_text.write("Entrenando modelo LSTM final...")
+    progress_text.text("Entrenando modelo LSTM final...")
     progress_bar.progress(60)
     lstm_model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=20, batch_size=batch_size)
+    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=15, batch_size=batch_size)
 
-    progress_text.write("Realizando predicción en test (LSTM)...")
+    progress_text.text("Realizando predicción en test (LSTM)...")
     progress_bar.progress(70)
     preds_test_scaled = lstm_model.predict(X_test, verbose=0)
     reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), 4))], axis=1)
@@ -419,7 +417,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     lstm_rmse = np.sqrt(mean_squared_error(y_test_real, lstm_test_preds))
     lstm_mape = np.mean(np.abs((y_test_real - lstm_test_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
 
-    progress_text.write("Entrenando XGBoost y Prophet para ensamble...")
+    progress_text.text("Entrenando XGBoost y Prophet para ensamble...")
     progress_bar.progress(80)
     X_train_val = np.concatenate([X_train, X_val], axis=0)
     y_train_val = np.concatenate([y_train, y_val], axis=0)
@@ -447,7 +445,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     ens_rmse = np.sqrt(mean_squared_error(y_test_real, test_ens_preds))
     ens_mape = np.mean(np.abs((y_test_real - test_ens_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
 
-    progress_text.write("Realizando predicción futura...")
+    progress_text.text("Realizando predicción futura...")
     progress_bar.progress(90)
     last_window = scaled_data[-window_size:]
     last_shock = shock_array[-1]
@@ -487,7 +485,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     last_date = df["ds"].iloc[-1]
     future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=horizon_days).tolist()
 
-    progress_text.write("¡Predicción completada con éxito!")
+    progress_text.text("¡Predicción completada con éxito!")
     progress_bar.progress(100)
 
     return {
@@ -505,6 +503,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         "real_prices": y_test_real
     }
 
+# =============================================================================
+# Interfaz de la aplicación (Streamlit)
+# =============================================================================
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
@@ -516,7 +517,7 @@ def main_app():
     - Entrena un ensamble de modelos (LSTM, XGBoost y Prophet) con optimización automática (Optuna) y aplica un shock factor en días críticos.  
     - Ensamble final (50% LSTM, 30% XGBoost, 20% Prophet) para predicciones de corto plazo.  
     - La pestaña de “Predicción a Medio/Largo Plazo” solo se muestra si ya se ha entrenado el modelo.  
-    - Mientras se entrena, puedes consultar Análisis de Sentimientos y Noticias Recientes.
+    - Mientras se entrena, se muestran mensajes dinámicos del proceso.
     """)
 
     st.sidebar.title("Configuración de Predicción")
@@ -551,7 +552,6 @@ def main_app():
 
     df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     if df_prices is not None and not df_prices.empty:
-        st.write(f"Datos históricos cargados: {df_prices.shape[0]} registros, {df_prices.shape[1]} columnas.")
         fig_hist = px.line(
             df_prices,
             x="ds",
@@ -814,7 +814,7 @@ def main_app():
                 )
             st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.warning("No se encontraron noticias recientes o ocurrió un error.")
+            st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver noticias :)")
 
 if __name__ == "__main__":
     main_app()
