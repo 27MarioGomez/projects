@@ -39,11 +39,15 @@ import time
 # Reducir verbosidad de Optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+# Configuración SSL y sesión HTTP
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
 retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
+
+# Configuración inicial de la página (debe ser la primera instrucción)
+st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
 
 # Diccionario de criptomonedas
 coincap_ids = {
@@ -225,7 +229,7 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
     dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5, step=0.05)
     dense_units = trial.suggest_int("dense_units", 50, 150, step=10)
-
+    
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
     model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=1, batch_size=batch_size)
     preds = model.predict(X_val_adj, verbose=0)
@@ -506,49 +510,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     }
 
 # =============================================================================
-# Pantalla de bienvenida (splash screen) con transición
-# =============================================================================
-def splash_screen():
-    st.set_page_config(page_title="Crypto Price Predictions", layout="wide")
-    st.title("Crypto Price Predictions 🔮")
-    st.markdown("""
-    <style>
-    .fade-out {
-        animation: fadeOut 1.5s forwards;
-    }
-    @keyframes fadeOut {
-        from { opacity: 1; }
-        to { opacity: 0; }
-    }
-    </style>
-    **Bienvenido a Crypto Price Predictions**
-
-    Este dashboard ha sido desarrollado para predecir el precio futuro de criptomonedas utilizando múltiples fuentes de datos y técnicas avanzadas:
-
-    - **Datos Históricos e Indicadores Técnicos:**  
-      Se extraen datos de yfinance y se calculan indicadores (RSI, MACD, ATR, Bollinger Bands, SMA) para analizar el mercado.
-      
-    - **Análisis de Sentimiento:**  
-      Se evalúa el “estado de ánimo” combinando información de noticias (NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.
-
-    - **Ensamble de Modelos:**  
-      Se entrenan un modelo LSTM, uno XGBoost y Prophet. Estos se combinan (50% LSTM, 30% XGBoost, 20% Prophet) para obtener una predicción robusta.
-
-    - **Optimización Automática:**  
-      Con Optuna se ajustan automáticamente los hiperparámetros del modelo LSTM en un proceso ligero para acelerar el entrenamiento.
-
-    ¡Explora el dashboard y descubre las predicciones para tu criptomoneda favorita!
-    """)
-    if st.button("Comenzar"):
-        st.markdown("<div class='fade-out'>Cargando dashboard...</div>", unsafe_allow_html=True)
-        time.sleep(1.5)
-        st.experimental_set_query_params(page="dashboard")
-
-# =============================================================================
 # Función principal del dashboard
 # =============================================================================
 def main_app():
-    st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Dashboard:**  
@@ -855,52 +819,7 @@ def main_app():
             st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver noticias :)")
 
 # =============================================================================
-# Pantalla de bienvenida (splash screen) con transición
+# Ejecución principal
 # =============================================================================
-def splash_screen():
-    st.set_page_config(page_title="Crypto Price Predictions", layout="wide")
-    st.title("Crypto Price Predictions 🔮")
-    st.markdown("""
-    <style>
-    .fade-out {
-        animation: fadeOut 1.5s forwards;
-    }
-    @keyframes fadeOut {
-        from { opacity: 1; }
-        to { opacity: 0; }
-    }
-    </style>
-    **Bienvenido a Crypto Price Predictions**
-
-    Este dashboard ha sido desarrollado para predecir el precio futuro de criptomonedas utilizando múltiples fuentes de datos y técnicas avanzadas:
-
-    - **Datos Históricos e Indicadores Técnicos:**  
-      Se extraen datos de yfinance y se calculan indicadores (RSI, MACD, ATR, Bollinger Bands, SMA) para analizar el mercado.
-      
-    - **Análisis de Sentimiento:**  
-      Se evalúa el “estado de ánimo” combinando información de noticias (NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.
-
-    - **Ensamble de Modelos:**  
-      Se entrenan un modelo LSTM, uno XGBoost y Prophet. Estos se combinan (50% LSTM, 30% XGBoost, 20% Prophet) para obtener una predicción robusta.
-
-    - **Optimización Automática:**  
-      Con Optuna se ajustan automáticamente los hiperparámetros del modelo LSTM en un proceso ligero para acelerar el entrenamiento.
-
-    ¡Explora el dashboard y descubre las predicciones para tu criptomoneda favorita!
-    """)
-    if st.button("Comenzar"):
-        st.markdown("<div class='fade-out'>Cargando dashboard...</div>", unsafe_allow_html=True)
-        time.sleep(1.5)
-        st.experimental_set_query_params(page="dashboard")
-
-# =============================================================================
-# Flujo principal
-# =============================================================================
-def run_dashboard():
-    if st.experimental_get_query_params().get("page") != ["dashboard"]:
-        splash_screen()
-    else:
-        main_app()
-
 if __name__ == "__main__":
-    run_dashboard()
+    main_app()
