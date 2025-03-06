@@ -11,7 +11,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
 
-# Si se detecta GPU se activa mixed precision (en CPU se ignora)
+# Activar mixed precision si se detecta GPU (en CPU se ignora)
 if tf.config.list_physical_devices('GPU'):
     from tensorflow.keras.mixed_precision import set_global_policy
     set_global_policy('mixed_float16')
@@ -41,7 +41,7 @@ from xgboost import XGBRegressor
 st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 session = requests.Session()
-retry = Retry(total=5, backoff_factor=1, status_forcelist=[429,500,502,503,504])
+retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
@@ -81,7 +81,55 @@ def compute_indicators(df):
     return df
 
 # ---------------------------------------------------------------------------
-# Análisis de sentimiento
+# Función para obtener artículos de NewsAPI
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=43200)
+def get_newsapi_articles(coin_id, show_warning=True):
+    newsapi_key = st.secrets.get("newsapi_key", "")
+    if not newsapi_key:
+        st.error("Clave 'newsapi_key' no encontrada.")
+        return []
+    try:
+        query = f"{coin_id} crypto"
+        newsapi = NewsApiClient(api_key=newsapi_key)
+        data = newsapi.get_everything(
+            q=query,
+            language="en",
+            sort_by="relevancy",
+            page_size=5
+        )
+        articles = []
+        if data.get("articles"):
+            for art in data["articles"]:
+                image_url = art.get("urlToImage", "")
+                title = art.get("title") or "Sin título"
+                description = art.get("description") or "Sin descripción"
+                pub_date = art.get("publishedAt") or "Fecha no disponible"
+                link = art.get("url") or "#"
+                try:
+                    parsed_date = date_parse(pub_date)
+                except:
+                    parsed_date = datetime(1970, 1, 1)
+                pub_date_str = parsed_date.strftime("%Y-%m-%d %H:%M:%S")
+                articles.append({
+                    "title": title,
+                    "description": description,
+                    "pubDate": pub_date_str,
+                    "link": link,
+                    "image": image_url,
+                    "parsed_date": parsed_date
+                })
+            articles = sorted(articles, key=lambda x: x["parsed_date"], reverse=True)
+        return articles
+    except Exception as e:
+        if ("rateLimited" in str(e) or "429" in str(e)) and show_warning:
+            st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver noticias :)")
+        elif show_warning:
+            st.error(f"Error al obtener noticias: {e}")
+        return []
+
+# ---------------------------------------------------------------------------
+# Funciones de análisis de sentimiento
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
@@ -106,8 +154,30 @@ def get_news_sentiment(coin_id):
         sentiments_trans.append(get_advanced_sentiment(text))
     return (np.mean(sentiments_tb) + np.mean(sentiments_trans)) / 2.0
 
+def get_fear_greed_index():
+    try:
+        data = requests.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
+        return float(data["data"][0]["value"])
+    except Exception:
+        st.warning("Índice Fear & Greed no disponible. Se usará 50.0.")
+        return 50.0
+
+def get_crypto_sentiment_combined(coin_id):
+    news_sent = get_news_sentiment(coin_id)
+    market_sent = get_fear_greed_index()
+    gauge_val = 50 + (news_sent - market_sent)
+    gauge_val = max(0, min(100, gauge_val))
+    return news_sent, market_sent, gauge_val
+
+def adjust_predictions_for_sentiment(future_preds, gauge_val):
+    if gauge_val > 80:
+        return future_preds * 1.03
+    elif gauge_val < 20:
+        return future_preds * 0.97
+    return future_preds
+
 # ---------------------------------------------------------------------------
-# Carga y preprocesamiento de datos históricos
+# Carga y preprocesamiento de datos históricos (yfinance)
 # ---------------------------------------------------------------------------
 @st.cache_data
 def load_crypto_data(coin_id, start_date=None, end_date=None):
@@ -145,7 +215,7 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     df.dropna(inplace=True)
     # Agregamos el log del SMA50
     df["log_sma50"] = np.log1p(df["sma50"])
-    # Integramos el sentimiento actual como feature (constante en el histórico)
+    # Integramos el sentimiento actual como feature (valor constante en el histórico)
     current_sent = get_news_sentiment(coin_id)
     df["sentiment"] = current_sent
     return df[["ds", "close_price", "volume", "high", "low", "RSI", "rsi_norm", "macd", "atr", "log_sma50", "sentiment"]]
@@ -209,7 +279,7 @@ def medium_long_term_prediction(df, days=180):
     return model, forecast
 
 # ---------------------------------------------------------------------------
-# Entrenamiento y predicción con sentimiento integrado como feature
+# Entrenamiento y predicción con sentimiento como feature
 # ---------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     progress_text = st.empty()
@@ -226,7 +296,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(25)
     df["log_price"] = np.log1p(df["close_price"])
     df["log_volume"] = np.log1p(df["volume"] + 1)
-    # La matriz de features incluye 6 variables originales + sentimiento
+    # La matriz de features incluye 6 variables originales + sentimiento = 7 columnas
     data_array = df[["log_price", "log_volume", "rsi_norm", "macd", "atr", "log_sma50", "sentiment"]].values
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(data_array)
@@ -237,7 +307,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No hay suficientes datos para crear secuencias.")
         return None
 
-    # Dividir en conjuntos de entrenamiento, validación y test
+    # División en conjuntos de entrenamiento, validación y test
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -245,7 +315,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Hiperparámetros fijos según recomendaciones (ligeramente ajustados para cada cripto)
+    # Hiperparámetros fijos basados en recomendaciones
     if coin_id == "xrp":
         fixed_params = {
             "learning_rate": 0.0004,
@@ -282,7 +352,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_text.text("Realizando predicción en test (LSTM)...")
     progress_bar.progress(70)
     preds_test_scaled = lstm_model.predict(X_test, verbose=0)
-    # Para reconstruir el target, se concatena una matriz de ceros de 6 columnas (porque el scaler fue entrenado con 7 columnas)
+    # Para reconstruir, se concatenan ceros de 6 columnas (para alcanzar 7 columnas en total)
     reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), 6))], axis=1)
     reconst_test_inv = scaler.inverse_transform(reconst_test)
     preds_test_log = reconst_test_inv[:, 0]
@@ -385,10 +455,10 @@ def main_app():
     **Descripción del Dashboard:**  
     Este dashboard predice el precio futuro de criptomonedas combinando datos históricos, indicadores técnicos y análisis de sentimiento.  
     - **Datos Históricos e Indicadores Técnicos:** Se extraen datos de yfinance y se calculan indicadores como RSI, MACD, ATR, Bollinger Bands, SMA y el log del SMA50 para captar la dinámica del mercado.  
-    - **Análisis de Sentimiento:** Se evalúa el estado de ánimo del mercado mediante el análisis de noticias (a través de NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.  
-    - **Ensamble de Modelos:** Se combinan las predicciones de un modelo LSTM, un modelo XGBoost y Prophet (con ponderaciones de 60%, 20% y 20% respectivamente) para obtener un pronóstico robusto.  
-    - **Integración del Sentimiento como Feature:** El sentimiento actual se incorpora directamente al set de características, permitiendo que el modelo ajuste sus predicciones en función del ambiente del mercado.  
-    - **Optimización Offline:** Los hiperparámetros han sido fijados previamente basados en la literatura, lo que facilita el entrenamiento en entornos CPU sin optimización en tiempo real.  
+    - **Análisis de Sentimiento:** Se evalúa el ambiente del mercado mediante el análisis de noticias (a través de NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.  
+    - **Ensamble de Modelos:** Se combinan las predicciones de un modelo LSTM, un modelo XGBoost y Prophet (ponderaciones 60%/20%/20%) para obtener un pronóstico robusto.  
+    - **Integración del Sentimiento como Feature:** El sentimiento actual se incorpora directamente al set de características, permitiendo que el modelo ajuste sus predicciones en función del ambiente.  
+    - **Optimización Offline:** Los hiperparámetros han sido fijados previamente según la literatura, facilitando el entrenamiento en entornos CPU.  
     
     **NFA: Not Financial Advice.**
     """)
@@ -464,7 +534,6 @@ def main_app():
             result = st.session_state["result"]
         else:
             result = None
-
         if result:
             st.header(f"Predicción de Precios (Corto Plazo) - {result['symbol']}")
             last_date = result["df"]["ds"].iloc[-1].date()
