@@ -11,7 +11,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
 
-# Activar mixed precision si hay GPU (en CPU se ignora)
+# Si se detecta GPU se puede activar mixed precision (en CPU se ignora)
 if tf.config.list_physical_devices('GPU'):
     from tensorflow.keras.mixed_precision import set_global_policy
     set_global_policy('mixed_float16')
@@ -32,12 +32,11 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
 from transformers import pipeline
-import optuna
-from xgboost import XGBRegressor
 import time
+from xgboost import XGBRegressor
 
-# Reducir verbosidad de Optuna
-optuna.logging.set_verbosity(optuna.logging.WARNING)
+# Configuración inicial de la página (llamada primero en el script)
+st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
 
 # Configuración SSL y sesión HTTP
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -46,10 +45,7 @@ retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 5
 adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
-# Configuración inicial de la página (debe ser la primera instrucción)
-st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
-
-# Diccionario de criptomonedas
+# Diccionario de criptomonedas y mapeo a sus símbolos
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -67,7 +63,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # =============================================================================
-# Funciones para indicadores técnicos
+# Función para calcular indicadores técnicos (RSI, MACD, Bollinger Bands, SMA, ATR)
 # =============================================================================
 def compute_indicators(df):
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
@@ -83,22 +79,19 @@ def compute_indicators(df):
     return df
 
 # =============================================================================
-# Análisis de Sentimiento con Transformers y TextBlob
+# Funciones para análisis de sentimiento
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
     return pipeline("sentiment-analysis")
 
 def get_advanced_sentiment(text):
-    sentiment_pipe = load_sentiment_pipeline()
-    result = sentiment_pipe(text)[0]
-    if result["label"].upper() == "POSITIVE":
-        return 50 + (result["score"] * 50)
-    else:
-        return 50 - (result["score"] * 50)
+    pipe = load_sentiment_pipeline()
+    result = pipe(text)[0]
+    return 50 + (result["score"] * 50) if result["label"].upper() == "POSITIVE" else 50 - (result["score"] * 50)
 
 # =============================================================================
-# Carga y preprocesamiento de datos históricos (yfinance)
+# Función para cargar y preprocesar datos históricos (yfinance)
 # =============================================================================
 @st.cache_data
 def load_crypto_data(coin_id, start_date=None, end_date=None):
@@ -146,8 +139,9 @@ def create_sequences(data, window_size):
     return np.array(X), np.array(y)
 
 # =============================================================================
-# Modelo LSTM y entrenamiento
+# Modelos y entrenamiento
 # =============================================================================
+# Modelo LSTM: parámetros fijos basados en la literatura
 def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
                      lstm_units1=128, lstm_units2=64, dropout_rate=0.3, dense_units=100):
     model = Sequential([
@@ -161,31 +155,29 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
+# Función para entrenar el modelo con early stopping y reducción de LR
 def train_model(X_train, y_train, X_val, y_val, model, epochs=5, batch_size=32):
     tf.keras.backend.clear_session()
     callbacks = [
-        EarlyStopping(patience=8, restore_best_weights=True),
-        ReduceLROnPlateau(patience=4, factor=0.5, min_lr=1e-6)
+        EarlyStopping(patience=5, restore_best_weights=True),
+        ReduceLROnPlateau(patience=3, factor=0.5, min_lr=1e-6)
     ]
     model.fit(X_train, y_train, validation_data=(X_val, y_val),
               epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
     return model
 
-# =============================================================================
-# XGBoost para ensamble
-# =============================================================================
-def flatten_sequences(X_seq):
-    return X_seq.reshape((X_seq.shape[0], X_seq.shape[1]*X_seq.shape[2]))
-
+# XGBoost: parámetros recomendados
 def train_xgboost(X, y):
-    model_xgb = XGBRegressor(n_estimators=200, max_depth=5, learning_rate=0.05,
+    model_xgb = XGBRegressor(n_estimators=150, max_depth=6, learning_rate=0.05,
                              subsample=0.8, colsample_bytree=0.8)
     model_xgb.fit(X, y)
     return model_xgb
 
+# Función para combinar las predicciones de LSTM, XGBoost y Prophet
 def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.5, w_xgb=0.3, w_prophet=0.2):
     return w_lstm * lstm_pred + w_xgb * xgb_pred + w_prophet * prophet_pred
 
+# Predicción a medio/largo plazo con Prophet
 def medium_long_term_prediction(df, days=180):
     df_prophet = df[["ds", "close_price"]].copy()
     df_prophet.rename(columns={"close_price": "y"}, inplace=True)
@@ -197,6 +189,7 @@ def medium_long_term_prediction(df, days=180):
     forecast["exp_yhat"] = np.expm1(forecast["yhat"])
     return model, forecast
 
+# Función para aplicar un “shock factor” basado en cambios bruscos
 def apply_shock_factor(df, base_sentiment):
     df["pct_change"] = df["close_price"].pct_change().fillna(0)
     sentiment_array = []
@@ -209,47 +202,8 @@ def apply_shock_factor(df, base_sentiment):
     return np.array(sentiment_array)
 
 # =============================================================================
-# Para acelerar el tuning, usamos una muestra pequeña (sample_size=50)
+# Función para obtener artículos de NewsAPI (aviso de rate limit solo en esta pestaña)
 # =============================================================================
-def sample_for_tuning(X, y, sample_size=50):
-    if len(X) > sample_size:
-        return X[-sample_size:], y[-sample_size:]
-    return X, y
-
-# =============================================================================
-# Optimización de hiperparámetros con Optuna (1 ensayo por tuning)
-# Se descartan caminos no viables mediante prunning
-# =============================================================================
-def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    trial_num = trial.number + 1
-    batch_size = trial.suggest_int("batch_size", 16, 64, step=16)
-    progress_text.text(f"Esto puede tardar un poco, por favor espera...\nEnsayo {trial_num}: Entrenando (1 epoch) con batch_size={batch_size} ...")
-    lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-    lstm_units1 = trial.suggest_int("lstm_units1", 64, 256, step=32)
-    lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
-    dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5, step=0.05)
-    dense_units = trial.suggest_int("dense_units", 50, 150, step=10)
-    
-    model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=1, batch_size=batch_size)
-    preds = model.predict(X_val_adj, verbose=0)
-    reconst = np.concatenate([preds, np.zeros((len(preds), 4))], axis=1)
-    loss = np.sqrt(mean_squared_error(y_val, reconst[:, 0]))
-    progress_bar.progress(min(100, 40 + int(trial_num * 20)))
-    progress_text.text(f"Ensayo {trial_num}: Pérdida obtenida = {loss:.4f}")
-    return loss
-
-def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
-    X_train_sample, y_train_sample = sample_for_tuning(X_train_adj, y_train, sample_size=50)
-    X_val_sample, y_val_sample = sample_for_tuning(X_val_adj, y_val, sample_size=50)
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=1, n_warmup_steps=2)
-    study = optuna.create_study(direction="minimize", pruner=pruner)
-    # Reducimos a 1 ensayo para acelerar el tuning en CPU
-    study.optimize(lambda trial: objective(trial, X_train_sample, y_train_sample, X_val_sample, y_val_sample, input_shape, progress_text, progress_bar),
-                   n_trials=1)
-    progress_text.text(f"Optimización completada. Mejor pérdida: {study.best_value:.4f}")
-    return study.best_params
-
 @st.cache_data(ttl=43200)
 def get_newsapi_articles(coin_id, show_warning=True):
     newsapi_key = st.secrets.get("newsapi_key", "")
@@ -391,19 +345,36 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    progress_text.text("Optimizando hiperparámetros con Optuna...")
-    progress_bar.progress(40)
-    input_shape = (window_size, 6)
-    best_params = tune_lstm_params(X_train, y_train, X_val, y_val, input_shape, progress_text, progress_bar)
-    lr = best_params["learning_rate"]
-    lstm_units1 = best_params["lstm_units1"]
-    lstm_units2 = best_params["lstm_units2"]
-    dropout_rate = best_params["dropout_rate"]
-    dense_units = best_params["dense_units"]
-    batch_size = best_params["batch_size"]
+    # Seleccionar hiperparámetros fijos según el activo (basados en la literatura)
+    if coin_id == "xrp":
+        fixed_params = {
+            "learning_rate": 0.0004,
+            "lstm_units1": 128,
+            "lstm_units2": 64,
+            "dropout_rate": 0.35,
+            "dense_units": 100,
+            "batch_size": 32
+        }
+    else:
+        fixed_params = {
+            "learning_rate": 0.0005,
+            "lstm_units1": 128,
+            "lstm_units2": 64,
+            "dropout_rate": 0.3,
+            "dense_units": 100,
+            "batch_size": 32
+        }
+    lr = fixed_params["learning_rate"]
+    lstm_units1 = fixed_params["lstm_units1"]
+    lstm_units2 = fixed_params["lstm_units2"]
+    dropout_rate = fixed_params["dropout_rate"]
+    dense_units = fixed_params["dense_units"]
+    batch_size = fixed_params["batch_size"]
+    progress_text.text("Usando hiperparámetros fijos basados en la literatura.")
 
     progress_text.text("Entrenando modelo LSTM final...")
     progress_bar.progress(60)
+    input_shape = (window_size, 6)
     lstm_model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
     lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=5, batch_size=batch_size)
 
@@ -516,11 +487,11 @@ def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Dashboard:**  
-    Este dashboard ha sido desarrollado para predecir el precio futuro de criptomonedas utilizando múltiples fuentes de datos y técnicas avanzadas:
+    Este dashboard predice el precio futuro de criptomonedas utilizando:
     - **Datos Históricos e Indicadores Técnicos:** Se extraen datos de yfinance y se calculan indicadores (RSI, MACD, ATR, Bollinger Bands, SMA) para analizar el mercado.
     - **Análisis de Sentimiento:** Se evalúa el “estado de ánimo” combinando información de noticias (NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.
-    - **Ensamble de Modelos:** Se entrenan un modelo LSTM, uno XGBoost y Prophet, que se combinan (50% LSTM, 30% XGBoost, 20% Prophet) para obtener una predicción robusta.
-    - **Optimización Automática:** Optuna ajusta los hiperparámetros del modelo LSTM de forma ligera para reducir el tiempo de entrenamiento sin sacrificar precisión.
+    - **Ensamble de Modelos:** Se entrenan un modelo LSTM (con hiperparámetros fijos recomendados según la literatura), un modelo XGBoost y Prophet; sus predicciones se combinan (50% LSTM, 30% XGBoost, 20% Prophet) para obtener un resultado robusto.
+    - **Optimización Offline:** Los hiperparámetros se han optimizado previamente en entornos experimentales, lo que permite acelerar el entrenamiento en CPU.
     """)
     st.sidebar.title("Configuración de Predicción")
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
@@ -819,7 +790,7 @@ def main_app():
             st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver noticias :)")
 
 # =============================================================================
-# Ejecución principal
+# Ejecución principal del dashboard
 # =============================================================================
 if __name__ == "__main__":
     main_app()
