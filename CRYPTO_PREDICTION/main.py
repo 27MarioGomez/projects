@@ -34,6 +34,7 @@ from ta.volatility import BollingerBands, AverageTrueRange
 from transformers import pipeline
 import optuna
 from xgboost import XGBRegressor
+import time
 
 # Reducir verbosidad de Optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -156,11 +157,11 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
-def train_model(X_train, y_train, X_val, y_val, model, epochs=15, batch_size=32):
+def train_model(X_train, y_train, X_val, y_val, model, epochs=10, batch_size=32):
     tf.keras.backend.clear_session()
     callbacks = [
-        EarlyStopping(patience=10, restore_best_weights=True),
-        ReduceLROnPlateau(patience=5, factor=0.5, min_lr=1e-6)
+        EarlyStopping(patience=8, restore_best_weights=True),
+        ReduceLROnPlateau(patience=4, factor=0.5, min_lr=1e-6)
     ]
     model.fit(X_train, y_train, validation_data=(X_val, y_val),
               epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
@@ -212,8 +213,8 @@ def sample_for_tuning(X, y, sample_size=50):
     return X, y
 
 # =============================================================================
-# Optimización de hiperparámetros con Optuna
-# Durante el tuning se entrena solo 1 época por ensayo, descartando caminos no viables
+# Optimización de hiperparámetros con Optuna (1 ensayo por tuning)
+# Se descartan caminos no viables mediante prunning
 # =============================================================================
 def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progress_text, progress_bar):
     trial_num = trial.number + 1
@@ -224,7 +225,7 @@ def objective(trial, X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     lstm_units2 = trial.suggest_int("lstm_units2", 32, 128, step=16)
     dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5, step=0.05)
     dense_units = trial.suggest_int("dense_units", 50, 150, step=10)
-
+    
     model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
     model = train_model(X_train_adj, y_train, X_val_adj, y_val, model, epochs=1, batch_size=batch_size)
     preds = model.predict(X_val_adj, verbose=0)
@@ -239,13 +240,14 @@ def tune_lstm_params(X_train_adj, y_train, X_val_adj, y_val, input_shape, progre
     X_val_sample, y_val_sample = sample_for_tuning(X_val_adj, y_val, sample_size=50)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=1, n_warmup_steps=2)
     study = optuna.create_study(direction="minimize", pruner=pruner)
+    # Reducimos a 1 ensayo para acelerar el tuning en CPU
     study.optimize(lambda trial: objective(trial, X_train_sample, y_train_sample, X_val_sample, y_val_sample, input_shape, progress_text, progress_bar),
-                   n_trials=3)
+                   n_trials=1)
     progress_text.text(f"Optimización completada. Mejor pérdida: {study.best_value:.4f}")
     return study.best_params
 
 @st.cache_data(ttl=43200)
-def get_newsapi_articles(coin_id):
+def get_newsapi_articles(coin_id, show_warning=True):
     newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
         st.error("Clave 'newsapi_key' no encontrada.")
@@ -283,14 +285,14 @@ def get_newsapi_articles(coin_id):
             articles = sorted(articles, key=lambda x: x["parsed_date"], reverse=True)
         return articles
     except Exception as e:
-        if "rateLimited" in str(e) or "429" in str(e):
+        if ("rateLimited" in str(e) or "429" in str(e)) and show_warning:
             st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver noticias :)")
-        else:
+        elif show_warning:
             st.error(f"Error al obtener noticias: {e}")
         return []
 
 def get_news_sentiment(coin_id):
-    articles = get_newsapi_articles(coin_id)
+    articles = get_newsapi_articles(coin_id, show_warning=False)
     if not articles:
         return 50.0
     sentiments_tb = []
@@ -399,7 +401,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_text.text("Entrenando modelo LSTM final...")
     progress_bar.progress(60)
     lstm_model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=15, batch_size=batch_size)
+    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=10, batch_size=batch_size)
 
     progress_text.text("Realizando predicción en test (LSTM)...")
     progress_bar.progress(70)
@@ -504,22 +506,59 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     }
 
 # =============================================================================
-# Interfaz de la aplicación (Streamlit)
+# Pantalla de bienvenida (splash screen) con transición
+# =============================================================================
+def splash_screen():
+    st.set_page_config(page_title="Crypto Price Predictions", layout="wide")
+    st.title("Crypto Price Predictions 🔮")
+    st.markdown("""
+    <style>
+    .fade-out {
+        animation: fadeOut 1.5s forwards;
+    }
+    @keyframes fadeOut {
+        from { opacity: 1; }
+        to { opacity: 0; }
+    }
+    </style>
+    **Bienvenido a Crypto Price Predictions**
+
+    Este dashboard ha sido desarrollado para predecir el precio futuro de criptomonedas utilizando múltiples fuentes de datos y técnicas avanzadas:
+
+    - **Datos Históricos e Indicadores Técnicos:**  
+      Se extraen datos de yfinance y se calculan indicadores (RSI, MACD, ATR, Bollinger Bands, SMA) para analizar el mercado.
+      
+    - **Análisis de Sentimiento:**  
+      Se evalúa el “estado de ánimo” combinando información de noticias (NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.
+
+    - **Ensamble de Modelos:**  
+      Se entrenan un modelo LSTM, uno XGBoost y Prophet. Estos se combinan (50% LSTM, 30% XGBoost, 20% Prophet) para obtener una predicción robusta.
+
+    - **Optimización Automática:**  
+      Con Optuna se ajustan automáticamente los hiperparámetros del modelo LSTM en un proceso ligero, descartando rápidamente configuraciones no prometedoras para acelerar el entrenamiento.
+
+    ¡Explora el dashboard y descubre las predicciones para tu criptomoneda favorita!
+    """)
+    if st.button("Comenzar"):
+        # Mostrar una breve animación de transición
+        st.markdown("<div class='fade-out'>Cargando dashboard...</div>", unsafe_allow_html=True)
+        time.sleep(1.5)
+        st.experimental_set_query_params(page="dashboard")
+
+# =============================================================================
+# Función principal del dashboard
 # =============================================================================
 def main_app():
     st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
     st.title("Crypto Price Predictions 🔮")
-
     st.markdown("""
     **Descripción del Dashboard:**  
-    - Integra datos históricos (yfinance) y múltiples indicadores técnicos (RSI, MACD, ATR, etc.).  
-    - Analiza el sentimiento del mercado a través de NewsAPI, Fear & Greed, Transformers y TextBlob.  
-    - Entrena un ensamble de modelos (LSTM, XGBoost y Prophet) con optimización automática (Optuna) y aplica un shock factor en días críticos.  
-    - Ensamble final (50% LSTM, 30% XGBoost, 20% Prophet) para predicciones de corto plazo.  
-    - La pestaña de “Predicción a Medio/Largo Plazo” solo se muestra si ya se ha entrenado el modelo.  
-    - Mientras se entrena, se muestran mensajes dinámicos del proceso.
+    Este dashboard ha sido desarrollado para predecir el precio futuro de criptomonedas utilizando múltiples fuentes de datos y técnicas avanzadas:
+    - **Datos Históricos e Indicadores Técnicos:** Se extraen datos de yfinance y se calculan indicadores (RSI, MACD, ATR, Bollinger Bands, SMA) para analizar el mercado.
+    - **Análisis de Sentimiento:** Se evalúa el “estado de ánimo” combinando información de noticias (NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.
+    - **Ensamble de Modelos:** Se entrenan un modelo LSTM, uno XGBoost y Prophet, que se combinan (50% LSTM, 30% XGBoost, 20% Prophet) para obtener una predicción robusta.
+    - **Optimización Automática:** Optuna ajusta los hiperparámetros del modelo LSTM de forma ligera para reducir el tiempo de entrenamiento sin sacrificar precisión.
     """)
-
     st.sidebar.title("Configuración de Predicción")
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
@@ -752,7 +791,7 @@ def main_app():
 
     with tabs[4]:
         st.subheader(f"Últimas noticias sobre {crypto_name} ({coinid_to_symbol[coin_id]})")
-        articles = get_newsapi_articles(coin_id)
+        articles = get_newsapi_articles(coin_id, show_warning=True)
         if articles:
             st.markdown(
                 """
@@ -816,5 +855,53 @@ def main_app():
         else:
             st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver noticias :)")
 
+# =============================================================================
+# Pantalla de bienvenida (splash screen) con transición
+# =============================================================================
+def splash_screen():
+    st.set_page_config(page_title="Crypto Price Predictions", layout="wide")
+    st.title("Crypto Price Predictions 🔮")
+    st.markdown("""
+    <style>
+    .fade-out {
+        animation: fadeOut 1.5s forwards;
+    }
+    @keyframes fadeOut {
+        from { opacity: 1; }
+        to { opacity: 0; }
+    }
+    </style>
+    **Bienvenido a Crypto Price Predictions**
+
+    Este dashboard ha sido desarrollado para predecir el precio futuro de criptomonedas utilizando múltiples fuentes de datos y técnicas avanzadas:
+
+    - **Datos Históricos e Indicadores Técnicos:**  
+      Se extraen datos de yfinance y se calculan indicadores (RSI, MACD, ATR, Bollinger Bands, SMA) para analizar el mercado.
+      
+    - **Análisis de Sentimiento:**  
+      Se evalúa el “estado de ánimo” combinando información de noticias (NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.
+
+    - **Ensamble de Modelos:**  
+      Se entrenan un modelo LSTM, uno XGBoost y Prophet. Estos se combinan (50% LSTM, 30% XGBoost, 20% Prophet) para obtener una predicción robusta.
+
+    - **Optimización Automática:**  
+      Con Optuna se ajustan automáticamente los hiperparámetros del modelo LSTM en un proceso ligero para acelerar el entrenamiento.
+
+    ¡Explora el dashboard y descubre las predicciones para tu criptomoneda favorita!
+    """)
+    if st.button("Comenzar"):
+        st.markdown("<div class='fade-out'>Cargando dashboard...</div>", unsafe_allow_html=True)
+        time.sleep(1.5)
+        st.experimental_set_query_params(page="dashboard")
+
+# =============================================================================
+# Flujo principal
+# =============================================================================
+def run_dashboard():
+    if st.experimental_get_query_params().get("page") != ["dashboard"]:
+        splash_screen()
+    else:
+        main_app()
+
 if __name__ == "__main__":
-    main_app()
+    run_dashboard()
