@@ -35,7 +35,7 @@ from transformers.pipelines import pipeline
 import time
 from xgboost import XGBRegressor
 
-# Configuración de la página (primera instrucción)
+# Configuración de la página (debe ser la primera instrucción)
 st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
 
 # Configuración SSL y sesión HTTP
@@ -45,7 +45,7 @@ retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 5
 adapter = HTTPAdapter(max_retries=retry)
 session.mount("https://", adapter)
 
-# Diccionario de criptomonedas y mapeo a sus símbolos
+# Diccionario de criptomonedas y sus símbolos
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
     "Ethereum (ETH)": "ethereum",
@@ -127,7 +127,7 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
                        "High": "high", "Low": "low"}, inplace=True)
     df = compute_indicators(df)
     df.dropna(inplace=True)
-    # Se añade el log del SMA50 como nueva característica
+    # Añadir log del SMA50 para enriquecer las características
     df["log_sma50"] = np.log1p(df["sma50"])
     return df[["ds", "close_price", "volume", "high", "low", "RSI", "rsi_norm", "macd", "atr", "log_sma50"]]
 
@@ -163,7 +163,7 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
     model.compile(optimizer=Adam(learning_rate), loss="mse")
     return model
 
-# Entrenamiento con early stopping y reducción de LR
+# Entrenamiento con early stopping y reducción de la tasa de aprendizaje
 def train_model(X_train, y_train, X_val, y_val, model, epochs=5, batch_size=32):
     tf.keras.backend.clear_session()
     callbacks = [
@@ -210,7 +210,7 @@ def apply_shock_factor(df, base_sentiment):
     return np.array(sentiment_array)
 
 # =============================================================================
-# Función para obtener artículos de NewsAPI (avisos solo en Noticias)
+# Función para obtener artículos de NewsAPI (avisos solo en la pestaña de Noticias)
 # =============================================================================
 @st.cache_data(ttl=43200)
 def get_newsapi_articles(coin_id, show_warning=True):
@@ -353,7 +353,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Fijación de hiperparámetros basados en recomendaciones de la literatura
+    # Fijación de hiperparámetros según recomendaciones de la literatura
     if coin_id == "xrp":
         fixed_params = {
             "learning_rate": 0.0004,
@@ -382,7 +382,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     progress_text.text("Entrenando modelo LSTM final...")
     progress_bar.progress(60)
-    # El modelo ahora recibe 7 variables por timestep (6 originales + shock)
+    # Ahora, cada timestep incluirá las 6 variables originales + shock -> 7 columnas
     input_shape = (window_size, 7)
     lstm_model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
     lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=5, batch_size=batch_size)
@@ -390,17 +390,18 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_text.text("Realizando predicción en test (LSTM)...")
     progress_bar.progress(70)
     preds_test_scaled = lstm_model.predict(X_test, verbose=0)
-    reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), 4))], axis=1)
+    # Se concatenan ceros de 5 columnas para reconstruir la matriz de 6 variables (porque el target es la primera)
+    reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), 5))], axis=1)
     reconst_test_inv = scaler.inverse_transform(reconst_test)
     preds_test_log = reconst_test_inv[:, 0]
     lstm_test_preds = np.expm1(preds_test_log)
 
-    reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), 4))], axis=1)
+    reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), 5))], axis=1)
     reconst_y_inv = scaler.inverse_transform(reconst_y)
     y_test_log = reconst_y_inv[:, 0]
     y_test_real = np.expm1(y_test_log)
 
-    # Calcular MAPE para obtener un porcentaje de error y derivar la precisión
+    # Se calcula el MAPE para derivar la precisión como 100 - MAPE
     lstm_mape = np.mean(np.abs((y_test_real - lstm_test_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
     accuracy = max(0, 100 - lstm_mape)
 
@@ -413,7 +414,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     X_test_flat = flatten_sequences(X_test)
     xgb_test_scaled = xgb_model.predict(X_test_flat)
-    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1, 1), np.zeros((len(xgb_test_scaled), 4))], axis=1)
+    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1, 1), np.zeros((len(xgb_test_scaled), 5))], axis=1)
     xgb_test_inv = scaler.inverse_transform(xgb_reconst)
     xgb_test_log = xgb_test_inv[:, 0]
     xgb_test_preds = np.expm1(xgb_test_log)
@@ -429,7 +430,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     prophet_test_preds = np.expm1(prophet_preds_log)
 
     test_ens_preds = ensemble_prediction(lstm_test_preds, xgb_test_preds, prophet_test_preds, 0.6, 0.2, 0.2)
-    # Para el ensamble, se calcula la precisión como 100 - MAPE
     ens_mape = np.mean(np.abs((y_test_real - test_ens_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
     ens_accuracy = max(0, 100 - ens_mape)
 
@@ -437,6 +437,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(90)
     last_window = scaled_data[-window_size:]
     last_shock = shock_array[-1]
+    # Para la predicción futura se reconstruye el input con 6 variables y shock por separado, luego se concatenan para obtener 7 columnas
     current_input = np.concatenate([
         last_window.reshape(1, window_size, 6),
         np.full((1, window_size, 1), last_shock)
@@ -444,7 +445,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     future_preds_log_lstm = []
     for _ in range(horizon_days):
         p_scaled = lstm_model.predict(current_input, verbose=0)[0][0]
-        reconst_f = np.concatenate([[p_scaled], np.zeros(4)]).reshape(1, -1)
+        reconst_f = np.concatenate([[p_scaled], np.zeros((5,))]).reshape(1, -1)
         inv_f = scaler.inverse_transform(reconst_f)
         plog = inv_f[0, 0]
         future_preds_log_lstm.append(plog)
@@ -458,7 +459,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     xgb_future_preds_log = []
     for _ in range(horizon_days):
         xgb_p = xgb_model.predict(X_last_flat)[0]
-        reconst_xgb = np.concatenate([[xgb_p], np.zeros((4,))]).reshape(1, -1)
+        reconst_xgb = np.concatenate([[xgb_p], np.zeros((5,))]).reshape(1, -1)
         inv_xgb = scaler.inverse_transform(reconst_xgb)
         xgb_log = inv_xgb[0, 0]
         xgb_future_preds_log.append(xgb_log)
@@ -479,7 +480,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     return {
         "df": df,
         "test_preds": test_ens_preds,
-        "accuracy": ens_accuracy,  # Precisión en porcentaje
+        "accuracy": ens_accuracy,  # Precisión en porcentaje (100 - MAPE)
         "symbol": coinid_to_symbol[coin_id],
         "crypto_sent": get_news_sentiment(coin_id),
         "market_sent": get_fear_greed_index(),
@@ -568,7 +569,6 @@ def main_app():
                 st.write(f"Sentimiento Noticias ({result['symbol']}): {result['crypto_sent']:.2f}")
                 st.write(f"Sentimiento Mercado (Fear & Greed): {result['market_sent']:.2f}")
                 st.write(f"Gauge Combinado: {result['gauge_val']:.2f}")
-                # En lugar de RMSE/MAPE se muestra la precisión (100 - MAPE)
                 st.metric("Precisión (Test)", f"{result['accuracy']:.2f}%")
                 test_dates = result["test_dates"][:min(len(result["test_dates"]), len(result["real_prices"]), len(result["test_preds"]))]
                 real_prices = result["real_prices"][:len(test_dates)]
