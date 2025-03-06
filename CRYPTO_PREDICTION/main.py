@@ -31,7 +31,7 @@ from prophet import Prophet
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
-from transformers import pipeline
+from transformers.pipelines import pipeline
 import time
 from xgboost import XGBRegressor
 
@@ -139,6 +139,12 @@ def create_sequences(data, window_size):
     return np.array(X), np.array(y)
 
 # =============================================================================
+# Función para "aplanar" secuencias (necesario para XGBoost)
+# =============================================================================
+def flatten_sequences(X_seq):
+    return X_seq.reshape((X_seq.shape[0], X_seq.shape[1] * X_seq.shape[2]))
+
+# =============================================================================
 # Modelos y entrenamiento
 # =============================================================================
 # Modelo LSTM basado en recomendaciones de la literatura
@@ -166,7 +172,7 @@ def train_model(X_train, y_train, X_val, y_val, model, epochs=5, batch_size=32):
               epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
     return model
 
-# XGBoost con parámetros recomendados
+# Modelo XGBoost para ensamble (parámetros recomendados)
 def train_xgboost(X, y):
     model_xgb = XGBRegressor(n_estimators=150, max_depth=6, learning_rate=0.05,
                              subsample=0.8, colsample_bytree=0.8)
@@ -202,7 +208,7 @@ def apply_shock_factor(df, base_sentiment):
     return np.array(sentiment_array)
 
 # =============================================================================
-# Función para obtener artículos de NewsAPI (rate limit solo en Noticias)
+# Función para obtener artículos de NewsAPI (avisos solo en Noticias)
 # =============================================================================
 @st.cache_data(ttl=43200)
 def get_newsapi_articles(coin_id, show_warning=True):
@@ -370,7 +376,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     dropout_rate = fixed_params["dropout_rate"]
     dense_units = fixed_params["dense_units"]
     batch_size = fixed_params["batch_size"]
-    progress_text.text("Usando hiperparámetros fijos.")
+    progress_text.text("Usando hiperparámetros fijos basados en la literatura.")
 
     progress_text.text("Entrenando modelo LSTM final...")
     progress_bar.progress(60)
@@ -487,24 +493,11 @@ def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Dashboard:**  
-    Este dashboard predice el precio futuro de criptomonedas utilizando un enfoque integral que combina datos históricos, indicadores técnicos y análisis de sentimiento. En concreto:
-    
-    - **Datos Históricos e Indicadores Técnicos:**  
-      Extraemos datos desde yfinance y calculamos indicadores como RSI, MACD, ATR, Bollinger Bands y SMA para capturar la dinámica del mercado.
-    
-    - **Análisis de Sentimiento:**  
-      Evaluamos el sentimiento del mercado mediante la combinación de información de noticias (a través de NewsAPI) y el índice Fear & Greed, utilizando técnicas de NLP (Transformers y TextBlob).
-    
-    - **Ensamble de Modelos:**  
-      Combinamos las predicciones de tres modelos:
-        - Un modelo LSTM para captar patrones secuenciales.
-        - Un modelo XGBoost para aprovechar técnicas basadas en árboles.
-        - Prophet para identificar tendencias y estacionalidades a medio y largo plazo.
-      
-      La predicción final se obtiene ponderando 50% LSTM, 30% XGBoost y 20% Prophet.
-    
-    - **Optimización Offline:**  
-      Los hiperparámetros han sido ajustados previamente (offline) basándonos en recomendaciones de la literatura, lo que nos permite usar parámetros fijos y acelerar el entrenamiento en entornos CPU.
+    Este dashboard predice el precio futuro de criptomonedas combinando datos históricos, indicadores técnicos y análisis de sentimiento. 
+    - **Datos Históricos e Indicadores Técnicos:** Se extraen datos de yfinance y se calculan indicadores como RSI, MACD, ATR, Bollinger Bands y SMA para capturar la dinámica del mercado.
+    - **Análisis de Sentimiento:** Se evalúa el estado de ánimo mediante el análisis de noticias (NewsAPI) y el índice Fear & Greed, utilizando Transformers y TextBlob.
+    - **Ensamble de Modelos:** Se combinan las predicciones de un modelo LSTM, un modelo XGBoost y Prophet (50%/30%/20%) para obtener un pronóstico robusto.
+    - **Optimización Offline:** Los hiperparámetros se han fijado basados en recomendaciones de la literatura, lo que acelera el proceso en entornos CPU.
     """)
     st.sidebar.title("Configuración de Predicción")
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
@@ -803,7 +796,7 @@ def main_app():
             st.warning("Oh, vaya, parece que hemos hecho más peticiones de las debidas a la API. Vuelve en 12 horas si quieres ver noticias :)")
 
 # =============================================================================
-# Ejecución principal
+# Ejecución principal del dashboard
 # =============================================================================
 if __name__ == "__main__":
     main_app()
