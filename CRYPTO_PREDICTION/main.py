@@ -24,6 +24,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.linear_model import ElasticNetCV
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 from textblob import TextBlob
 from dateutil.parser import parse as date_parse
 from urllib3.util.retry import Retry
@@ -78,8 +79,9 @@ coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 # -----------------------------------------------------------------------------
 class FeatureSelector(BaseEstimator, TransformerMixin):
     """
-    Transforma un DataFrame seleccionando únicamente aquellas features que resulten relevantes,
-    usando primero ElasticNetCV y luego refinando con la importancia de variables de XGBoost.
+    Transforma un DataFrame seleccionando únicamente aquellas features relevantes,
+    usando primero ElasticNetCV para un filtrado inicial y refinando con la importancia
+    de variables de XGBoost.
     """
     def __init__(self, feature_cols, target_col, enet_threshold=0.01, importance_threshold=0.01):
         self.feature_cols = feature_cols
@@ -97,14 +99,13 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
         enet = ElasticNetCV(cv=5, random_state=42).fit(X_arr, y_arr)
         coefs = enet.coef_
         initial_selected = [self.feature_cols[i] for i in range(len(self.feature_cols)) if abs(coefs[i]) > self.enet_threshold]
-        # Refinar usando importancia de XGBoost
         if not initial_selected:
             initial_selected = self.feature_cols  # fallback
+        # Refinar usando importancia de XGBoost
         xgb = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.1, random_state=42)
         xgb.fit(df[initial_selected].values, y_arr)
         importances = xgb.feature_importances_
         refined = [initial_selected[i] for i in range(len(initial_selected)) if importances[i] > self.importance_threshold]
-        # Si la lista queda vacía, se usa la inicial
         self.selected_features_ = refined if refined else initial_selected
         return self
 
@@ -230,7 +231,7 @@ def compute_base_indicators(df):
       - ATR (14 días).
       - ADX (14 días) para medir la fuerza de la tendencia.
       - Ichimoku Conversion Line para detectar posibles cambios.
-    Se realiza forward-fill para evitar huecos en los datos.
+    Se realiza forward-fill para evitar huecos.
     """
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
     df["rsi_norm"] = df["RSI"] / 100.0
@@ -430,8 +431,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     Se utiliza un ensamble que combina LSTM (con hiperparámetros optimizados), XGBoost y Prophet.
     Los datos se separan cronológicamente (80% entrenamiento, 20% test) y se fuerza que el precio actual
     sea el punto de partida en las predicciones para mantener coherencia.
-    Se incorpora una selección de features mediante un pipeline que integra un método embedded (ElasticNetCV)
-    refinado con XGBoost.
+    Se incorpora un pipeline de preprocesamiento que integra imputación, selección de features
+    (mediante ElasticNetCV y refinado con XGBoost) y escalado.
     """
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
     progress_text = st.empty()
@@ -459,14 +460,14 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
         "log_sma50", "log_return", "vol_30d", "sentiment", "adx", "ichimoku_conversion"
     ]
-    # Usamos un pipeline para seleccionar features y escalar
+    # Pipeline de preprocesamiento: imputar valores faltantes, seleccionar features y escalar
     pipe = Pipeline([
+        ('imputer', SimpleImputer(strategy="median")),
         ('selector', FeatureSelector(feature_cols, target_col='log_price', enet_threshold=0.01, importance_threshold=0.01)),
         ('scaler', MinMaxScaler())
     ])
     scaled_data = pipe.fit_transform(df)
     selected_features = pipe.named_steps['selector'].selected_features_
-    # Si no se selecciona nada, se usa la lista completa
     if not selected_features:
         selected_features = feature_cols
 
@@ -499,6 +500,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_text.text("Realizando predicción en datos de test (LSTM)...")
     progress_bar.progress(40)
     preds_test_scaled = lstm_model.predict(X_test, verbose=0)
+    # Se usa el escalador del pipeline para invertir la transformación
     reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), len(selected_features)-1))], axis=1)
     reconst_test_inv = pipe.named_steps['scaler'].inverse_transform(reconst_test)
     preds_test_log = reconst_test_inv[:, 0]
@@ -544,7 +546,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     progress_text.text("Realizando predicción futura...")
     progress_bar.progress(70)
-    # Usamos el pipeline para transformar los datos futuros
     last_window = pipe.named_steps['scaler'].transform(df[selected_features].values[-window_size:])
     current_input = last_window.reshape(1, window_size, len(selected_features))
     lstm_future_preds = iterative_lstm_forecast(lstm_model, current_input, pipe.named_steps['scaler'], selected_features, horizon_days)
@@ -595,7 +596,7 @@ def main_app():
     Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento a partir de noticias y del índice Fear & Greed para predecir el precio futuro de criptomonedas.  
     **Componentes del Modelo:**  
       - **Indicadores Técnicos:** Se calculan indicadores como RSI, MACD, Bollinger Bands, SMA, ATR, ADX y la línea de conversión de Ichimoku, además de transformaciones (logaritmos, retornos y volatilidad).  
-      - **Optimización de Features:** Se incorpora un pipeline que, mediante ElasticNetCV (método embedded) y el refinamiento con XGBoost, selecciona automáticamente las variables más relevantes.  
+      - **Optimización de Features:** Se incorpora un pipeline de preprocesamiento que, mediante imputación, selección de features con ElasticNetCV y refinamiento con XGBoost, filtra automáticamente las variables más relevantes.  
       - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias y el índice Fear & Greed para ajustar las predicciones.  
       - **Modelos de Predicción:** Se utiliza un ensamble que combina:
           - **LSTM:** Con hiperparámetros optimizados automáticamente mediante Keras Tuner (Hyperband + Random Search).  
