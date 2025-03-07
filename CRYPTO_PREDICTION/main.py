@@ -32,15 +32,12 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-# Indicadores técnicos esenciales
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator, EMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator
 from transformers.pipelines import pipeline
 from xgboost import XGBRegressor
-
-# Importar Numba para acelerar funciones críticas
 from numba import njit
 
 # Intentamos importar Keras Tuner (se instala en PyPI como keras-tuner)
@@ -50,7 +47,26 @@ except ModuleNotFoundError:
     import kerastuner as kt
 
 # -----------------------------------------------------------------------------
-# Transformador para conservar DataFrame (para que SimpleImputer retorne DataFrame)
+# Definiciones globales (variables)
+# -----------------------------------------------------------------------------
+coincap_ids = {
+    "Bitcoin (BTC)": "bitcoin",
+    "Ethereum (ETH)": "ethereum",
+    "Ripple (XRP)": "xrp",
+    "Binance Coin (BNB)": "binance-coin",
+    "Cardano (ADA)": "cardano",
+    "Solana (SOL)": "solana",
+    "Dogecoin (DOGE)": "dogecoin",
+    "Polkadot (DOT)": "polkadot",
+    "Polygon (MATIC)": "polygon",
+    "Litecoin (LTC)": "litecoin",
+    "TRON (TRX)": "tron",
+    "Stellar (XLM)": "stellar"
+}
+coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
+
+# -----------------------------------------------------------------------------
+# Transformador para conservar DataFrame en pasos de preprocesamiento
 # -----------------------------------------------------------------------------
 class DataFrameTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, transformer):
@@ -65,7 +81,7 @@ class DataFrameTransformer(BaseEstimator, TransformerMixin):
         return X_trans
 
 # -----------------------------------------------------------------------------
-# Transformador personalizado para selección de features
+# Transformador para selección de features
 # -----------------------------------------------------------------------------
 class FeatureSelector(BaseEstimator, TransformerMixin):
     """
@@ -189,9 +205,7 @@ def get_crypto_sentiment_combined(coin_id):
     return news_sent, market_sent, max(0, min(100, gauge_val))
 
 def adjust_predictions_for_sentiment(preds_array, gauge_val, current_price):
-    """
-    Ajusta la predicción final según el sentimiento.
-    """
+    """Ajusta la predicción final según el sentimiento."""
     offset = (gauge_val - 50) / 50.0
     factor = offset * 0.05
     preds_adj = preds_array * (1 + factor)
@@ -239,7 +253,7 @@ def compute_base_indicators(df):
 
 def compute_additional_features(df):
     """
-    Añade features adicionales (vectorizadas).
+    Añade features adicionales de forma vectorizada.
     """
     df["log_sma50"] = np.log1p(df["sma50"])
     df["log_return"] = np.log(df["close_price"] / df["close_price"].shift(1)).fillna(0.0)
@@ -333,7 +347,7 @@ def medium_long_term_prediction(df, days=180, current_price=None):
     return model, forecast
 
 # -----------------------------------------------------------------------------
-# Función para cargar datos históricos
+# Función para cargar datos históricos completos (para gráficos)
 # -----------------------------------------------------------------------------
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     ticker_ids = {
@@ -374,7 +388,7 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     return df
 
 # -----------------------------------------------------------------------------
-# Función principal de entrenamiento y predicción
+# Función principal: Entrenamiento y predicción
 # -----------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
@@ -386,7 +400,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No se pudo cargar el histórico.")
         return None
 
-    # Filtrar últimos 2 años para entrenamiento y predicción
+    # Para entrenamiento/predicción usamos los últimos 2 años (pero se muestra el histórico completo)
     last_date = full_df["ds"].max()
     two_years_ago = last_date - pd.DateOffset(years=2)
     df_pred = full_df[full_df["ds"] >= two_years_ago].copy()
@@ -398,11 +412,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(25)
     df_pred["log_price"] = np.log1p(df_pred["close_price"])
 
+    # Definir columnas numéricas esenciales (se han eliminado ADX e Ichimoku)
     feature_cols = [
         "log_price", "volume", "high", "low", "rsi_norm", "macd",
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
         "log_sma50", "log_return", "vol_30d", "sentiment"
     ]
+    # Pipeline de preprocesamiento: imputación, selección de features y escalado
     pipe = Pipeline([
         ('imputer', DataFrameTransformer(SimpleImputer(strategy="median"))),
         ('selector', FeatureSelector(feature_cols, target_col='log_price', enet_threshold=0.01, importance_threshold=0.01)),
@@ -523,14 +539,17 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         "real_prices": y_test_real
     }
 
+# -----------------------------------------------------------------------------
+# Función principal del dashboard
+# -----------------------------------------------------------------------------
 def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Dashboard:**  
     Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento (noticias y Fear & Greed) para predecir el precio futuro de criptomonedas.  
     **Componentes del Modelo:**  
-      - **Indicadores Técnicos:** Se calculan RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return, vol_30d y se utiliza el sentimiento.  
-      - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección de features (con ElasticNetCV refinado con XGBoost) y escalado, utilizando solo los datos de los últimos 2 años para el entrenamiento sin perder la visualización completa.  
+      - **Indicadores Técnicos:** Se calculan RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return, vol_30d y se utiliza el sentimiento. (Se han descartado ADX e Ichimoku por considerarse redundantes).  
+      - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección de features (con ElasticNetCV refinado con XGBoost) y escalado, usando solo los datos de los últimos 2 años para entrenamiento sin afectar la visualización completa.  
       - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias y el índice Fear & Greed para ajustar las predicciones.  
       - **Modelos de Predicción:** Se emplea un ensamble de:
           - **LSTM:** Hiperparámetros optimizados con Keras Tuner (Hyperband + Random Search).  
@@ -696,6 +715,7 @@ def main_app():
         crypto_sent = get_news_sentiment(coin_id)
         market_sent = get_fear_greed_index()
         _, _, gauge_val = get_crypto_sentiment_combined(coin_id)
+        # Ajuste de rangos para que "Very Bullish" aparezca para valores ≥ 80
         if gauge_val < 20:
             gauge_text = "Very Bearish"
         elif gauge_val < 40:
