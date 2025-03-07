@@ -11,7 +11,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
 
-# Activar mixed precision si existe GPU (en CPU se ignora)
+# Activar mixed precision si hay GPU (en CPU se ignora)
 if tf.config.list_physical_devices('GPU'):
     from tensorflow.keras.mixed_precision import set_global_policy
     set_global_policy('mixed_float16')
@@ -21,13 +21,14 @@ import requests
 import certifi
 import os
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.linear_model import ElasticNetCV
 from textblob import TextBlob
 from dateutil.parser import parse as date_parse
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-# Indicadores técnicos: se incluyen todos, incluyendo ADX e Ichimoku
+# Indicadores técnicos: se incluyen RSI, MACD, Bollinger Bands, SMA, ATR, ADX e Ichimoku
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator, IchimokuIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -69,6 +70,45 @@ coincap_ids = {
     "Stellar (XLM)": "stellar"
 }
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
+
+# -----------------------------------------------------------------------------
+# Selección de features mediante método embedded y refinado con XGBoost
+# -----------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def select_features_embedded(df, feature_cols, target_col, enet_threshold=0.01):
+    """
+    Utiliza ElasticNetCV para seleccionar features cuyo coeficiente absoluto sea mayor que enet_threshold.
+    """
+    X = df[feature_cols].values
+    y = df[target_col].values
+    enet = ElasticNetCV(cv=5, random_state=42).fit(X, y)
+    coefs = enet.coef_
+    selected = [feature_cols[i] for i in range(len(feature_cols)) if abs(coefs[i]) > enet_threshold]
+    return selected
+
+@st.cache_data(show_spinner=False)
+def refine_features_with_xgb(df, features, target_col, importance_threshold=0.01):
+    """
+    Utiliza un modelo XGBoost para obtener la importancia de cada feature y refina la selección,
+    quedándose solo con aquellas de importancia mayor que importance_threshold.
+    """
+    X = df[features].values
+    y = df[target_col].values
+    xgb_model = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.1, random_state=42)
+    xgb_model.fit(X, y)
+    importances = xgb_model.feature_importances_
+    refined = [features[i] for i in range(len(features)) if importances[i] > importance_threshold]
+    return refined
+
+@st.cache_data(show_spinner=False)
+def select_features_embedded_and_refined(df, feature_cols, target_col, enet_threshold=0.01, importance_threshold=0.01):
+    """
+    Combina la selección de features utilizando primero ElasticNetCV y luego refinándola con
+    la importancia de variables de XGBoost.
+    """
+    initial_selected = select_features_embedded(df, feature_cols, target_col, enet_threshold)
+    refined = refine_features_with_xgb(df, initial_selected, target_col, importance_threshold)
+    return refined
 
 # -----------------------------------------------------------------------------
 # Funciones de análisis de sentimiento
@@ -169,27 +209,12 @@ def adjust_predictions_for_sentiment(preds_array, gauge_val, current_price):
         se corrige para evitar caídas ilógicas.
     """
     offset = (gauge_val - 50) / 50.0
-    factor = offset * 0.05  # Factor entre -0.05 y +0.05
+    factor = offset * 0.05
     preds_adj = preds_array * (1 + factor)
     if gauge_val > 60 and preds_adj[0] < current_price:
         extra_factor = min((current_price / preds_adj[0] - 1), 0.10)
         preds_adj = preds_adj * (1 + extra_factor)
     return preds_adj
-
-# -----------------------------------------------------------------------------
-# Selección de features (vectorizada y con caching)
-# -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def select_features(df, feature_cols, target_col, threshold=0.1):
-    """
-    Calcula la correlación (usando corrwith) de cada feature con el target de forma vectorizada,
-    y selecciona aquellas con una correlación absoluta mayor o igual al umbral.
-    Se devuelve la lista de features seleccionados.
-    """
-    corrs = df[feature_cols].corrwith(df[target_col]).abs()
-    selected = corrs[corrs >= threshold].index.tolist()
-    st.write(f"Features seleccionados (|corr({target_col})| >= {threshold}):", selected)
-    return selected
 
 # -----------------------------------------------------------------------------
 # Cálculo de indicadores técnicos y features adicionales
@@ -402,12 +427,11 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     """
     Función principal que entrena el modelo y realiza las predicciones.
     Se utiliza un ensamble que combina LSTM (con hiperparámetros optimizados), XGBoost y Prophet.
-    Los datos se separan de forma cronológica (80% entrenamiento, 20% test) y se fuerza que el precio actual
+    Los datos se separan cronológicamente (80% entrenamiento, 20% test) y se fuerza que el precio actual
     sea el punto de partida en las predicciones para mantener coherencia.
-    Se incluye una etapa de selección de features (con caching) basada en la correlación con 'log_price'.
+    Se incorpora una selección de features basada en ElasticNetCV (método embedded) y se refina con XGBoost.
     """
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
-
     progress_text = st.empty()
     progress_bar = st.progress(0)
 
@@ -427,14 +451,14 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(25)
     df["log_price"] = np.log1p(df["close_price"])
 
-    # Lista de features con todos los indicadores incluidos
+    # Lista de features con todos los indicadores
     feature_cols = [
         "log_price", "volume", "high", "low", "rsi_norm", "macd",
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
         "log_sma50", "log_return", "vol_30d", "sentiment", "adx", "ichimoku_conversion"
     ]
-    # Seleccionar features mediante análisis de correlación de forma vectorizada y con caching
-    selected_features = select_features(df, feature_cols, "log_price", threshold=0.1)
+    # Selección de features: se utiliza un método embedded con ElasticNetCV y se refina con XGBoost
+    selected_features = select_features_embedded_and_refined(df, feature_cols, "log_price", enet_threshold=0.01, importance_threshold=0.01)
     
     data_array = df[selected_features].values
     scaler = MinMaxScaler()
@@ -445,7 +469,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No hay suficientes datos para crear secuencias.")
         return None
 
-    # Separación cronológica: 80% entrenamiento, 20% test
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -515,7 +538,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     progress_text.text("Realizando predicción futura...")
     progress_bar.progress(70)
-
     last_window = scaler.transform(df[selected_features].values[-window_size:])
     current_input = last_window.reshape(1, window_size, len(selected_features))
     lstm_future_preds = iterative_lstm_forecast(lstm_model, current_input, scaler, selected_features, horizon_days)
@@ -566,13 +588,13 @@ def main_app():
     Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento a partir de noticias y del índice Fear & Greed para predecir el precio futuro de criptomonedas.  
     **Componentes del Modelo:**  
       - **Indicadores Técnicos:** Se calculan indicadores como RSI, MACD, Bollinger Bands, SMA, ATR, ADX y la línea de conversión de Ichimoku, además de transformaciones (logaritmos, retornos y volatilidad).  
-      - **Optimización de Features:** Se realiza una selección automática de variables mediante análisis de correlación (usando operaciones vectorizadas y caching) para filtrar aquellos indicadores menos relevantes.  
-      - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias relevantes y el índice Fear & Greed para ajustar las predicciones.  
+      - **Optimización de Features:** Se realiza una selección automática de variables utilizando un método embedded (ElasticNetCV) y se refina la selección con la importancia de variables de XGBoost, para filtrar aquellos indicadores menos relevantes.  
+      - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias y el índice Fear & Greed para ajustar las predicciones.  
       - **Modelos de Predicción:** Se utiliza un ensamble que combina:
           - **LSTM:** Con hiperparámetros optimizados automáticamente mediante Keras Tuner (Hyperband + Random Search).  
           - **XGBoost:** Aplicado de forma iterativa para pronósticos a corto plazo.  
           - **Prophet:** Para predicciones a mediano/largo plazo, asegurando que el primer valor se ancle al precio actual.  
-    Las predicciones se realizan de forma iterativa, asegurando que el punto de partida sea el precio actual para mantener coherencia entre horizontes.  
+    Las predicciones se realizan de forma iterativa, garantizando que el punto de partida sea el precio actual para mantener coherencia entre horizontes.  
     **NFA:** Not Financial Advice.
     """)
     st.sidebar.title("Configuración de Predicción")
