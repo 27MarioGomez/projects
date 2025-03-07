@@ -75,6 +75,21 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # -----------------------------------------------------------------------------
+# Transformador para conservar DataFrame (convierte la salida del transformador encapsulado)
+# -----------------------------------------------------------------------------
+class DataFrameTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, transformer):
+        self.transformer = transformer
+    def fit(self, X, y=None):
+        self.transformer.fit(X, y)
+        return self
+    def transform(self, X):
+        X_trans = self.transformer.transform(X)
+        if isinstance(X, pd.DataFrame):
+            return pd.DataFrame(X_trans, columns=X.columns, index=X.index)
+        return X_trans
+
+# -----------------------------------------------------------------------------
 # Transformador personalizado para selección de features
 # -----------------------------------------------------------------------------
 class FeatureSelector(BaseEstimator, TransformerMixin):
@@ -91,19 +106,18 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
         self.selected_features_ = None
 
     def fit(self, X, y=None):
+        # Se espera que X sea un DataFrame con las columnas en feature_cols.
         df = X.copy()
-        # Si se pasa y, lo asignamos; de lo contrario, asumimos que la columna objetivo ya está en X.
+        # Si se pasó y, se asigna; de lo contrario, se asume que la columna objetivo ya está en X.
         if y is not None:
             df[self.target_col] = y
         y_arr = df[self.target_col].values
         X_arr = df[self.feature_cols].values
-        # Selección inicial con ElasticNetCV
         enet = ElasticNetCV(cv=5, random_state=42).fit(X_arr, y_arr)
         coefs = enet.coef_
         initial_selected = [self.feature_cols[i] for i in range(len(self.feature_cols)) if abs(coefs[i]) > self.enet_threshold]
         if not initial_selected:
             initial_selected = self.feature_cols  # fallback
-        # Refinamiento con XGBoost
         xgb = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.1, random_state=42)
         xgb.fit(df[initial_selected].values, y_arr)
         importances = xgb.feature_importances_
@@ -441,7 +455,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(25)
     df["log_price"] = np.log1p(df["close_price"])
 
-    # Lista de features (todas las columnas numéricas relevantes)
+    # Lista de features: columnas numéricas relevantes
     feature_cols = [
         "log_price", "volume", "high", "low", "rsi_norm", "macd",
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
@@ -449,11 +463,11 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     ]
     # Pipeline de preprocesamiento: imputación, selección de features y escalado.
     pipe = Pipeline([
-        ('imputer', SimpleImputer(strategy="median")),
+        ('imputer', DataFrameTransformer(SimpleImputer(strategy="median"))),
         ('selector', FeatureSelector(feature_cols, target_col='log_price', enet_threshold=0.01, importance_threshold=0.01)),
         ('scaler', MinMaxScaler())
     ])
-    # Se aplica el pipeline a las columnas definidas en feature_cols.
+    # Aplicar el pipeline a las columnas definidas en feature_cols
     scaled_data = pipe.fit_transform(df[feature_cols])
     selected_features = pipe.named_steps['selector'].selected_features_
     if not selected_features:
