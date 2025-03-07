@@ -32,7 +32,7 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-# Indicadores técnicos: se mantienen solo los esenciales (RSI, MACD, Bollinger Bands, SMA, ATR)
+# Indicadores técnicos esenciales
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator, EMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -48,35 +48,6 @@ try:
     import keras_tuner as kt
 except ModuleNotFoundError:
     import kerastuner as kt
-
-# -----------------------------------------------------------------------------
-# Configuración inicial de la aplicación y de la sesión HTTP
-# -----------------------------------------------------------------------------
-st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
-os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
-session = requests.Session()
-retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-adapter = HTTPAdapter(max_retries=retry)
-session.mount("https://", adapter)
-
-# -----------------------------------------------------------------------------
-# Diccionarios de criptomonedas y mapeo de símbolos
-# -----------------------------------------------------------------------------
-coincap_ids = {
-    "Bitcoin (BTC)": "bitcoin",
-    "Ethereum (ETH)": "ethereum",
-    "Ripple (XRP)": "xrp",
-    "Binance Coin (BNB)": "binance-coin",
-    "Cardano (ADA)": "cardano",
-    "Solana (SOL)": "solana",
-    "Dogecoin (DOGE)": "dogecoin",
-    "Polkadot (DOT)": "polkadot",
-    "Polygon (MATIC)": "polygon",
-    "Litecoin (LTC)": "litecoin",
-    "TRON (TRX)": "tron",
-    "Stellar (XLM)": "stellar"
-}
-coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # -----------------------------------------------------------------------------
 # Transformador para conservar DataFrame (para que SimpleImputer retorne DataFrame)
@@ -130,7 +101,107 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
         return X[self.selected_features_]
 
 # -----------------------------------------------------------------------------
-# Optimización del cálculo de indicadores técnicos con paralelización
+# Funciones de análisis de sentimiento (definidas antes de load_crypto_data)
+# -----------------------------------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def load_sentiment_pipeline():
+    """Carga la pipeline de Transformers para análisis de sentimiento."""
+    return pipeline("sentiment-analysis")
+
+def get_advanced_sentiment(text):
+    """Calcula el sentimiento usando Transformers y lo transforma al rango [0,100]."""
+    pipe = load_sentiment_pipeline()
+    result = pipe(text)[0]
+    return 50 + (result["score"] * 50) if result["label"].upper() == "POSITIVE" else 50 - (result["score"] * 50)
+
+@st.cache_data(ttl=43200)
+def get_newsapi_articles(coin_id, show_warning=True):
+    """Solicita 5 artículos relevantes de NewsAPI para análisis de sentimiento."""
+    newsapi_key = st.secrets.get("newsapi_key", "")
+    if not newsapi_key:
+        st.error("Clave 'newsapi_key' no encontrada en Secrets.")
+        return []
+    try:
+        query = f"{coin_id} crypto"
+        newsapi = NewsApiClient(api_key=newsapi_key)
+        data = newsapi.get_everything(q=query, language="en", sort_by="relevancy", page_size=5)
+        articles = []
+        if data.get("articles"):
+            for art in data["articles"]:
+                image_url = art.get("urlToImage", "")
+                title = art.get("title") or "Sin título"
+                description = art.get("description") or "Sin descripción"
+                pub_date = art.get("publishedAt") or "Fecha no disponible"
+                link = art.get("url") or "#"
+                try:
+                    parsed_date = date_parse(pub_date)
+                except:
+                    parsed_date = datetime(1970, 1, 1)
+                pub_date_str = parsed_date.strftime("%Y-%m-%d %H:%M:%S")
+                articles.append({
+                    "title": title,
+                    "description": description,
+                    "pubDate": pub_date_str,
+                    "link": link,
+                    "image": image_url,
+                    "parsed_date": parsed_date
+                })
+            articles = sorted(articles, key=lambda x: x["parsed_date"], reverse=True)
+        return articles
+    except Exception as e:
+        if ("rateLimited" in str(e) or "429" in str(e)) and show_warning:
+            st.warning("Se ha excedido el límite de peticiones. Vuelve en 12 horas.")
+        elif show_warning:
+            st.error(f"Error al obtener noticias: {e}")
+        return []
+
+def get_news_sentiment(coin_id):
+    """Calcula el sentimiento promedio combinando TextBlob y Transformers."""
+    articles = get_newsapi_articles(coin_id, show_warning=False)
+    if not articles:
+        return 50.0
+    sentiments_tb = []
+    sentiments_trans = []
+    for article in articles:
+        text = (article["title"] or "") + " " + (article["description"] or "")
+        blob = TextBlob(text)
+        polarity_tb = blob.sentiment.polarity
+        sentiments_tb.append(50 + (polarity_tb * 50))
+        sentiments_trans.append(get_advanced_sentiment(text))
+    return (np.mean(sentiments_tb) + np.mean(sentiments_trans)) / 2.0
+
+def get_fear_greed_index():
+    """Obtiene el índice Fear & Greed; retorna 50.0 en caso de fallo."""
+    try:
+        data = requests.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
+        return float(data["data"][0]["value"])
+    except Exception:
+        st.warning("Índice Fear & Greed no disponible. Se usará 50.0.")
+        return 50.0
+
+def get_crypto_sentiment_combined(coin_id):
+    """
+    Combina el sentimiento de noticias y el índice Fear & Greed para generar un gauge.
+    """
+    news_sent = get_news_sentiment(coin_id)
+    market_sent = get_fear_greed_index()
+    gauge_val = 50 + (news_sent - market_sent)
+    return news_sent, market_sent, max(0, min(100, gauge_val))
+
+def adjust_predictions_for_sentiment(preds_array, gauge_val, current_price):
+    """
+    Ajusta la predicción final según el sentimiento.
+    """
+    offset = (gauge_val - 50) / 50.0
+    factor = offset * 0.05
+    preds_adj = preds_array * (1 + factor)
+    if gauge_val > 60 and preds_adj[0] < current_price:
+        extra_factor = min((current_price / preds_adj[0] - 1), 0.10)
+        preds_adj = preds_adj * (1 + extra_factor)
+    return preds_adj
+
+# -----------------------------------------------------------------------------
+# Optimización del cálculo de indicadores técnicos (paralelización)
 # -----------------------------------------------------------------------------
 def compute_rsi(df):
     return RSIIndicator(close=df["close_price"], window=14).rsi()
@@ -152,15 +223,8 @@ def compute_atr(df):
 
 def compute_base_indicators(df):
     """
-    Calcula indicadores técnicos básicos en paralelo:
-      - RSI (14 días)
-      - MACD
-      - Bollinger Bands (upper y lower)
-      - SMA de 50 días
-      - ATR (14 días)
-    Se realiza forward-fill para evitar huecos.
+    Calcula indicadores técnicos básicos en paralelo.
     """
-    from joblib import Parallel, delayed
     results = Parallel(n_jobs=-1)(
         delayed(func)(df) for func in [compute_rsi, compute_macd, compute_bollinger_upper, compute_bollinger_lower, compute_sma50, compute_atr]
     )
@@ -175,12 +239,7 @@ def compute_base_indicators(df):
 
 def compute_additional_features(df):
     """
-    Añade features adicionales (vectorizadas):
-      - Log de SMA50.
-      - Retorno logarítmico.
-      - Volatilidad a 30 días.
-      - On Balance Volume (OBV).
-      - EMA de 200 días.
+    Añade features adicionales (vectorizadas).
     """
     df["log_sma50"] = np.log1p(df["sma50"])
     df["log_return"] = np.log(df["close_price"] / df["close_price"].shift(1)).fillna(0.0)
@@ -190,7 +249,7 @@ def compute_additional_features(df):
     return df
 
 # -----------------------------------------------------------------------------
-# Función para crear secuencias utilizando Numba
+# Funciones para crear secuencias (usando Numba)
 # -----------------------------------------------------------------------------
 @njit
 def create_sequences_numba(data, window_size):
@@ -205,23 +264,14 @@ def create_sequences_numba(data, window_size):
     return X, y
 
 def create_sequences(data, window_size):
-    """
-    Genera secuencias para entrenar la LSTM usando la versión compilada con Numba.
-    """
     if data.shape[0] <= window_size:
         return None, None
     return create_sequences_numba(data, window_size)
 
 def flatten_sequences(X_seq):
-    """
-    Aplana secuencias 3D a una matriz 2D para XGBoost.
-    """
     return X_seq.reshape((X_seq.shape[0], X_seq.shape[1] * X_seq.shape[2]))
 
 def build_lstm_model_tuner(input_shape):
-    """
-    Construye la LSTM mediante Keras Tuner definiendo un espacio de búsqueda para los hiperparámetros.
-    """
     def model_builder(hp):
         lstm_units1 = hp.Int('lstm_units1', min_value=64, max_value=256, step=32)
         lstm_units2 = hp.Int('lstm_units2', min_value=32, max_value=128, step=16)
@@ -242,9 +292,6 @@ def build_lstm_model_tuner(input_shape):
     return model_builder
 
 def iterative_lstm_forecast(model, current_input, scaler, feature_cols, horizon_days):
-    """
-    Realiza la predicción iterativa con la LSTM.
-    """
     preds = []
     for _ in range(horizon_days):
         p_scaled = model.predict(current_input, verbose=0)[0][0]
@@ -257,9 +304,6 @@ def iterative_lstm_forecast(model, current_input, scaler, feature_cols, horizon_
     return np.expm1(np.array(preds))
 
 def iterative_xgb_forecast(model, current_input, scaler, feature_cols, horizon_days):
-    """
-    Realiza la predicción iterativa con XGBoost.
-    """
     preds = []
     for _ in range(horizon_days):
         X_flat = current_input.reshape(1, -1)
@@ -273,15 +317,9 @@ def iterative_xgb_forecast(model, current_input, scaler, feature_cols, horizon_d
     return np.expm1(np.array(preds))
 
 def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.6, w_xgb=0.2, w_prophet=0.2):
-    """
-    Combina las predicciones de LSTM, XGBoost y Prophet.
-    """
     return w_lstm * lstm_pred + w_xgb * xgb_pred + w_prophet * prophet_pred
 
 def medium_long_term_prediction(df, days=180, current_price=None):
-    """
-    Utiliza Prophet para generar una predicción a mediano/largo plazo.
-    """
     df_prophet = df[["ds", "close_price"]].copy()
     df_prophet.rename(columns={"close_price": "y"}, inplace=True)
     df_prophet["y"] = np.log1p(df_prophet["y"])
@@ -294,12 +332,10 @@ def medium_long_term_prediction(df, days=180, current_price=None):
         forecast.loc[forecast.index[-days], "exp_yhat"] = current_price
     return model, forecast
 
+# -----------------------------------------------------------------------------
+# Función para cargar datos históricos
+# -----------------------------------------------------------------------------
 def load_crypto_data(coin_id, start_date=None, end_date=None):
-    """
-    Descarga datos históricos completos de una criptomoneda desde yfinance,
-    calcula indicadores y añade el sentimiento.
-    Se muestra el histórico completo para gráficos.
-    """
     ticker_ids = {
         "bitcoin": "BTC-USD",
         "ethereum": "ETH-USD",
@@ -337,23 +373,20 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     df["sentiment"] = current_sent
     return df
 
+# -----------------------------------------------------------------------------
+# Función principal de entrenamiento y predicción
+# -----------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
-    """
-    Entrena el modelo y realiza las predicciones.
-    Se limita el conjunto de entrenamiento a los últimos 2 años (para cálculo),
-    mientras que para gráficos se usa el histórico completo.
-    """
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
     progress_text = st.empty()
     progress_bar = st.progress(0)
 
-    # Cargar el histórico completo (para gráficos)
     full_df = load_crypto_data(coin_id, start_date, end_date)
     if full_df is None or full_df.empty:
         st.error("No se pudo cargar el histórico.")
         return None
 
-    # Filtrar para entrenamiento: últimos 2 años
+    # Filtrar últimos 2 años para entrenamiento y predicción
     last_date = full_df["ds"].max()
     two_years_ago = last_date - pd.DateOffset(years=2)
     df_pred = full_df[full_df["ds"] >= two_years_ago].copy()
@@ -365,13 +398,11 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(25)
     df_pred["log_price"] = np.log1p(df_pred["close_price"])
 
-    # Definir las columnas numéricas (sin indicadores redundantes)
     feature_cols = [
         "log_price", "volume", "high", "low", "rsi_norm", "macd",
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
         "log_sma50", "log_return", "vol_30d", "sentiment"
     ]
-    # Pipeline de preprocesamiento: imputación, selección de features y escalado
     pipe = Pipeline([
         ('imputer', DataFrameTransformer(SimpleImputer(strategy="median"))),
         ('selector', FeatureSelector(feature_cols, target_col='log_price', enet_threshold=0.01, importance_threshold=0.01)),
@@ -382,7 +413,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     if not selected_features:
         selected_features = feature_cols
 
-    # Usar una ventana de 60 días para horizontes cortos y 90 para mayores
     window_size = 60 if horizon_days <= 30 else 90
     X, y = create_sequences(scaled_data.values, window_size)
     if X is None:
@@ -458,26 +488,21 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     progress_text.text("Realizando predicción futura...")
     progress_bar.progress(70)
-    # Para predicción futura, aplicamos el pipeline a df_pred (últimos 2 años)
-    last_window = pipe.named_steps['scaler'].transform(df_pred[selected_features].values[-(window_size):])
+    last_window = pipe.named_steps['scaler'].transform(df_pred[selected_features].values[-window_size:])
     current_input = last_window.reshape(1, window_size, len(selected_features))
     lstm_future_preds = iterative_lstm_forecast(lstm_model, current_input, pipe.named_steps['scaler'], selected_features, horizon_days)
-
     current_input_xgb = np.copy(last_window).reshape(1, window_size, len(selected_features))
     xgb_future_preds = iterative_xgb_forecast(xgb_model, current_input_xgb, pipe.named_steps['scaler'], selected_features, horizon_days)
-
     current_price = full_df["close_price"].iloc[-1]
     future_prophet2 = prophet_model.make_future_dataframe(periods=horizon_days)
     forecast2 = prophet_model.predict(future_prophet2)
     prophet_preds_log2 = forecast2["yhat"].tail(horizon_days).values
     prophet_future_preds = np.expm1(prophet_preds_log2)
     prophet_future_preds[0] = current_price
-
     final_future_preds = ensemble_prediction(lstm_future_preds, xgb_future_preds, prophet_future_preds, 0.6, 0.2, 0.2)
     final_future_preds[0] = current_price
     _, _, gauge_val = get_crypto_sentiment_combined(coin_id)
     final_future_preds = adjust_predictions_for_sentiment(final_future_preds, gauge_val, current_price)
-
     future_dates = pd.date_range(start=full_df["ds"].iloc[-1] + timedelta(days=1), periods=horizon_days).tolist()
 
     progress_text.text("¡Predicción completada con éxito!")
@@ -499,17 +524,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     }
 
 def main_app():
-    """
-    Interfaz principal del dashboard.
-    Se muestra el histórico completo en los gráficos, pero para entrenamiento y predicción se usan los datos de los últimos 2 años.
-    """
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Dashboard:**  
     Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento (noticias y Fear & Greed) para predecir el precio futuro de criptomonedas.  
     **Componentes del Modelo:**  
-      - **Indicadores Técnicos:** Se calculan RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_sma50, log_return, vol_30d y se usa el sentimiento. Se han descartado ADX e Ichimoku por considerarse redundantes.  
-      - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección de features (mediante ElasticNetCV y refinamiento con XGBoost) y escalado, usando solo los datos de los últimos 2 años para entrenamiento sin perder la visualización completa.  
+      - **Indicadores Técnicos:** Se calculan RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return, vol_30d y se utiliza el sentimiento.  
+      - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección de features (con ElasticNetCV refinado con XGBoost) y escalado, utilizando solo los datos de los últimos 2 años para el entrenamiento sin perder la visualización completa.  
       - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias y el índice Fear & Greed para ajustar las predicciones.  
       - **Modelos de Predicción:** Se emplea un ensamble de:
           - **LSTM:** Hiperparámetros optimizados con Keras Tuner (Hyperband + Random Search).  
@@ -675,7 +696,6 @@ def main_app():
         crypto_sent = get_news_sentiment(coin_id)
         market_sent = get_fear_greed_index()
         _, _, gauge_val = get_crypto_sentiment_combined(coin_id)
-        # Ajustamos los rangos para que "Very Bullish" se asigne para valores ≥ 80
         if gauge_val < 20:
             gauge_text = "Very Bearish"
         elif gauge_val < 40:

@@ -16,3 +16,4 @@ transformers
 xgboost
 keras-tuner
 numba
+joblib
