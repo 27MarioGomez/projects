@@ -72,7 +72,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # -----------------------------------------------------------------------------
-# Transformador para conservar DataFrame en imputación
+# Transformador para conservar DataFrame (para que SimpleImputer retorne DataFrame)
 # -----------------------------------------------------------------------------
 class DataFrameTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, transformer):
@@ -87,7 +87,7 @@ class DataFrameTransformer(BaseEstimator, TransformerMixin):
         return X_trans
 
 # -----------------------------------------------------------------------------
-# Transformador para selección de features
+# Transformador personalizado para selección de features
 # -----------------------------------------------------------------------------
 class FeatureSelector(BaseEstimator, TransformerMixin):
     """
@@ -127,7 +127,8 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
-    return pipeline("sentiment-analysis")
+    # Se especifica explícitamente el modelo y su revisión para producción
+    return pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english", revision="714eb0f")
 
 def get_advanced_sentiment(text):
     pipe = load_sentiment_pipeline()
@@ -343,7 +344,7 @@ def medium_long_term_prediction(df, days=180, current_price=None):
     return model, forecast
 
 # -----------------------------------------------------------------------------
-# Función para cargar datos históricos (solo para la criptomoneda seleccionada)
+# Función para cargar datos históricos (solo de la criptomoneda seleccionada)
 # -----------------------------------------------------------------------------
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     ticker_ids = {
@@ -396,7 +397,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No se pudo cargar el histórico.")
         return None
 
-    # Usar solo los datos del último año (o el valor seleccionado)
+    # Filtrar datos para entrenamiento: usar solo los últimos 'training_period_years' (por ejemplo, 1 año)
     last_date = full_df["ds"].max()
     period_start = last_date - pd.DateOffset(years=training_period_years)
     df_pred = full_df[full_df["ds"] >= period_start].copy()
@@ -436,12 +437,12 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Limitar el tuning para acelerar el proceso (épocas reducidas)
+    # Ajuste en el modelo: reducir número de épocas y acotar el espacio de búsqueda
     epochs = 15
     batch_size = 32
     input_shape = (window_size, len(selected_features))
     
-    # Limpiar directorio de checkpoints para evitar incompatibilidades
+    # Eliminar directorio de checkpoints para evitar incompatibilidades
     if os.path.exists('kt_dir'):
         shutil.rmtree('kt_dir')
     
@@ -561,7 +562,7 @@ def main_app():
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
     
-    # Selector de período de entrenamiento (años enteros: 1, 2 o 3)
+    # Selector de período de entrenamiento: 1, 2 o 3 años, con aviso
     training_period = st.sidebar.select_slider(
         "Periodo de entrenamiento (años):",
         options=[1, 2, 3],
