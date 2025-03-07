@@ -811,19 +811,22 @@ def main_app():
                     margin: 0 0 0.3rem 0;
                 }
                 .read-more-btn {
-                    display: inline-block;
+                    display: block;            /* Para que ocupe toda la línea */
+                    margin: 0.5rem auto;      /* Auto para centrar horizontalmente */
                     padding: 0.4rem 0.8rem;
-                    background-color: #ff7f0e;
-                    color: #fff;
-                    text-decoration: none;
+                    background-color: #fff;   /* Fondo blanco */
+                    color: #000;              /* Texto negro */
+                    text-decoration: none;    /* Sin subrayado */
                     border-radius: 3px;
                     text-align: center;
                     font-size: 0.8rem;
-                    margin-top: 0.3rem;
+                    font-weight: 600;         /* (Opcional) un poco más de grosor */
                 }
                 .read-more-btn:hover {
-                    background-color: #ff9950;
-                }
+                    background-color: #e6e6e6; /* Un gris suave al pasar el ratón */
+                    color: #000;              /* Texto sigue siendo negro */
+}
+
                 </style>
                 """,
                 unsafe_allow_html=True
