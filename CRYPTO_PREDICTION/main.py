@@ -27,7 +27,7 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-# Importamos indicadores de tendencia y otros indicadores técnicos de la librería ta
+# Indicadores técnicos: se incluyen todos, incluyendo ADX e Ichimoku
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator, IchimokuIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -35,7 +35,7 @@ from ta.volume import OnBalanceVolumeIndicator
 from transformers.pipelines import pipeline
 from xgboost import XGBRegressor
 
-# Intentamos importar Keras Tuner correctamente (la librería se instala como keras-tuner en PyPI)
+# Intentamos importar Keras Tuner correctamente (se instala en PyPI como keras-tuner)
 try:
     import keras_tuner as kt
 except ModuleNotFoundError:
@@ -79,7 +79,7 @@ def load_sentiment_pipeline():
     return pipeline("sentiment-analysis")
 
 def get_advanced_sentiment(text):
-    """Calcula el sentimiento con Transformers y lo transforma a un rango [0,100]."""
+    """Calcula el sentimiento usando Transformers y lo transforma al rango [0,100]."""
     pipe = load_sentiment_pipeline()
     result = pipe(text)[0]
     return 50 + (result["score"] * 50) if result["label"].upper() == "POSITIVE" else 50 - (result["score"] * 50)
@@ -87,8 +87,8 @@ def get_advanced_sentiment(text):
 @st.cache_data(ttl=43200)
 def get_newsapi_articles(coin_id, show_warning=True):
     """
-    Solicita 5 artículos relevantes de NewsAPI para el análisis de sentimiento.
-    Controla el rate-limit y ordena los artículos por fecha.
+    Solicita 5 artículos relevantes de NewsAPI para análisis de sentimiento.
+    Ordena los resultados por fecha y controla el rate-limit.
     """
     newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
@@ -153,7 +153,9 @@ def get_fear_greed_index():
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id):
-    """Combina el sentimiento de noticias y el índice Fear & Greed para obtener un gauge."""
+    """
+    Combina el sentimiento de noticias y el índice Fear & Greed para generar un gauge.
+    """
     news_sent = get_news_sentiment(coin_id)
     market_sent = get_fear_greed_index()
     gauge_val = 50 + (news_sent - market_sent)
@@ -163,16 +165,31 @@ def adjust_predictions_for_sentiment(preds_array, gauge_val, current_price):
     """
     Ajusta la predicción final según el sentimiento:
       - Aplica un ajuste máximo de ±5%.
-      - En caso de sentimiento bullish y que la predicción inicial sea inferior al precio actual,
+      - Si el sentimiento es bullish y la primera predicción es inferior al precio actual,
         se corrige para evitar caídas ilógicas.
     """
     offset = (gauge_val - 50) / 50.0
-    factor = offset * 0.05  # Factor en el rango [-0.05, +0.05]
+    factor = offset * 0.05  # Factor entre -0.05 y +0.05
     preds_adj = preds_array * (1 + factor)
     if gauge_val > 60 and preds_adj[0] < current_price:
         extra_factor = min((current_price / preds_adj[0] - 1), 0.10)
         preds_adj = preds_adj * (1 + extra_factor)
     return preds_adj
+
+# -----------------------------------------------------------------------------
+# Selección de features (vectorizada y con caching)
+# -----------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def select_features(df, feature_cols, target_col, threshold=0.1):
+    """
+    Calcula la correlación (usando corrwith) de cada feature con el target de forma vectorizada,
+    y selecciona aquellas con una correlación absoluta mayor o igual al umbral.
+    Se devuelve la lista de features seleccionados.
+    """
+    corrs = df[feature_cols].corrwith(df[target_col]).abs()
+    selected = corrs[corrs >= threshold].index.tolist()
+    st.write(f"Features seleccionados (|corr({target_col})| >= {threshold}):", selected)
+    return selected
 
 # -----------------------------------------------------------------------------
 # Cálculo de indicadores técnicos y features adicionales
@@ -186,34 +203,27 @@ def compute_base_indicators(df):
       - SMA de 50 días.
       - ATR (14 días).
       - ADX (14 días) para medir la fuerza de la tendencia.
-      - Ichimoku Conversion Line para detectar señales de cambio.
+      - Ichimoku Conversion Line para detectar posibles cambios.
     Se realiza forward-fill para evitar huecos en los datos.
     """
-    # RSI y su normalización
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
     df["rsi_norm"] = df["RSI"] / 100.0
 
-    # MACD
     macd_calc = MACD(close=df["close_price"], window_fast=12, window_slow=26, window_sign=9)
     df["macd"] = macd_calc.macd()
 
-    # Bollinger Bands
     bb = BollingerBands(close=df["close_price"], window=20, window_dev=2)
     df["bollinger_upper"] = bb.bollinger_hband()
     df["bollinger_lower"] = bb.bollinger_lband()
 
-    # SMA de 50 días
     df["sma50"] = SMAIndicator(close=df["close_price"], window=50).sma_indicator()
 
-    # ATR de 14 días
     atr_calc = AverageTrueRange(high=df["high"], low=df["low"], close=df["close_price"], window=14)
     df["atr"] = atr_calc.average_true_range()
 
-    # ADX para medir la fuerza de la tendencia
     adx_calc = ADXIndicator(high=df["high"], low=df["low"], close=df["close_price"], window=14)
     df["adx"] = adx_calc.adx()
 
-    # Ichimoku Conversion Line (usualmente el promedio de la máxima y mínima de un período corto)
     ichimoku = IchimokuIndicator(high=df["high"], low=df["low"], window1=9, window2=26, window3=52)
     df["ichimoku_conversion"] = ichimoku.ichimoku_conversion_line()
 
@@ -242,7 +252,7 @@ def compute_additional_features(df):
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     """
     Descarga datos históricos de una criptomoneda desde yfinance,
-    aplica los indicadores técnicos y agrega el sentimiento actual.
+    aplica los indicadores técnicos y añade el sentimiento actual.
     """
     ticker_ids = {
         "bitcoin": "BTC-USD",
@@ -263,7 +273,6 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
         st.error("Ticker no encontrado.")
         return None
 
-    # Si no se especifica un rango, se descarga el máximo histórico
     if start_date is None or end_date is None:
         df = yf.download(ticker, period="max", progress=False)
     else:
@@ -277,7 +286,6 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # Renombrar columnas para consistencia
     df.rename(columns={"Date": "ds", "Close": "close_price", "Volume": "volume",
                        "High": "high", "Low": "low"}, inplace=True)
 
@@ -285,7 +293,6 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     df = compute_additional_features(df)
     df.dropna(inplace=True)
 
-    # Agregar sentimiento actual de noticias
     current_sent = get_news_sentiment(coin_id)
     df["sentiment"] = current_sent
 
@@ -293,8 +300,8 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
 
 def create_sequences(data, window_size):
     """
-    Genera secuencias para la LSTM.
-    Cada secuencia es de longitud 'window_size' y la primera columna (log_price) se usa como target.
+    Genera secuencias para entrenar la LSTM.
+    Cada secuencia tiene longitud 'window_size' y la primera columna (log_price) se utiliza como target.
     """
     if len(data) <= window_size:
         return None, None
@@ -306,14 +313,13 @@ def create_sequences(data, window_size):
 
 def flatten_sequences(X_seq):
     """
-    Aplana las secuencias 3D a una forma 2D para usarlas en XGBoost.
+    Aplana secuencias 3D a una matriz 2D para usarlas en XGBoost.
     """
     return X_seq.reshape((X_seq.shape[0], X_seq.shape[1] * X_seq.shape[2]))
 
 def build_lstm_model_tuner(input_shape):
     """
-    Función para construir la LSTM utilizando Keras Tuner.
-    Se define un espacio de búsqueda para ajustar hiperparámetros relevantes.
+    Construye la LSTM mediante Keras Tuner definiendo un espacio de búsqueda para los hiperparámetros.
     """
     def model_builder(hp):
         lstm_units1 = hp.Int('lstm_units1', min_value=64, max_value=256, step=32)
@@ -337,8 +343,8 @@ def build_lstm_model_tuner(input_shape):
 
 def iterative_lstm_forecast(model, current_input, scaler, feature_cols, horizon_days):
     """
-    Realiza la predicción iterativa para la LSTM.
-    En cada paso se actualiza la ventana de entrada con el valor pronosticado.
+    Realiza la predicción iterativa con la LSTM.
+    Actualiza la ventana de entrada en cada paso y revierte la transformación para obtener el valor real.
     """
     preds = []
     for _ in range(horizon_days):
@@ -346,7 +352,6 @@ def iterative_lstm_forecast(model, current_input, scaler, feature_cols, horizon_
         reconst = np.concatenate([[p_scaled], np.zeros((len(feature_cols)-1,))]).reshape(1, -1)
         inv = scaler.inverse_transform(reconst)
         preds.append(inv[0, 0])
-        # Actualización de la ventana: se elimina el primer paso y se añade el nuevo valor
         new_feature = np.copy(current_input[:, -1:, :])
         new_feature[0, 0, 0] = p_scaled
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
@@ -354,7 +359,7 @@ def iterative_lstm_forecast(model, current_input, scaler, feature_cols, horizon_
 
 def iterative_xgb_forecast(model, current_input, scaler, feature_cols, horizon_days):
     """
-    Realiza la predicción iterativa para XGBoost.
+    Realiza la predicción iterativa con XGBoost.
     Se aplana la ventana y se actualiza de forma similar a la LSTM.
     """
     preds = []
@@ -378,8 +383,8 @@ def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.6, w_xgb=0.2
 def medium_long_term_prediction(df, days=180, current_price=None):
     """
     Utiliza Prophet para generar una predicción a mediano/largo plazo.
-    Se transforma la variable objetivo (precio) mediante logaritmo y se revierte la transformación con expm1.
-    Se fuerza que el primer valor de la predicción sea igual al precio actual para coherencia.
+    La variable objetivo se transforma mediante logaritmo y se revierte la transformación con expm1.
+    Se fuerza que el primer valor coincida con el precio actual.
     """
     df_prophet = df[["ds", "close_price"]].copy()
     df_prophet.rename(columns={"close_price": "y"}, inplace=True)
@@ -396,18 +401,16 @@ def medium_long_term_prediction(df, days=180, current_price=None):
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     """
     Función principal que entrena el modelo y realiza las predicciones.
-    Se utiliza:
-      - LSTM con hiperparámetros optimizados mediante Keras Tuner (Hyperband + Random Search).
-      - XGBoost y Prophet para un ensamble de modelos.
-    Se separan los datos de forma cronológica (80% entrenamiento, 20% test) y se fuerza que el precio actual
-    sea el punto de partida en las predicciones para mantener coherencia entre horizontes.
+    Se utiliza un ensamble que combina LSTM (con hiperparámetros optimizados), XGBoost y Prophet.
+    Los datos se separan de forma cronológica (80% entrenamiento, 20% test) y se fuerza que el precio actual
+    sea el punto de partida en las predicciones para mantener coherencia.
+    Se incluye una etapa de selección de features (con caching) basada en la correlación con 'log_price'.
     """
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
 
     progress_text = st.empty()
     progress_bar = st.progress(0)
 
-    # Seleccionar la ventana según el horizonte (60 días para corto plazo, 90 días para horizontes mayores)
     if horizon_days <= 30:
         window_size = 60
     else:
@@ -424,13 +427,16 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(25)
     df["log_price"] = np.log1p(df["close_price"])
 
-    # Se definen los features, incluyendo los indicadores adicionales
+    # Lista de features con todos los indicadores incluidos
     feature_cols = [
         "log_price", "volume", "high", "low", "rsi_norm", "macd",
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
         "log_sma50", "log_return", "vol_30d", "sentiment", "adx", "ichimoku_conversion"
     ]
-    data_array = df[feature_cols].values
+    # Seleccionar features mediante análisis de correlación de forma vectorizada y con caching
+    selected_features = select_features(df, feature_cols, "log_price", threshold=0.1)
+    
+    data_array = df[selected_features].values
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(data_array)
 
@@ -439,7 +445,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No hay suficientes datos para crear secuencias.")
         return None
 
-    # Separación cronológica: 80% de los datos más antiguos para entrenamiento y 20% más recientes para test
+    # Separación cronológica: 80% entrenamiento, 20% test
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -447,10 +453,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Optimización de hiperparámetros de la LSTM con Keras Tuner (Hyperband + Random Search)
     epochs = 25
     batch_size = 32
-    input_shape = (window_size, len(feature_cols))
+    input_shape = (window_size, len(selected_features))
     tuner = kt.Hyperband(
         build_lstm_model_tuner(input_shape),
         objective='val_loss',
@@ -465,12 +470,12 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_text.text("Realizando predicción en datos de test (LSTM)...")
     progress_bar.progress(40)
     preds_test_scaled = lstm_model.predict(X_test, verbose=0)
-    reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), len(feature_cols)-1))], axis=1)
+    reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), len(selected_features)-1))], axis=1)
     reconst_test_inv = scaler.inverse_transform(reconst_test)
     preds_test_log = reconst_test_inv[:, 0]
     lstm_test_preds = np.expm1(preds_test_log)
 
-    reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), len(feature_cols)-1))], axis=1)
+    reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), len(selected_features)-1))], axis=1)
     reconst_y_inv = scaler.inverse_transform(reconst_y)
     y_test_log = reconst_y_inv[:, 0]
     y_test_real = np.expm1(y_test_log)
@@ -489,12 +494,11 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     X_test_flat = flatten_sequences(X_test)
     xgb_test_scaled = xgb_model.predict(X_test_flat)
-    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1, 1), np.zeros((len(xgb_test_scaled), len(feature_cols)-1))], axis=1)
+    xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1, 1), np.zeros((len(xgb_test_scaled), len(selected_features)-1))], axis=1)
     xgb_test_inv = scaler.inverse_transform(xgb_reconst)
     xgb_test_log = xgb_test_inv[:, 0]
     xgb_test_preds = np.expm1(xgb_test_log)
 
-    # Modelo Prophet para los datos de test
     df_prophet = df[["ds", "close_price"]].copy()
     df_prophet.rename(columns={"close_price": "y"}, inplace=True)
     df_prophet["y"] = np.log1p(df_prophet["y"])
@@ -512,28 +516,22 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_text.text("Realizando predicción futura...")
     progress_bar.progress(70)
 
-    # Predicción futura con LSTM (iterativa)
-    last_window = scaler.transform(df[feature_cols].values[-window_size:])
-    current_input = last_window.reshape(1, window_size, len(feature_cols))
-    lstm_future_preds = iterative_lstm_forecast(lstm_model, current_input, scaler, feature_cols, horizon_days)
+    last_window = scaler.transform(df[selected_features].values[-window_size:])
+    current_input = last_window.reshape(1, window_size, len(selected_features))
+    lstm_future_preds = iterative_lstm_forecast(lstm_model, current_input, scaler, selected_features, horizon_days)
 
-    # Predicción futura con XGBoost (iterativa)
-    current_input_xgb = np.copy(last_window).reshape(1, window_size, len(feature_cols))
-    xgb_future_preds = iterative_xgb_forecast(xgb_model, current_input_xgb, scaler, feature_cols, horizon_days)
+    current_input_xgb = np.copy(last_window).reshape(1, window_size, len(selected_features))
+    xgb_future_preds = iterative_xgb_forecast(xgb_model, current_input_xgb, scaler, selected_features, horizon_days)
 
-    # Predicción futura con Prophet
     current_price = df["close_price"].iloc[-1]
     future_prophet2 = prophet_model.make_future_dataframe(periods=horizon_days)
     forecast2 = prophet_model.predict(future_prophet2)
     prophet_preds_log2 = forecast2["yhat"].tail(horizon_days).values
     prophet_future_preds = np.expm1(prophet_preds_log2)
-    prophet_future_preds[0] = current_price  # Forzar coherencia en el primer valor
+    prophet_future_preds[0] = current_price
 
-    # Ensamble final de las predicciones
     final_future_preds = ensemble_prediction(lstm_future_preds, xgb_future_preds, prophet_future_preds, 0.6, 0.2, 0.2)
-    final_future_preds[0] = current_price  # Asegurar que la predicción inicia en el precio actual
-
-    # Ajuste final según el sentimiento
+    final_future_preds[0] = current_price
     _, _, gauge_val = get_crypto_sentiment_combined(coin_id)
     final_future_preds = adjust_predictions_for_sentiment(final_future_preds, gauge_val, current_price)
 
@@ -560,20 +558,21 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 def main_app():
     """
     Interfaz principal del dashboard.
-    La descripción detalla de forma clara y técnica (pero comprensible) las funcionalidades del modelo.
+    La descripción explica de forma clara y concisa los componentes técnicos del modelo.
     """
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Dashboard:**  
-    Este sistema integra datos históricos descargados desde yfinance, indicadores técnicos y análisis de sentimiento a partir de noticias y el índice Fear & Greed para predecir el precio futuro de criptomonedas.  
-    El modelo utiliza varias fuentes de información:
-      - **Indicadores Técnicos:** Se calculan indicadores como RSI, MACD, Bollinger Bands, SMA, ATR, ADX y la línea de conversión de Ichimoku, junto con transformaciones adicionales (logaritmos, retornos y volatilidad).  
-      - **Análisis de Sentimiento:** Se obtiene el sentimiento de noticias relevantes y se combina con el índice Fear & Greed para ajustar las predicciones.  
-      - **Modelos de Predicción:** Se emplea un ensamble compuesto por:
-          - **LSTM:** Con hiperparámetros optimizados automáticamente mediante Keras Tuner (utilizando Hyperband y búsqueda aleatoria).  
+    Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento a partir de noticias y del índice Fear & Greed para predecir el precio futuro de criptomonedas.  
+    **Componentes del Modelo:**  
+      - **Indicadores Técnicos:** Se calculan indicadores como RSI, MACD, Bollinger Bands, SMA, ATR, ADX y la línea de conversión de Ichimoku, además de transformaciones (logaritmos, retornos y volatilidad).  
+      - **Optimización de Features:** Se realiza una selección automática de variables mediante análisis de correlación (usando operaciones vectorizadas y caching) para filtrar aquellos indicadores menos relevantes.  
+      - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias relevantes y el índice Fear & Greed para ajustar las predicciones.  
+      - **Modelos de Predicción:** Se utiliza un ensamble que combina:
+          - **LSTM:** Con hiperparámetros optimizados automáticamente mediante Keras Tuner (Hyperband + Random Search).  
           - **XGBoost:** Aplicado de forma iterativa para pronósticos a corto plazo.  
-          - **Prophet:** Utilizado para predicciones a mediano/largo plazo, asegurando que la predicción inicie en el precio actual.  
-    Las predicciones se realizan de forma iterativa, garantizando que el primer valor coincida con el precio actual para mantener coherencia entre horizontes.  
+          - **Prophet:** Para predicciones a mediano/largo plazo, asegurando que el primer valor se ancle al precio actual.  
+    Las predicciones se realizan de forma iterativa, asegurando que el punto de partida sea el precio actual para mantener coherencia entre horizontes.  
     **NFA:** Not Financial Advice.
     """)
     st.sidebar.title("Configuración de Predicción")
@@ -687,7 +686,6 @@ def main_app():
             result = st.session_state["result"]
             if result:
                 st.header(f"Predicción a medio/largo plazo - {result['symbol']}")
-                # Se utiliza Prophet para generar la predicción a 180 días, asegurando que el primer valor sea el precio actual.
                 current_price = result["df"]["close_price"].iloc[-1]
                 _, forecast_long = medium_long_term_prediction(result["df"], days=180, current_price=current_price)
                 forecast_long["ds"] = pd.to_datetime(forecast_long["ds"]).dt.date
