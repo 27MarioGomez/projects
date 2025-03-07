@@ -48,7 +48,7 @@ except ModuleNotFoundError:
     import kerastuner as kt
 
 # -----------------------------------------------------------------------------
-# Configuración de la página (forzar ancho completo)
+# Configuración de la página (ancho completo)
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
 
@@ -242,9 +242,7 @@ def compute_atr(df):
     return AverageTrueRange(high=df["high"], low=df["low"], close=df["close_price"], window=14).average_true_range()
 
 def compute_base_indicators(df):
-    """
-    Calcula indicadores técnicos básicos en paralelo.
-    """
+    """Calcula indicadores técnicos básicos en paralelo."""
     results = Parallel(n_jobs=-1)(
         delayed(func)(df) for func in [compute_rsi, compute_macd, compute_bollinger_upper, compute_bollinger_lower, compute_sma50, compute_atr]
     )
@@ -258,9 +256,7 @@ def compute_base_indicators(df):
     return df
 
 def compute_additional_features(df):
-    """
-    Añade features adicionales de forma vectorizada.
-    """
+    """Añade features adicionales de forma vectorizada."""
     df["log_sma50"] = np.log1p(df["sma50"])
     df["log_return"] = np.log(df["close_price"] / df["close_price"].shift(1)).fillna(0.0)
     df["vol_30d"] = df["log_return"].rolling(window=30).std().fillna(0.0)
@@ -390,7 +386,7 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     df["sentiment"] = current_sent
     return df
 
-def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
+def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None, training_period_years=1):
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
     progress_text = st.empty()
     progress_bar = st.progress(0)
@@ -400,9 +396,10 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No se pudo cargar el histórico.")
         return None
 
+    # Filtrar para entrenamiento/predicción: usar los últimos 1 año (training_period_years=1)
     last_date = full_df["ds"].max()
-    two_years_ago = last_date - pd.DateOffset(years=2)
-    df_pred = full_df[full_df["ds"] >= two_years_ago].copy()
+    period_start = last_date - pd.DateOffset(years=training_period_years)
+    df_pred = full_df[full_df["ds"] >= period_start].copy()
     if df_pred.empty:
         st.error("No hay suficientes datos recientes para entrenamiento.")
         return None
@@ -427,7 +424,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         selected_features = feature_cols
 
     window_size = 60 if horizon_days <= 30 else 90
-    # Quitar .values (scaled_data ya es un ndarray)
     X, y = create_sequences(scaled_data, window_size)
     if X is None:
         st.error("No hay suficientes datos para crear secuencias.")
@@ -544,7 +540,7 @@ def main_app():
     Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento (noticias y Fear & Greed) para predecir el precio futuro de criptomonedas.  
     **Componentes del Modelo:**  
       - **Indicadores Técnicos:** Se calculan RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return, vol_30d y se utiliza el sentimiento. (Se han descartado ADX e Ichimoku por considerarse redundantes).  
-      - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección de features (con ElasticNetCV refinado con XGBoost) y escalado, usando solo los datos de los últimos 2 años para entrenamiento sin afectar la visualización completa.  
+      - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección de features (con ElasticNetCV refinado con XGBoost) y escalado, usando solo los datos del último año para entrenamiento sin afectar la visualización completa.  
       - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias y el índice Fear & Greed para ajustar las predicciones.  
       - **Modelos de Predicción:** Se emplea un ensamble de:
           - **LSTM:** Hiperparámetros optimizados con Keras Tuner (Hyperband + Random Search).  
@@ -555,6 +551,9 @@ def main_app():
     st.sidebar.title("Configuración de Predicción")
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
+    
+    # Slider para definir el período de entrenamiento (entre 1 y 2 años, por defecto 1)
+    training_period = st.sidebar.slider("Periodo de entrenamiento (años):", 1.0, 2.0, 1.0, step=0.1)
 
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
     default_end = datetime.utcnow()
@@ -610,7 +609,7 @@ def main_app():
 
     with tabs[0]:
         if st.button("Entrenar Modelo y Predecir"):
-            result = train_and_predict_with_sentiment(coin_id, horizon, start_date, end_date_with_offset)
+            result = train_and_predict_with_sentiment(coin_id, horizon, start_date, end_date_with_offset, training_period_years=training_period)
             if result:
                 st.success("Entrenamiento y predicción completados!")
                 st.write(f"Sentimiento Noticias ({result['symbol']}): {result['crypto_sent']:.2f}")
