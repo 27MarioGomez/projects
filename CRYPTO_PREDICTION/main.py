@@ -22,13 +22,15 @@ import certifi
 import os
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.linear_model import ElasticNetCV
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.pipeline import Pipeline
 from textblob import TextBlob
 from dateutil.parser import parse as date_parse
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-# Indicadores técnicos: se incluyen RSI, MACD, Bollinger Bands, SMA, ATR, ADX e Ichimoku
+# Indicadores técnicos: se incluyen todos (RSI, MACD, Bollinger Bands, SMA, ATR, ADX e Ichimoku)
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator, IchimokuIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -36,7 +38,7 @@ from ta.volume import OnBalanceVolumeIndicator
 from transformers.pipelines import pipeline
 from xgboost import XGBRegressor
 
-# Intentamos importar Keras Tuner correctamente (se instala en PyPI como keras-tuner)
+# Intentamos importar Keras Tuner (se instala en PyPI como keras-tuner)
 try:
     import keras_tuner as kt
 except ModuleNotFoundError:
@@ -72,43 +74,42 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # -----------------------------------------------------------------------------
-# Selección de features mediante método embedded y refinado con XGBoost
+# Transformador personalizado para selección de features
 # -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def select_features_embedded(df, feature_cols, target_col, enet_threshold=0.01):
+class FeatureSelector(BaseEstimator, TransformerMixin):
     """
-    Utiliza ElasticNetCV para seleccionar features cuyo coeficiente absoluto sea mayor que enet_threshold.
+    Transforma un DataFrame seleccionando únicamente aquellas features que resulten relevantes,
+    usando primero ElasticNetCV y luego refinando con la importancia de variables de XGBoost.
     """
-    X = df[feature_cols].values
-    y = df[target_col].values
-    enet = ElasticNetCV(cv=5, random_state=42).fit(X, y)
-    coefs = enet.coef_
-    selected = [feature_cols[i] for i in range(len(feature_cols)) if abs(coefs[i]) > enet_threshold]
-    return selected
+    def __init__(self, feature_cols, target_col, enet_threshold=0.01, importance_threshold=0.01):
+        self.feature_cols = feature_cols
+        self.target_col = target_col
+        self.enet_threshold = enet_threshold
+        self.importance_threshold = importance_threshold
+        self.selected_features_ = None
 
-@st.cache_data(show_spinner=False)
-def refine_features_with_xgb(df, features, target_col, importance_threshold=0.01):
-    """
-    Utiliza un modelo XGBoost para obtener la importancia de cada feature y refina la selección,
-    quedándose solo con aquellas de importancia mayor que importance_threshold.
-    """
-    X = df[features].values
-    y = df[target_col].values
-    xgb_model = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.1, random_state=42)
-    xgb_model.fit(X, y)
-    importances = xgb_model.feature_importances_
-    refined = [features[i] for i in range(len(features)) if importances[i] > importance_threshold]
-    return refined
+    def fit(self, X, y=None):
+        df = X.copy()
+        df[self.target_col] = y
+        # Selección con ElasticNetCV
+        X_arr = df[self.feature_cols].values
+        y_arr = df[self.target_col].values
+        enet = ElasticNetCV(cv=5, random_state=42).fit(X_arr, y_arr)
+        coefs = enet.coef_
+        initial_selected = [self.feature_cols[i] for i in range(len(self.feature_cols)) if abs(coefs[i]) > self.enet_threshold]
+        # Refinar usando importancia de XGBoost
+        if not initial_selected:
+            initial_selected = self.feature_cols  # fallback
+        xgb = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.1, random_state=42)
+        xgb.fit(df[initial_selected].values, y_arr)
+        importances = xgb.feature_importances_
+        refined = [initial_selected[i] for i in range(len(initial_selected)) if importances[i] > self.importance_threshold]
+        # Si la lista queda vacía, se usa la inicial
+        self.selected_features_ = refined if refined else initial_selected
+        return self
 
-@st.cache_data(show_spinner=False)
-def select_features_embedded_and_refined(df, feature_cols, target_col, enet_threshold=0.01, importance_threshold=0.01):
-    """
-    Combina la selección de features utilizando primero ElasticNetCV y luego refinándola con
-    la importancia de variables de XGBoost.
-    """
-    initial_selected = select_features_embedded(df, feature_cols, target_col, enet_threshold)
-    refined = refine_features_with_xgb(df, initial_selected, target_col, importance_threshold)
-    return refined
+    def transform(self, X):
+        return X[self.selected_features_]
 
 # -----------------------------------------------------------------------------
 # Funciones de análisis de sentimiento
@@ -429,7 +430,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     Se utiliza un ensamble que combina LSTM (con hiperparámetros optimizados), XGBoost y Prophet.
     Los datos se separan cronológicamente (80% entrenamiento, 20% test) y se fuerza que el precio actual
     sea el punto de partida en las predicciones para mantener coherencia.
-    Se incorpora una selección de features basada en ElasticNetCV (método embedded) y se refina con XGBoost.
+    Se incorpora una selección de features mediante un pipeline que integra un método embedded (ElasticNetCV)
+    refinado con XGBoost.
     """
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
     progress_text = st.empty()
@@ -457,12 +459,16 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
         "log_sma50", "log_return", "vol_30d", "sentiment", "adx", "ichimoku_conversion"
     ]
-    # Selección de features: se utiliza un método embedded con ElasticNetCV y se refina con XGBoost
-    selected_features = select_features_embedded_and_refined(df, feature_cols, "log_price", enet_threshold=0.01, importance_threshold=0.01)
-    
-    data_array = df[selected_features].values
-    scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(data_array)
+    # Usamos un pipeline para seleccionar features y escalar
+    pipe = Pipeline([
+        ('selector', FeatureSelector(feature_cols, target_col='log_price', enet_threshold=0.01, importance_threshold=0.01)),
+        ('scaler', MinMaxScaler())
+    ])
+    scaled_data = pipe.fit_transform(df)
+    selected_features = pipe.named_steps['selector'].selected_features_
+    # Si no se selecciona nada, se usa la lista completa
+    if not selected_features:
+        selected_features = feature_cols
 
     X, y = create_sequences(scaled_data, window_size)
     if X is None:
@@ -494,12 +500,12 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(40)
     preds_test_scaled = lstm_model.predict(X_test, verbose=0)
     reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), len(selected_features)-1))], axis=1)
-    reconst_test_inv = scaler.inverse_transform(reconst_test)
+    reconst_test_inv = pipe.named_steps['scaler'].inverse_transform(reconst_test)
     preds_test_log = reconst_test_inv[:, 0]
     lstm_test_preds = np.expm1(preds_test_log)
 
     reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), len(selected_features)-1))], axis=1)
-    reconst_y_inv = scaler.inverse_transform(reconst_y)
+    reconst_y_inv = pipe.named_steps['scaler'].inverse_transform(reconst_y)
     y_test_log = reconst_y_inv[:, 0]
     y_test_real = np.expm1(y_test_log)
 
@@ -518,7 +524,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_test_flat = flatten_sequences(X_test)
     xgb_test_scaled = xgb_model.predict(X_test_flat)
     xgb_reconst = np.concatenate([xgb_test_scaled.reshape(-1, 1), np.zeros((len(xgb_test_scaled), len(selected_features)-1))], axis=1)
-    xgb_test_inv = scaler.inverse_transform(xgb_reconst)
+    xgb_test_inv = pipe.named_steps['scaler'].inverse_transform(xgb_reconst)
     xgb_test_log = xgb_test_inv[:, 0]
     xgb_test_preds = np.expm1(xgb_test_log)
 
@@ -538,12 +544,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     progress_text.text("Realizando predicción futura...")
     progress_bar.progress(70)
-    last_window = scaler.transform(df[selected_features].values[-window_size:])
+    # Usamos el pipeline para transformar los datos futuros
+    last_window = pipe.named_steps['scaler'].transform(df[selected_features].values[-window_size:])
     current_input = last_window.reshape(1, window_size, len(selected_features))
-    lstm_future_preds = iterative_lstm_forecast(lstm_model, current_input, scaler, selected_features, horizon_days)
+    lstm_future_preds = iterative_lstm_forecast(lstm_model, current_input, pipe.named_steps['scaler'], selected_features, horizon_days)
 
     current_input_xgb = np.copy(last_window).reshape(1, window_size, len(selected_features))
-    xgb_future_preds = iterative_xgb_forecast(xgb_model, current_input_xgb, scaler, selected_features, horizon_days)
+    xgb_future_preds = iterative_xgb_forecast(xgb_model, current_input_xgb, pipe.named_steps['scaler'], selected_features, horizon_days)
 
     current_price = df["close_price"].iloc[-1]
     future_prophet2 = prophet_model.make_future_dataframe(periods=horizon_days)
@@ -588,7 +595,7 @@ def main_app():
     Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento a partir de noticias y del índice Fear & Greed para predecir el precio futuro de criptomonedas.  
     **Componentes del Modelo:**  
       - **Indicadores Técnicos:** Se calculan indicadores como RSI, MACD, Bollinger Bands, SMA, ATR, ADX y la línea de conversión de Ichimoku, además de transformaciones (logaritmos, retornos y volatilidad).  
-      - **Optimización de Features:** Se realiza una selección automática de variables utilizando un método embedded (ElasticNetCV) y se refina la selección con la importancia de variables de XGBoost, para filtrar aquellos indicadores menos relevantes.  
+      - **Optimización de Features:** Se incorpora un pipeline que, mediante ElasticNetCV (método embedded) y el refinamiento con XGBoost, selecciona automáticamente las variables más relevantes.  
       - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias y el índice Fear & Greed para ajustar las predicciones.  
       - **Modelos de Predicción:** Se utiliza un ensamble que combina:
           - **LSTM:** Con hiperparámetros optimizados automáticamente mediante Keras Tuner (Hyperband + Random Search).  
