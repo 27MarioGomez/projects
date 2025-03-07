@@ -32,6 +32,7 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
+# Indicadores técnicos esenciales
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator, EMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -45,6 +46,11 @@ try:
     import keras_tuner as kt
 except ModuleNotFoundError:
     import kerastuner as kt
+
+# -----------------------------------------------------------------------------
+# Configuración de la página (forzar ancho completo)
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
 
 # -----------------------------------------------------------------------------
 # Definiciones globales (variables)
@@ -66,7 +72,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # -----------------------------------------------------------------------------
-# Transformador para conservar DataFrame en pasos de preprocesamiento
+# Transformador para conservar DataFrame (para que SimpleImputer retorne DataFrame)
 # -----------------------------------------------------------------------------
 class DataFrameTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, transformer):
@@ -81,7 +87,7 @@ class DataFrameTransformer(BaseEstimator, TransformerMixin):
         return X_trans
 
 # -----------------------------------------------------------------------------
-# Transformador para selección de features
+# Transformador personalizado para selección de features
 # -----------------------------------------------------------------------------
 class FeatureSelector(BaseEstimator, TransformerMixin):
     """
@@ -117,7 +123,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
         return X[self.selected_features_]
 
 # -----------------------------------------------------------------------------
-# Funciones de análisis de sentimiento (definidas antes de load_crypto_data)
+# Funciones de análisis de sentimiento
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
@@ -346,9 +352,6 @@ def medium_long_term_prediction(df, days=180, current_price=None):
         forecast.loc[forecast.index[-days], "exp_yhat"] = current_price
     return model, forecast
 
-# -----------------------------------------------------------------------------
-# Función para cargar datos históricos completos (para gráficos)
-# -----------------------------------------------------------------------------
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     ticker_ids = {
         "bitcoin": "BTC-USD",
@@ -387,9 +390,6 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     df["sentiment"] = current_sent
     return df
 
-# -----------------------------------------------------------------------------
-# Función principal: Entrenamiento y predicción
-# -----------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
     progress_text = st.empty()
@@ -400,7 +400,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No se pudo cargar el histórico.")
         return None
 
-    # Para entrenamiento/predicción usamos los últimos 2 años (pero se muestra el histórico completo)
     last_date = full_df["ds"].max()
     two_years_ago = last_date - pd.DateOffset(years=2)
     df_pred = full_df[full_df["ds"] >= two_years_ago].copy()
@@ -412,13 +411,11 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(25)
     df_pred["log_price"] = np.log1p(df_pred["close_price"])
 
-    # Definir columnas numéricas esenciales (se han eliminado ADX e Ichimoku)
     feature_cols = [
         "log_price", "volume", "high", "low", "rsi_norm", "macd",
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
         "log_sma50", "log_return", "vol_30d", "sentiment"
     ]
-    # Pipeline de preprocesamiento: imputación, selección de features y escalado
     pipe = Pipeline([
         ('imputer', DataFrameTransformer(SimpleImputer(strategy="median"))),
         ('selector', FeatureSelector(feature_cols, target_col='log_price', enet_threshold=0.01, importance_threshold=0.01)),
@@ -430,7 +427,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         selected_features = feature_cols
 
     window_size = 60 if horizon_days <= 30 else 90
-    X, y = create_sequences(scaled_data.values, window_size)
+    # Quitar .values (scaled_data ya es un ndarray)
+    X, y = create_sequences(scaled_data, window_size)
     if X is None:
         st.error("No hay suficientes datos para crear secuencias.")
         return None
@@ -539,9 +537,6 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         "real_prices": y_test_real
     }
 
-# -----------------------------------------------------------------------------
-# Función principal del dashboard
-# -----------------------------------------------------------------------------
 def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
@@ -715,7 +710,6 @@ def main_app():
         crypto_sent = get_news_sentiment(coin_id)
         market_sent = get_fear_greed_index()
         _, _, gauge_val = get_crypto_sentiment_combined(coin_id)
-        # Ajuste de rangos para que "Very Bullish" aparezca para valores ≥ 80
         if gauge_val < 20:
             gauge_text = "Very Bearish"
         elif gauge_val < 40:
