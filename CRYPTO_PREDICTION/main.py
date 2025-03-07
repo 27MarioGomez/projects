@@ -276,10 +276,11 @@ def flatten_sequences(X_seq):
     """
     return X_seq.reshape((X_seq.shape[0], X_seq.shape[1] * X_seq.shape[2]))
 
-def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
-                     lstm_units1=128, lstm_units2=64, dropout_rate=0.3, dense_units=100):
+def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.001,
+                     lstm_units1=128, lstm_units2=64, dropout_rate=0.2, dense_units=100):
     """
     Construye un modelo LSTM con dos capas, dropout y capa densa final.
+    Ajuste de l2_lambda y dropout_rate para reducir regularización excesiva.
     """
     model = Sequential([
         LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
@@ -295,7 +296,7 @@ def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.01,
 def train_model(X_train, y_train, X_val, y_val, model, epochs=15, batch_size=32):
     """
     Entrena la LSTM con EarlyStopping y ReduceLROnPlateau.
-    Se usan 15 épocas en el entrenamiento final.
+    Se pueden subir las épocas a ~25 para capturar mejor la dinámica.
     """
     tf.keras.backend.clear_session()
     callbacks = [
@@ -336,23 +337,22 @@ def medium_long_term_prediction(df, days=180, current_price=None):
     forecast = model.predict(future_dates)
     forecast["exp_yhat"] = np.expm1(forecast["yhat"])
     if current_price is not None and days > 0:
-        # Forzamos que el primer valor de la predicción futura sea el precio actual
         forecast.loc[forecast.index[-days], "exp_yhat"] = current_price
     return model, forecast
 
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     """
     Entrena el modelo (LSTM, XGBoost y Prophet) y realiza la predicción.
-    Usa window_size de 60 si horizon_days <= 30, y 90 si es mayor.
     Ajusta la predicción final según el sentimiento (±5%), y corrige la predicción a corto plazo
     para que no baje de forma ilógica si el sentimiento es bullish.
+    Se ha modificado el entrenamiento para más épocas y la predicción iterativa de XGBoost.
     """
-    # Mostrar mensaje único durante el entrenamiento
     st.info("Esto puede tardar un poco, por favor espera...")
 
     progress_text = st.empty()
     progress_bar = st.progress(0)
 
+    # Ajuste de la ventana
     if horizon_days <= 30:
         window_size = 60
     else:
@@ -402,37 +402,52 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Hiperparámetros fijos para cada cripto.
+    # Hiperparámetros fijos para cada cripto (ajustados para reducir la regularización).
     if coin_id == "xrp":
         fixed_params = {
             "learning_rate": 0.0004,
             "lstm_units1": 128,
             "lstm_units2": 64,
-            "dropout_rate": 0.35,
+            "dropout_rate": 0.25,
             "dense_units": 100,
-            "batch_size": 32
+            "batch_size": 32,
+            "epochs": 25,
+            "l2_lambda": 0.001
         }
     else:
         fixed_params = {
             "learning_rate": 0.0005,
             "lstm_units1": 128,
             "lstm_units2": 64,
-            "dropout_rate": 0.3,
+            "dropout_rate": 0.2,
             "dense_units": 100,
-            "batch_size": 32
+            "batch_size": 32,
+            "epochs": 25,
+            "l2_lambda": 0.005
         }
+
     lr = fixed_params["learning_rate"]
     lstm_units1 = fixed_params["lstm_units1"]
     lstm_units2 = fixed_params["lstm_units2"]
     dropout_rate = fixed_params["dropout_rate"]
     dense_units = fixed_params["dense_units"]
     batch_size = fixed_params["batch_size"]
+    epochs = fixed_params["epochs"]
+    l2_lambda = fixed_params["l2_lambda"]
 
     progress_text.text("Entrenando LSTM...")
     progress_bar.progress(60)
     input_shape = (window_size, len(feature_cols))
-    lstm_model = build_lstm_model(input_shape, lr, 0.01, lstm_units1, lstm_units2, dropout_rate, dense_units)
-    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=15, batch_size=batch_size)
+    lstm_model = build_lstm_model(
+        input_shape,
+        learning_rate=lr,
+        l2_lambda=l2_lambda,
+        lstm_units1=lstm_units1,
+        lstm_units2=lstm_units2,
+        dropout_rate=dropout_rate,
+        dense_units=dense_units
+    )
+    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=epochs, batch_size=batch_size)
 
     progress_text.text("Realizando predicción en test (LSTM)...")
     progress_bar.progress(70)
@@ -481,7 +496,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     progress_text.text("Realizando predicción futura...")
     progress_bar.progress(90)
-    # Para predicción futura, se toma la última ventana escalada
+
+    # Predicción futura LSTM (iterativa)
     last_window = scaler.transform(df[feature_cols].values[-window_size:])
     current_input = last_window.reshape(1, window_size, len(feature_cols))
 
@@ -492,25 +508,33 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         inv_f = scaler.inverse_transform(reconst_f)
         plog = inv_f[0, 0]
         future_preds_log_lstm.append(plog)
+
+        # Actualizar la ventana para la siguiente predicción
         new_feature = np.copy(current_input[:, -1:, :])
         new_feature[0, 0, 0] = p_scaled
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
 
     lstm_future_preds = np.expm1(np.array(future_preds_log_lstm))
 
-    # Predicción futura con XGBoost.
-    X_last_flat = flatten_sequences(current_input)
+    # Predicción futura con XGBoost (iterativa)
+    current_input_xgb = np.copy(last_window).reshape(1, window_size, len(feature_cols))
     xgb_future_preds_log = []
     for _ in range(horizon_days):
-        xgb_p = xgb_model.predict(X_last_flat)[0]
-        reconst_xgb = np.concatenate([[xgb_p], np.zeros((len(feature_cols)-1,))]).reshape(1, -1)
+        X_last_flat = flatten_sequences(current_input_xgb)
+        xgb_p_scaled = xgb_model.predict(X_last_flat)[0]
+        reconst_xgb = np.concatenate([[xgb_p_scaled], np.zeros((len(feature_cols)-1,))]).reshape(1, -1)
         inv_xgb = scaler.inverse_transform(reconst_xgb)
         xgb_log = inv_xgb[0, 0]
         xgb_future_preds_log.append(xgb_log)
+
+        # Actualizar la ventana de XGBoost
+        new_feature_xgb = np.copy(current_input_xgb[:, -1:, :])
+        new_feature_xgb[0, 0, 0] = xgb_p_scaled
+        current_input_xgb = np.append(current_input_xgb[:, 1:, :], new_feature_xgb, axis=1)
+
     xgb_future_preds = np.expm1(np.array(xgb_future_preds_log))
 
-    # Predicción futura con Prophet.
-    # Se fuerza que el primer valor sea igual al precio actual
+    # Predicción futura con Prophet
     current_price = df["close_price"].iloc[-1]
     future_prophet2 = prophet_model.make_future_dataframe(periods=horizon_days)
     forecast2 = prophet_model.predict(future_prophet2)
@@ -519,6 +543,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     # Forzamos que el primer valor de la predicción Prophet sea igual al precio actual
     prophet_future_preds[0] = current_price
 
+    # Ensamble final
     final_future_preds = ensemble_prediction(lstm_future_preds, xgb_future_preds, prophet_future_preds, 0.6, 0.2, 0.2)
 
     # Ajuste final según sentimiento.
