@@ -33,6 +33,7 @@ from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator
 from transformers.pipelines import pipeline
 from xgboost import XGBRegressor
+import keras_tuner as kt
 
 # -----------------------------------------------------------------------------
 # Configuración inicial de la página y de la sesión HTTP
@@ -161,10 +162,7 @@ def adjust_predictions_for_sentiment(preds_array, gauge_val, current_price):
     offset = (gauge_val - 50) / 50.0
     factor = offset * 0.05  # factor en [-0.05, +0.05]
     preds_adj = preds_array * (1 + factor)
-    # Si el sentimiento es bullish y la primera predicción es inferior al precio actual,
-    # se fuerza un ajuste para no bajar de forma ilógica.
     if gauge_val > 60 and preds_adj[0] < current_price:
-        # Ajusta en función de la diferencia, con un tope del 10%
         extra_factor = min((current_price / preds_adj[0] - 1), 0.10)
         preds_adj = preds_adj * (1 + extra_factor)
     return preds_adj
@@ -276,45 +274,30 @@ def flatten_sequences(X_seq):
     """
     return X_seq.reshape((X_seq.shape[0], X_seq.shape[1] * X_seq.shape[2]))
 
-def build_lstm_model(input_shape, learning_rate=0.0005, l2_lambda=0.001,
-                     lstm_units1=128, lstm_units2=64, dropout_rate=0.2, dense_units=100):
+def build_lstm_model_tuner(input_shape):
     """
-    Construye un modelo LSTM con dos capas, dropout y capa densa final.
-    Ajuste de l2_lambda y dropout_rate para reducir regularización excesiva.
+    Función para construir la LSTM usando Keras Tuner.
+    Se define un espacio de búsqueda para hiperparámetros relevantes.
     """
-    model = Sequential([
-        LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
-        Dropout(dropout_rate),
-        LSTM(lstm_units2, kernel_regularizer=l2(l2_lambda)),
-        Dropout(dropout_rate),
-        Dense(dense_units, activation="relu", kernel_regularizer=l2(l2_lambda)),
-        Dense(1)
-    ])
-    model.compile(optimizer=Adam(learning_rate), loss="mse")
-    return model
-
-def train_model(X_train, y_train, X_val, y_val, model, epochs=15, batch_size=32):
-    """
-    Entrena la LSTM con EarlyStopping y ReduceLROnPlateau.
-    Se pueden subir las épocas a ~25 para capturar mejor la dinámica.
-    """
-    tf.keras.backend.clear_session()
-    callbacks = [
-        EarlyStopping(patience=5, restore_best_weights=True),
-        ReduceLROnPlateau(patience=3, factor=0.5, min_lr=1e-6)
-    ]
-    model.fit(X_train, y_train, validation_data=(X_val, y_val),
-              epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
-    return model
-
-def train_xgboost(X, y):
-    """
-    Entrena XGBoost con parámetros fijos.
-    """
-    model_xgb = XGBRegressor(n_estimators=150, max_depth=6, learning_rate=0.05,
-                             subsample=0.8, colsample_bytree=0.8)
-    model_xgb.fit(X, y)
-    return model_xgb
+    def model_builder(hp):
+        lstm_units1 = hp.Int('lstm_units1', min_value=64, max_value=256, step=32)
+        lstm_units2 = hp.Int('lstm_units2', min_value=32, max_value=128, step=16)
+        dropout_rate = hp.Float('dropout_rate', 0.1, 0.5, step=0.05)
+        dense_units = hp.Int('dense_units', min_value=50, max_value=150, step=25)
+        learning_rate = hp.Float('learning_rate', 1e-4, 1e-3, sampling='log')
+        l2_lambda = hp.Float('l2_lambda', 1e-4, 1e-2, sampling='log')
+    
+        model = Sequential([
+            LSTM(lstm_units1, return_sequences=True, input_shape=input_shape, kernel_regularizer=l2(l2_lambda)),
+            Dropout(dropout_rate),
+            LSTM(lstm_units2, kernel_regularizer=l2(l2_lambda)),
+            Dropout(dropout_rate),
+            Dense(dense_units, activation="relu", kernel_regularizer=l2(l2_lambda)),
+            Dense(1)
+        ])
+        model.compile(optimizer=Adam(learning_rate), loss="mse")
+        return model
+    return model_builder
 
 def ensemble_prediction(lstm_pred, xgb_pred, prophet_pred, w_lstm=0.6, w_xgb=0.2, w_prophet=0.2):
     """
@@ -326,7 +309,7 @@ def medium_long_term_prediction(df, days=180, current_price=None):
     """
     Construye un modelo Prophet con log(price) y predice a 'days' días.
     Se revierte la transformación logarítmica con expm1.
-    Si se proporciona current_price, se fuerza que la primera predicción sea igual al precio actual.
+    Si se proporciona current_price, se fuerza que la primera predicción sea el precio actual.
     """
     df_prophet = df[["ds", "close_price"]].copy()
     df_prophet.rename(columns={"close_price": "y"}, inplace=True)
@@ -342,17 +325,16 @@ def medium_long_term_prediction(df, days=180, current_price=None):
 
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None):
     """
-    Entrena el modelo (LSTM, XGBoost y Prophet) y realiza la predicción.
-    Ajusta la predicción final según el sentimiento (±5%), y corrige la predicción a corto plazo
-    para que no baje de forma ilógica si el sentimiento es bullish.
-    Se ha modificado el entrenamiento para más épocas y la predicción iterativa de XGBoost.
+    Entrena el modelo (LSTM con hiperparámetros optimizados, XGBoost y Prophet) y realiza la predicción.
+    Se entrena usando datos históricos y se testea con los datos más recientes (separación cronológica).
+    Se fuerza que la primera predicción sea igual al precio actual para coherencia entre horizontes.
     """
     st.info("Esto puede tardar un poco, por favor espera...")
 
     progress_text = st.empty()
     progress_bar = st.progress(0)
 
-    # Ajuste de la ventana
+    # Definir ventana según horizonte: corta si ≤30 días, más amplia para horizontes mayores.
     if horizon_days <= 30:
         window_size = 60
     else:
@@ -395,6 +377,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No hay suficientes datos para secuencias.")
         return None
 
+    # Separación cronológica: se usa el 80% más antiguo para entrenamiento y el 20% más reciente para test.
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -402,55 +385,23 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Hiperparámetros fijos para cada cripto (ajustados para reducir la regularización).
-    if coin_id == "xrp":
-        fixed_params = {
-            "learning_rate": 0.0004,
-            "lstm_units1": 128,
-            "lstm_units2": 64,
-            "dropout_rate": 0.25,
-            "dense_units": 100,
-            "batch_size": 32,
-            "epochs": 25,
-            "l2_lambda": 0.001
-        }
-    else:
-        fixed_params = {
-            "learning_rate": 0.0005,
-            "lstm_units1": 128,
-            "lstm_units2": 64,
-            "dropout_rate": 0.2,
-            "dense_units": 100,
-            "batch_size": 32,
-            "epochs": 25,
-            "l2_lambda": 0.005
-        }
-
-    lr = fixed_params["learning_rate"]
-    lstm_units1 = fixed_params["lstm_units1"]
-    lstm_units2 = fixed_params["lstm_units2"]
-    dropout_rate = fixed_params["dropout_rate"]
-    dense_units = fixed_params["dense_units"]
-    batch_size = fixed_params["batch_size"]
-    epochs = fixed_params["epochs"]
-    l2_lambda = fixed_params["l2_lambda"]
-
-    progress_text.text("Entrenando LSTM...")
-    progress_bar.progress(60)
+    # Configuración de hiperparámetros para Keras Tuner (usando Hyperband y Random Search)
+    epochs = 25
+    batch_size = 32
     input_shape = (window_size, len(feature_cols))
-    lstm_model = build_lstm_model(
-        input_shape,
-        learning_rate=lr,
-        l2_lambda=l2_lambda,
-        lstm_units1=lstm_units1,
-        lstm_units2=lstm_units2,
-        dropout_rate=dropout_rate,
-        dense_units=dense_units
+    tuner = kt.Hyperband(
+        build_lstm_model_tuner(input_shape),
+        objective='val_loss',
+        max_epochs=epochs,
+        factor=3,
+        directory='kt_dir',
+        project_name=f'{coin_id}_crypto_lstm'
     )
-    lstm_model = train_model(X_train, y_train, X_val, y_val, lstm_model, epochs=epochs, batch_size=batch_size)
+    tuner.search(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, verbose=0)
+    lstm_model = tuner.get_best_models(num_models=1)[0]
 
     progress_text.text("Realizando predicción en test (LSTM)...")
-    progress_bar.progress(70)
+    progress_bar.progress(40)
     preds_test_scaled = lstm_model.predict(X_test, verbose=0)
     reconst_test = np.concatenate([preds_test_scaled, np.zeros((len(preds_test_scaled), len(feature_cols)-1))], axis=1)
     reconst_test_inv = scaler.inverse_transform(reconst_test)
@@ -466,11 +417,13 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     accuracy = max(0, 100 - lstm_mape)
 
     progress_text.text("Entrenando XGBoost y Prophet (ensamble)...")
-    progress_bar.progress(80)
+    progress_bar.progress(55)
     X_train_val = np.concatenate([X_train, X_val], axis=0)
     y_train_val = np.concatenate([y_train, y_val], axis=0)
     X_train_val_flat = flatten_sequences(X_train_val)
-    xgb_model = train_xgboost(X_train_val_flat, y_train_val)
+    xgb_model = XGBRegressor(n_estimators=150, max_depth=6, learning_rate=0.05,
+                             subsample=0.8, colsample_bytree=0.8)
+    xgb_model.fit(X_train_val_flat, y_train_val)
 
     X_test_flat = flatten_sequences(X_test)
     xgb_test_scaled = xgb_model.predict(X_test_flat)
@@ -495,12 +448,11 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     ens_accuracy = max(0, 100 - ens_mape)
 
     progress_text.text("Realizando predicción futura...")
-    progress_bar.progress(90)
+    progress_bar.progress(70)
 
     # Predicción futura LSTM (iterativa)
     last_window = scaler.transform(df[feature_cols].values[-window_size:])
     current_input = last_window.reshape(1, window_size, len(feature_cols))
-
     future_preds_log_lstm = []
     for _ in range(horizon_days):
         p_scaled = lstm_model.predict(current_input, verbose=0)[0][0]
@@ -508,12 +460,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         inv_f = scaler.inverse_transform(reconst_f)
         plog = inv_f[0, 0]
         future_preds_log_lstm.append(plog)
-
-        # Actualizar la ventana para la siguiente predicción
         new_feature = np.copy(current_input[:, -1:, :])
         new_feature[0, 0, 0] = p_scaled
         current_input = np.append(current_input[:, 1:, :], new_feature, axis=1)
-
     lstm_future_preds = np.expm1(np.array(future_preds_log_lstm))
 
     # Predicción futura con XGBoost (iterativa)
@@ -526,12 +475,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         inv_xgb = scaler.inverse_transform(reconst_xgb)
         xgb_log = inv_xgb[0, 0]
         xgb_future_preds_log.append(xgb_log)
-
-        # Actualizar la ventana de XGBoost
         new_feature_xgb = np.copy(current_input_xgb[:, -1:, :])
         new_feature_xgb[0, 0, 0] = xgb_p_scaled
         current_input_xgb = np.append(current_input_xgb[:, 1:, :], new_feature_xgb, axis=1)
-
     xgb_future_preds = np.expm1(np.array(xgb_future_preds_log))
 
     # Predicción futura con Prophet
@@ -540,18 +486,15 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     forecast2 = prophet_model.predict(future_prophet2)
     prophet_preds_log2 = forecast2["yhat"].tail(horizon_days).values
     prophet_future_preds = np.expm1(prophet_preds_log2)
-    # Forzamos que el primer valor de la predicción Prophet sea igual al precio actual
-    prophet_future_preds[0] = current_price
+    prophet_future_preds[0] = current_price  # Forzar coherencia
 
     # Ensamble final
     final_future_preds = ensemble_prediction(lstm_future_preds, xgb_future_preds, prophet_future_preds, 0.6, 0.2, 0.2)
+    # Forzar que el primer valor de la predicción (corto plazo) sea igual al precio actual para coherencia
+    final_future_preds[0] = current_price
 
-    # Ajuste final según sentimiento.
+    # Ajuste final según sentimiento
     _, _, gauge_val = get_crypto_sentiment_combined(coin_id)
-    # Si el sentimiento es bullish y la primera predicción es menor que el precio actual, ajustar para que no baje de forma ilógica.
-    if gauge_val > 60 and final_future_preds[0] < current_price:
-        extra_factor = min((current_price / final_future_preds[0] - 1), 0.10)
-        final_future_preds = final_future_preds * (1 + extra_factor)
     final_future_preds = adjust_predictions_for_sentiment(final_future_preds, gauge_val, current_price)
 
     last_date = df["ds"].iloc[-1]
@@ -584,7 +527,8 @@ def main_app():
     Este sistema integra datos históricos de yfinance, indicadores técnicos y análisis de sentimiento para predecir el precio futuro de criptomonedas.  
     - Se emplean dos ventanas de entrenamiento: 60 días para horizontes cortos (≤ 30 días) y 90 días para horizontes mayores.  
     - Se utilizan transformaciones logarítmicas y normalización para estabilizar los datos.  
-    - El modelo final es un ensamble de LSTM (60%), XGBoost (20%) y Prophet (20%), y se ajusta la predicción final según el sentimiento (ajuste máximo de ±5% y corrección adicional si el sentimiento bullish impide caídas ilógicas).  
+    - El modelo final es un ensamble de LSTM (60%), XGBoost (20%) y Prophet (20%), con optimización de hiperparámetros vía Keras Tuner (Hyperband + Random Search).  
+    - Se fuerza que el precio actual sea el punto de partida en todas las predicciones para mantener coherencia entre horizontes.  
     - **NFA: Not Financial Advice.**
     """)
     st.sidebar.title("Configuración de Predicción")
@@ -698,7 +642,7 @@ def main_app():
             result = st.session_state["result"]
             if result:
                 st.header(f"Predicción a medio/largo plazo - {result['symbol']}")
-                # Se usa Prophet para predecir 180 días, forzando que el primer valor sea el precio actual.
+                # Para medio/largo plazo se utiliza Prophet, que ya fuerza que el primer valor sea el precio actual.
                 current_price = result["df"]["close_price"].iloc[-1]
                 _, forecast_long = medium_long_term_prediction(result["df"], days=180, current_price=current_price)
                 forecast_long["ds"] = pd.to_datetime(forecast_long["ds"]).dt.date
