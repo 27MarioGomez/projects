@@ -92,16 +92,18 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         df = X.copy()
-        df[self.target_col] = y
-        # Selección inicial con ElasticNetCV
-        X_arr = df[self.feature_cols].values
+        # Si se pasa y, lo asignamos; de lo contrario, asumimos que la columna objetivo ya está en X.
+        if y is not None:
+            df[self.target_col] = y
         y_arr = df[self.target_col].values
+        X_arr = df[self.feature_cols].values
+        # Selección inicial con ElasticNetCV
         enet = ElasticNetCV(cv=5, random_state=42).fit(X_arr, y_arr)
         coefs = enet.coef_
         initial_selected = [self.feature_cols[i] for i in range(len(self.feature_cols)) if abs(coefs[i]) > self.enet_threshold]
         if not initial_selected:
             initial_selected = self.feature_cols  # fallback
-        # Refinamiento con importancia de variables de XGBoost
+        # Refinamiento con XGBoost
         xgb = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.1, random_state=42)
         xgb.fit(df[initial_selected].values, y_arr)
         importances = xgb.feature_importances_
@@ -235,25 +237,18 @@ def compute_base_indicators(df):
     """
     df["RSI"] = RSIIndicator(close=df["close_price"], window=14).rsi()
     df["rsi_norm"] = df["RSI"] / 100.0
-
     macd_calc = MACD(close=df["close_price"], window_fast=12, window_slow=26, window_sign=9)
     df["macd"] = macd_calc.macd()
-
     bb = BollingerBands(close=df["close_price"], window=20, window_dev=2)
     df["bollinger_upper"] = bb.bollinger_hband()
     df["bollinger_lower"] = bb.bollinger_lband()
-
     df["sma50"] = SMAIndicator(close=df["close_price"], window=50).sma_indicator()
-
     atr_calc = AverageTrueRange(high=df["high"], low=df["low"], close=df["close_price"], window=14)
     df["atr"] = atr_calc.average_true_range()
-
     adx_calc = ADXIndicator(high=df["high"], low=df["low"], close=df["close_price"], window=14)
     df["adx"] = adx_calc.adx()
-
     ichimoku = IchimokuIndicator(high=df["high"], low=df["low"], window1=9, window2=26, window3=52)
     df["ichimoku_conversion"] = ichimoku.ichimoku_conversion_line()
-
     df.ffill(inplace=True)
     return df
 
@@ -299,30 +294,23 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     if not ticker:
         st.error("Ticker no encontrado.")
         return None
-
     if start_date is None or end_date is None:
         df = yf.download(ticker, period="max", progress=False)
     else:
         df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-
     if df.empty:
         st.warning("Datos no disponibles en yfinance.")
         return None
-
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-
     df.rename(columns={"Date": "ds", "Close": "close_price", "Volume": "volume",
                        "High": "high", "Low": "low"}, inplace=True)
-
     df = compute_base_indicators(df)
     df = compute_additional_features(df)
     df.dropna(inplace=True)
-
     current_sent = get_news_sentiment(coin_id)
     df["sentiment"] = current_sent
-
     return df
 
 def create_sequences(data, window_size):
@@ -431,7 +419,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     Los datos se separan cronológicamente (80% entrenamiento, 20% test) y se fuerza que el precio actual
     sea el punto de partida en las predicciones para mantener coherencia.
     Se incorpora un pipeline de preprocesamiento que integra imputación, selección de features
-    mediante un método embedded (ElasticNetCV refinado con XGBoost) y escalado.
+    mediante ElasticNetCV (refinada con XGBoost) y escalado.
     """
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
     progress_text = st.empty()
@@ -453,19 +441,19 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     progress_bar.progress(25)
     df["log_price"] = np.log1p(df["close_price"])
 
-    # Lista de features con todos los indicadores
+    # Lista de features (todas las columnas numéricas relevantes)
     feature_cols = [
         "log_price", "volume", "high", "low", "rsi_norm", "macd",
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
         "log_sma50", "log_return", "vol_30d", "sentiment", "adx", "ichimoku_conversion"
     ]
-    # Pipeline de preprocesamiento: imputar, seleccionar features y escalar
+    # Pipeline de preprocesamiento: imputación, selección de features y escalado.
     pipe = Pipeline([
         ('imputer', SimpleImputer(strategy="median")),
         ('selector', FeatureSelector(feature_cols, target_col='log_price', enet_threshold=0.01, importance_threshold=0.01)),
         ('scaler', MinMaxScaler())
     ])
-    # Se aplica el pipeline únicamente a las columnas definidas en feature_cols
+    # Se aplica el pipeline a las columnas definidas en feature_cols.
     scaled_data = pipe.fit_transform(df[feature_cols])
     selected_features = pipe.named_steps['selector'].selected_features_
     if not selected_features:
