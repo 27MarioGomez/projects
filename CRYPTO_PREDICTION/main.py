@@ -127,6 +127,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
+    # Especificamos modelo y revisión para evitar warning
     return pipeline("sentiment-analysis", model="distilbert/distilbert-base-uncased-finetuned-sst-2-english", revision="714eb0f")
 
 def get_advanced_sentiment(text):
@@ -276,7 +277,7 @@ def flatten_sequences(X_seq):
     return X_seq.reshape((X_seq.shape[0], X_seq.shape[1] * X_seq.shape[2]))
 
 # -----------------------------------------------------------------------------
-# Modelo LSTM con Keras Tuner (espacio de búsqueda acotado y menor número de épocas)
+# Modelo LSTM con Keras Tuner (espacio de búsqueda acotado)
 # -----------------------------------------------------------------------------
 def build_lstm_model_tuner(input_shape):
     def model_builder(hp):
@@ -343,7 +344,7 @@ def medium_long_term_prediction(df, days=180, current_price=None):
     return model, forecast
 
 # -----------------------------------------------------------------------------
-# Función para cargar datos históricos (solo para la criptomoneda seleccionada)
+# Función para cargar datos históricos
 # -----------------------------------------------------------------------------
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     ticker_ids = {
@@ -396,7 +397,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No se pudo cargar el histórico.")
         return None
 
-    # Usar solo los datos del último año (o el valor seleccionado)
+    # Filtrar para entrenamiento/predicción: usar solo los datos del período seleccionado
     last_date = full_df["ds"].max()
     period_start = last_date - pd.DateOffset(years=training_period_years)
     df_pred = full_df[full_df["ds"] >= period_start].copy()
@@ -436,7 +437,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Reducir épocas a 8 para acelerar y usar early stopping a través del tuner
+    # Reducir épocas y usar early stopping en el tuner
     epochs = 8
     batch_size = 32
     input_shape = (window_size, len(selected_features))
@@ -445,7 +446,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     if os.path.exists('kt_dir'):
         shutil.rmtree('kt_dir')
     
-    # Se añaden callbacks para detener temprano si la validación no mejora
+    # Callbacks de early stopping y reduce LR
     callbacks = [
         tf.keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(patience=2, factor=0.5, min_lr=1e-6)
@@ -545,29 +546,25 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         "real_prices": y_test_real
     }
 
-# -----------------------------------------------------------------------------
-# Función principal del dashboard
-# -----------------------------------------------------------------------------
 def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Dashboard:**  
     Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento (noticias y Fear & Greed) para predecir el precio futuro de criptomonedas.  
     **Componentes del Modelo:**  
-      - **Indicadores Técnicos:** Se calculan RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return, vol_30d y se utiliza el sentimiento. (Se han descartado indicadores redundantes).  
+      - **Indicadores Técnicos:** Se calculan RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return, vol_30d y se utiliza el sentimiento.  
       - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección automática de features (con ElasticNetCV refinado con XGBoost) y escalado, usando solo los datos del último año para entrenamiento sin afectar la visualización completa.  
       - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias y el índice Fear & Greed para ajustar las predicciones.  
       - **Modelos de Predicción:** Se emplea un ensamble de:
-          - **LSTM:** Hiperparámetros optimizados con Keras Tuner (Hyperband con búsqueda acotada) en 8 épocas.
-          - **XGBoost:** Para predicción iterativa a corto plazo.
-          - **Prophet:** Para predicciones a mediano/largo plazo, anclando el primer valor al precio actual.
+          - **LSTM:** Hiperparámetros optimizados con Keras Tuner (Hyperband con búsqueda acotada) en 8 épocas.  
+          - **XGBoost:** Para predicción iterativa a corto plazo.  
+          - **Prophet:** Para predicciones a mediano/largo plazo, anclando el primer valor al precio actual.  
     **NFA:** Not Financial Advice.
     """)
     st.sidebar.title("Configuración de Predicción")
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
     
-    # Selector de período de entrenamiento (años): 1, 2 o 3
     training_period = st.sidebar.select_slider(
         "Periodo de entrenamiento (años):",
         options=[1, 2, 3],
@@ -575,7 +572,6 @@ def main_app():
         help="A mayor período, mayor tiempo tardará en entrenar el modelo."
     )
     
-    # Slider para días a predecir con ayuda
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5, help="Más días a predecir implican mayor tiempo de procesamiento.")
     
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
@@ -776,24 +772,33 @@ def main_app():
         st.subheader(f"Noticias recientes sobre {crypto_name} ({coinid_to_symbol[coin_id]})")
         articles = get_newsapi_articles(coin_id, show_warning=True)
         if articles:
+            # Estilos para scroll horizontal y tarjetas de tamaño fijo
             st.markdown(
                 """
                 <style>
                 .news-container {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+                    display: flex;
+                    flex-direction: row;
                     gap: 1rem;
+                    overflow-x: auto;
+                    padding: 1rem 0;
                 }
                 .news-item {
+                    flex: 0 0 auto;
+                    width: 280px;
+                    min-height: 380px;
                     background-color: #2c2c3e;
                     padding: 0.5rem;
                     border-radius: 5px;
                     border: 1px solid #4a4a6a;
-                    max-width: 280px;
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: space-between;
                 }
                 .news-item img {
                     width: 100%;
-                    height: auto;
+                    height: 160px;
+                    object-fit: cover;
                     border-radius: 5px;
                     margin-bottom: 0.5rem;
                 }
@@ -805,15 +810,19 @@ def main_app():
                     font-size: 0.8rem;
                     margin: 0 0 0.3rem 0;
                 }
-                @media (max-width: 1024px) {
-                    .news-container {
-                        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-                    }
+                .read-more-btn {
+                    display: inline-block;
+                    padding: 0.4rem 0.8rem;
+                    background-color: #ff7f0e;
+                    color: #fff;
+                    text-decoration: none;
+                    border-radius: 3px;
+                    text-align: center;
+                    font-size: 0.8rem;
+                    margin-top: 0.3rem;
                 }
-                @media (max-width: 600px) {
-                    .news-container {
-                        grid-template-columns: 1fr;
-                    }
+                .read-more-btn:hover {
+                    background-color: #ff9950;
                 }
                 </style>
                 """,
@@ -821,22 +830,29 @@ def main_app():
             )
             st.markdown("<div class='news-container'>", unsafe_allow_html=True)
             for article in articles:
-                image_tag = f"<img src='{article['image']}' alt='Imagen' />" if article['image'] else ""
+                image_tag = ""
+                if article['image']:
+                    image_tag = f"<img src='{article['image']}' alt='Imagen'/>"
+                link_button = f"<a href='{article['link']}' target='_blank' class='read-more-btn'>Leer más</a>"
                 st.markdown(
                     f"""
                     <div class='news-item'>
                         {image_tag}
-                        <h4>{article['title']}</h4>
-                        <p><em>{article['pubDate']}</em></p>
-                        <p>{article['description']}</p>
-                        <p><a href="{article['link']}" target="_blank">Leer más</a></p>
+                        <div>
+                            <h4>{article['title']}</h4>
+                            <p><em>{article['pubDate']}</em></p>
+                            <p>{article['description']}</p>
+                        </div>
+                        <div>
+                            {link_button}
+                        </div>
                     </div>
                     """,
                     unsafe_allow_html=True
                 )
             st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.warning("Se ha excedido el límite de peticiones. Vuelve en 12 horas para ver más noticias.")
+            st.warning("Se ha superado el límite de peticiones. Vuelve en 12 horas para ver más noticias.")
 
 if __name__ == "__main__":
     main_app()
