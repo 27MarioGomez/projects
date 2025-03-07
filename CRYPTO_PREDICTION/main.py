@@ -8,7 +8,6 @@ import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
 
 # Activar mixed precision si hay GPU (en CPU se ignora)
@@ -20,6 +19,7 @@ import yfinance as yf
 import requests
 import certifi
 import os
+import shutil
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.linear_model import ElasticNetCV
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -32,7 +32,7 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
-# Indicadores técnicos esenciales
+# Indicadores esenciales
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator, EMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -41,7 +41,7 @@ from transformers.pipelines import pipeline
 from xgboost import XGBRegressor
 from numba import njit
 
-# Intentamos importar Keras Tuner (se instala en PyPI como keras-tuner)
+# Intentamos importar Keras Tuner (se instala como keras-tuner)
 try:
     import keras_tuner as kt
 except ModuleNotFoundError:
@@ -72,7 +72,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # -----------------------------------------------------------------------------
-# Transformador para conservar DataFrame (para que SimpleImputer retorne DataFrame)
+# Transformador para conservar DataFrame en imputación
 # -----------------------------------------------------------------------------
 class DataFrameTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, transformer):
@@ -87,12 +87,12 @@ class DataFrameTransformer(BaseEstimator, TransformerMixin):
         return X_trans
 
 # -----------------------------------------------------------------------------
-# Transformador personalizado para selección de features
+# Transformador para selección de features
 # -----------------------------------------------------------------------------
 class FeatureSelector(BaseEstimator, TransformerMixin):
     """
-    Selecciona automáticamente las features relevantes usando primero ElasticNetCV
-    y refinando con la importancia de variables de XGBoost.
+    Realiza una selección automática de features mediante ElasticNetCV,
+    refinando el resultado con la importancia calculada por XGBoost.
     """
     def __init__(self, feature_cols, target_col, enet_threshold=0.01, importance_threshold=0.01):
         self.feature_cols = feature_cols
@@ -127,18 +127,15 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
-    """Carga la pipeline de Transformers para análisis de sentimiento."""
     return pipeline("sentiment-analysis")
 
 def get_advanced_sentiment(text):
-    """Calcula el sentimiento usando Transformers y lo transforma al rango [0,100]."""
     pipe = load_sentiment_pipeline()
     result = pipe(text)[0]
     return 50 + (result["score"] * 50) if result["label"].upper() == "POSITIVE" else 50 - (result["score"] * 50)
 
 @st.cache_data(ttl=43200)
 def get_newsapi_articles(coin_id, show_warning=True):
-    """Solicita 5 artículos relevantes de NewsAPI para análisis de sentimiento."""
     newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
         st.error("Clave 'newsapi_key' no encontrada en Secrets.")
@@ -178,7 +175,6 @@ def get_newsapi_articles(coin_id, show_warning=True):
         return []
 
 def get_news_sentiment(coin_id):
-    """Calcula el sentimiento promedio combinando TextBlob y Transformers."""
     articles = get_newsapi_articles(coin_id, show_warning=False)
     if not articles:
         return 50.0
@@ -193,7 +189,6 @@ def get_news_sentiment(coin_id):
     return (np.mean(sentiments_tb) + np.mean(sentiments_trans)) / 2.0
 
 def get_fear_greed_index():
-    """Obtiene el índice Fear & Greed; retorna 50.0 en caso de fallo."""
     try:
         data = requests.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
         return float(data["data"][0]["value"])
@@ -202,16 +197,12 @@ def get_fear_greed_index():
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id):
-    """
-    Combina el sentimiento de noticias y el índice Fear & Greed para generar un gauge.
-    """
     news_sent = get_news_sentiment(coin_id)
     market_sent = get_fear_greed_index()
     gauge_val = 50 + (news_sent - market_sent)
     return news_sent, market_sent, max(0, min(100, gauge_val))
 
 def adjust_predictions_for_sentiment(preds_array, gauge_val, current_price):
-    """Ajusta la predicción final según el sentimiento."""
     offset = (gauge_val - 50) / 50.0
     factor = offset * 0.05
     preds_adj = preds_array * (1 + factor)
@@ -221,7 +212,7 @@ def adjust_predictions_for_sentiment(preds_array, gauge_val, current_price):
     return preds_adj
 
 # -----------------------------------------------------------------------------
-# Optimización del cálculo de indicadores técnicos (paralelización)
+# Cálculo de indicadores técnicos (paralelización y vectorización)
 # -----------------------------------------------------------------------------
 def compute_rsi(df):
     return RSIIndicator(close=df["close_price"], window=14).rsi()
@@ -242,7 +233,6 @@ def compute_atr(df):
     return AverageTrueRange(high=df["high"], low=df["low"], close=df["close_price"], window=14).average_true_range()
 
 def compute_base_indicators(df):
-    """Calcula indicadores técnicos básicos en paralelo."""
     results = Parallel(n_jobs=-1)(
         delayed(func)(df) for func in [compute_rsi, compute_macd, compute_bollinger_upper, compute_bollinger_lower, compute_sma50, compute_atr]
     )
@@ -256,8 +246,6 @@ def compute_base_indicators(df):
     return df
 
 def compute_additional_features(df):
-    """Añade features adicionales de forma vectorizada."""
-    df["log_sma50"] = np.log1p(df["sma50"])
     df["log_return"] = np.log(df["close_price"] / df["close_price"].shift(1)).fillna(0.0)
     df["vol_30d"] = df["log_return"].rolling(window=30).std().fillna(0.0)
     df["obv"] = OnBalanceVolumeIndicator(close=df["close_price"], volume=df["volume"]).on_balance_volume()
@@ -265,7 +253,7 @@ def compute_additional_features(df):
     return df
 
 # -----------------------------------------------------------------------------
-# Funciones para crear secuencias (usando Numba)
+# Creación de secuencias (usando Numba)
 # -----------------------------------------------------------------------------
 @njit
 def create_sequences_numba(data, window_size):
@@ -287,12 +275,15 @@ def create_sequences(data, window_size):
 def flatten_sequences(X_seq):
     return X_seq.reshape((X_seq.shape[0], X_seq.shape[1] * X_seq.shape[2]))
 
+# -----------------------------------------------------------------------------
+# Modelo LSTM con Keras Tuner (espacio de búsqueda acotado y menor número de épocas)
+# -----------------------------------------------------------------------------
 def build_lstm_model_tuner(input_shape):
     def model_builder(hp):
-        lstm_units1 = hp.Int('lstm_units1', min_value=64, max_value=256, step=32)
-        lstm_units2 = hp.Int('lstm_units2', min_value=32, max_value=128, step=16)
-        dropout_rate = hp.Float('dropout_rate', 0.1, 0.5, step=0.05)
-        dense_units = hp.Int('dense_units', min_value=50, max_value=150, step=25)
+        lstm_units1 = hp.Int('lstm_units1', min_value=64, max_value=128, step=32)
+        lstm_units2 = hp.Int('lstm_units2', min_value=32, max_value=64, step=16)
+        dropout_rate = hp.Float('dropout_rate', 0.1, 0.4, step=0.05)
+        dense_units = hp.Int('dense_units', min_value=50, max_value=100, step=25)
         learning_rate = hp.Float('learning_rate', 1e-4, 1e-3, sampling='log')
         l2_lambda = hp.Float('l2_lambda', 1e-4, 1e-2, sampling='log')
         model = Sequential([
@@ -307,6 +298,9 @@ def build_lstm_model_tuner(input_shape):
         return model
     return model_builder
 
+# -----------------------------------------------------------------------------
+# Funciones para predicción iterativa
+# -----------------------------------------------------------------------------
 def iterative_lstm_forecast(model, current_input, scaler, feature_cols, horizon_days):
     preds = []
     for _ in range(horizon_days):
@@ -348,6 +342,9 @@ def medium_long_term_prediction(df, days=180, current_price=None):
         forecast.loc[forecast.index[-days], "exp_yhat"] = current_price
     return model, forecast
 
+# -----------------------------------------------------------------------------
+# Función para cargar datos históricos (solo para la criptomoneda seleccionada)
+# -----------------------------------------------------------------------------
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     ticker_ids = {
         "bitcoin": "BTC-USD",
@@ -386,6 +383,9 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     df["sentiment"] = current_sent
     return df
 
+# -----------------------------------------------------------------------------
+# Función principal de entrenamiento y predicción
+# -----------------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None, training_period_years=1):
     st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
     progress_text = st.empty()
@@ -396,7 +396,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No se pudo cargar el histórico.")
         return None
 
-    # Filtrar para entrenamiento/predicción: usar los últimos 1 año (training_period_years=1)
+    # Usar solo los datos del último año (o el valor seleccionado)
     last_date = full_df["ds"].max()
     period_start = last_date - pd.DateOffset(years=training_period_years)
     df_pred = full_df[full_df["ds"] >= period_start].copy()
@@ -411,7 +411,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     feature_cols = [
         "log_price", "volume", "high", "low", "rsi_norm", "macd",
         "bollinger_upper", "bollinger_lower", "atr", "obv", "ema200",
-        "log_sma50", "log_return", "vol_30d", "sentiment"
+        "log_return", "vol_30d", "sentiment"
     ]
     pipe = Pipeline([
         ('imputer', DataFrameTransformer(SimpleImputer(strategy="median"))),
@@ -436,9 +436,15 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    epochs = 25
+    # Limitar el tuning para acelerar el proceso (épocas reducidas)
+    epochs = 15
     batch_size = 32
     input_shape = (window_size, len(selected_features))
+    
+    # Limpiar directorio de checkpoints para evitar incompatibilidades
+    if os.path.exists('kt_dir'):
+        shutil.rmtree('kt_dir')
+    
     tuner = kt.Hyperband(
         build_lstm_model_tuner(input_shape),
         objective='val_loss',
@@ -533,28 +539,39 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         "real_prices": y_test_real
     }
 
+# -----------------------------------------------------------------------------
+# Función principal del dashboard
+# -----------------------------------------------------------------------------
 def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
     **Descripción del Dashboard:**  
     Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento (noticias y Fear & Greed) para predecir el precio futuro de criptomonedas.  
     **Componentes del Modelo:**  
-      - **Indicadores Técnicos:** Se calculan RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return, vol_30d y se utiliza el sentimiento. (Se han descartado ADX e Ichimoku por considerarse redundantes).  
-      - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección de features (con ElasticNetCV refinado con XGBoost) y escalado, usando solo los datos del último año para entrenamiento sin afectar la visualización completa.  
+      - **Indicadores Técnicos:** Se calculan RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return, vol_30d y se utiliza el sentimiento. (Se han descartado indicadores redundantes).  
+      - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección automática de features (con ElasticNetCV refinado con XGBoost) y escalado, usando solo los datos del último año para entrenamiento sin afectar la visualización completa.  
       - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias y el índice Fear & Greed para ajustar las predicciones.  
       - **Modelos de Predicción:** Se emplea un ensamble de:
-          - **LSTM:** Hiperparámetros optimizados con Keras Tuner (Hyperband + Random Search).  
-          - **XGBoost:** Para predicción iterativa a corto plazo.  
-          - **Prophet:** Para predicciones a mediano/largo plazo, anclando el primer valor al precio actual.  
+          - **LSTM:** Hiperparámetros optimizados con Keras Tuner (Hyperband con búsqueda acotada) en 15 épocas.
+          - **XGBoost:** Para predicción iterativa a corto plazo.
+          - **Prophet:** Para predicciones a mediano/largo plazo, anclando el primer valor al precio actual.
     **NFA:** Not Financial Advice.
     """)
     st.sidebar.title("Configuración de Predicción")
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
     
-    # Slider para definir el período de entrenamiento (entre 1 y 2 años, por defecto 1)
-    training_period = st.sidebar.slider("Periodo de entrenamiento (años):", 1.0, 2.0, 1.0, step=0.1)
-
+    # Selector de período de entrenamiento (años enteros: 1, 2 o 3)
+    training_period = st.sidebar.select_slider(
+        "Periodo de entrenamiento (años):",
+        options=[1, 2, 3],
+        value=1,
+        help="A mayor período, mayor tiempo tardará en entrenar el modelo."
+    )
+    
+    # Slider para días a predecir con aviso
+    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5, help="Más días a predecir implican mayor tiempo de procesamiento.")
+    
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
     default_end = datetime.utcnow()
     default_start = default_end - timedelta(days=7)
@@ -578,9 +595,6 @@ def main_app():
         start_date = None
         end_date_with_offset = None
 
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5)
-    show_stats = st.sidebar.checkbox("Mostrar estadísticas descriptivas", value=False)
-
     df_prices = load_crypto_data(coin_id, start_date, end_date_with_offset)
     if df_prices is not None and not df_prices.empty:
         fig_hist = px.line(
@@ -593,9 +607,6 @@ def main_app():
         fig_hist.update_layout(template="plotly_dark")
         fig_hist.update_xaxes(tickformat="%Y-%m-%d")
         st.plotly_chart(fig_hist, use_container_width=True)
-        if show_stats:
-            st.subheader("Estadísticas Descriptivas")
-            st.write(df_prices["close_price"].describe())
     else:
         st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
 
@@ -644,7 +655,7 @@ def main_app():
                 yaxis_title="Precio (USD)"
             )
             st.plotly_chart(fig_future, use_container_width=True)
-            st.subheader("Resultados Numéricos (Corto Plazo)")
+            st.header("Resultados Numéricos (Corto Plazo)")
             df_future = pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series})
             st.dataframe(df_future.style.format({"Predicción": "{:.2f}"}))
             st.download_button(
@@ -689,7 +700,7 @@ def main_app():
                     yaxis_title="Precio (USD)"
                 )
                 st.plotly_chart(fig_long, use_container_width=True)
-                st.subheader("Valores Numéricos (Horizonte 180 días)")
+                st.header("Valores Numéricos (Horizonte 180 días)")
                 styled_forecast = forecast_long_part.copy()
                 styled_forecast.columns = ["Fecha", "Predicción (USD)"]
                 st.dataframe(styled_forecast.style.format({"Predicción (USD)": "{:.2f}"}))
@@ -819,7 +830,7 @@ def main_app():
                 )
             st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.warning("Se ha superado el límite de peticiones. Vuelve en 12 horas para ver más noticias.")
+            st.warning("Se ha excedido el límite de peticiones. Vuelve en 12 horas para ver más noticias.")
 
 if __name__ == "__main__":
     main_app()
