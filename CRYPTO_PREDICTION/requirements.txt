@@ -14,4 +14,4 @@ newsapi-python
 ta
 transformers
 xgboost
-keras-turner
+keras-tuner
