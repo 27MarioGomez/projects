@@ -33,7 +33,12 @@ from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator
 from transformers.pipelines import pipeline
 from xgboost import XGBRegressor
-import keras_tuner as kt
+
+# Se intenta importar keras_tuner; si falla, se intenta con kerastuner
+try:
+    import keras_tuner as kt
+except ModuleNotFoundError:
+    import kerastuner as kt
 
 # -----------------------------------------------------------------------------
 # Configuración inicial de la página y de la sesión HTTP
@@ -490,8 +495,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 
     # Ensamble final
     final_future_preds = ensemble_prediction(lstm_future_preds, xgb_future_preds, prophet_future_preds, 0.6, 0.2, 0.2)
-    # Forzar que el primer valor de la predicción (corto plazo) sea igual al precio actual para coherencia
-    final_future_preds[0] = current_price
+    final_future_preds[0] = current_price  # Forzar que el primer valor sea igual al precio actual
 
     # Ajuste final según sentimiento
     _, _, gauge_val = get_crypto_sentiment_combined(coin_id)
@@ -642,7 +646,6 @@ def main_app():
             result = st.session_state["result"]
             if result:
                 st.header(f"Predicción a medio/largo plazo - {result['symbol']}")
-                # Para medio/largo plazo se utiliza Prophet, que ya fuerza que el primer valor sea el precio actual.
                 current_price = result["df"]["close_price"].iloc[-1]
                 _, forecast_long = medium_long_term_prediction(result["df"], days=180, current_price=current_price)
                 forecast_long["ds"] = pd.to_datetime(forecast_long["ds"]).dt.date
