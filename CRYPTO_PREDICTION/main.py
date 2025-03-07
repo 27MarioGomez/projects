@@ -72,7 +72,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # -----------------------------------------------------------------------------
-# Transformador para conservar DataFrame (para que SimpleImputer retorne DataFrame)
+# Transformador para conservar DataFrame en imputación
 # -----------------------------------------------------------------------------
 class DataFrameTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, transformer):
@@ -87,7 +87,7 @@ class DataFrameTransformer(BaseEstimator, TransformerMixin):
         return X_trans
 
 # -----------------------------------------------------------------------------
-# Transformador personalizado para selección de features
+# Transformador para selección de features
 # -----------------------------------------------------------------------------
 class FeatureSelector(BaseEstimator, TransformerMixin):
     """
@@ -127,8 +127,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
-    # Se especifica explícitamente el modelo y su revisión para producción
-    return pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english", revision="714eb0f")
+    return pipeline("sentiment-analysis", model="distilbert/distilbert-base-uncased-finetuned-sst-2-english", revision="714eb0f")
 
 def get_advanced_sentiment(text):
     pipe = load_sentiment_pipeline()
@@ -344,7 +343,7 @@ def medium_long_term_prediction(df, days=180, current_price=None):
     return model, forecast
 
 # -----------------------------------------------------------------------------
-# Función para cargar datos históricos (solo de la criptomoneda seleccionada)
+# Función para cargar datos históricos (solo para la criptomoneda seleccionada)
 # -----------------------------------------------------------------------------
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     ticker_ids = {
@@ -397,7 +396,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         st.error("No se pudo cargar el histórico.")
         return None
 
-    # Filtrar datos para entrenamiento: usar solo los últimos 'training_period_years' (por ejemplo, 1 año)
+    # Usar solo los datos del último año (o el valor seleccionado)
     last_date = full_df["ds"].max()
     period_start = last_date - pd.DateOffset(years=training_period_years)
     df_pred = full_df[full_df["ds"] >= period_start].copy()
@@ -437,14 +436,20 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     X_val, y_val = X_train[val_split:], y_train[val_split:]
     X_train, y_train = X_train[:val_split], y_train[:val_split]
 
-    # Ajuste en el modelo: reducir número de épocas y acotar el espacio de búsqueda
-    epochs = 15
+    # Reducir épocas a 8 para acelerar y usar early stopping a través del tuner
+    epochs = 8
     batch_size = 32
     input_shape = (window_size, len(selected_features))
     
-    # Eliminar directorio de checkpoints para evitar incompatibilidades
+    # Limpiar directorio de checkpoints para evitar incompatibilidades
     if os.path.exists('kt_dir'):
         shutil.rmtree('kt_dir')
+    
+    # Se añaden callbacks para detener temprano si la validación no mejora
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True),
+        tf.keras.callbacks.ReduceLROnPlateau(patience=2, factor=0.5, min_lr=1e-6)
+    ]
     
     tuner = kt.Hyperband(
         build_lstm_model_tuner(input_shape),
@@ -454,7 +459,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         directory='kt_dir',
         project_name=f'{coin_id}_crypto_lstm'
     )
-    tuner.search(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, verbose=0)
+    tuner.search(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
     lstm_model = tuner.get_best_models(num_models=1)[0]
 
     progress_text.text("Realizando predicción en datos de test (LSTM)...")
@@ -553,7 +558,7 @@ def main_app():
       - **Optimización de Features:** Se utiliza un pipeline que aplica imputación (mediana), selección automática de features (con ElasticNetCV refinado con XGBoost) y escalado, usando solo los datos del último año para entrenamiento sin afectar la visualización completa.  
       - **Análisis de Sentimiento:** Se combina el sentimiento derivado de noticias y el índice Fear & Greed para ajustar las predicciones.  
       - **Modelos de Predicción:** Se emplea un ensamble de:
-          - **LSTM:** Hiperparámetros optimizados con Keras Tuner (Hyperband con búsqueda acotada) en 15 épocas.
+          - **LSTM:** Hiperparámetros optimizados con Keras Tuner (Hyperband con búsqueda acotada) en 8 épocas.
           - **XGBoost:** Para predicción iterativa a corto plazo.
           - **Prophet:** Para predicciones a mediano/largo plazo, anclando el primer valor al precio actual.
     **NFA:** Not Financial Advice.
@@ -562,7 +567,7 @@ def main_app():
     crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
     
-    # Selector de período de entrenamiento: 1, 2 o 3 años, con aviso
+    # Selector de período de entrenamiento (años): 1, 2 o 3
     training_period = st.sidebar.select_slider(
         "Periodo de entrenamiento (años):",
         options=[1, 2, 3],
@@ -570,7 +575,7 @@ def main_app():
         help="A mayor período, mayor tiempo tardará en entrenar el modelo."
     )
     
-    # Slider para días a predecir con aviso
+    # Slider para días a predecir con ayuda
     horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5, help="Más días a predecir implican mayor tiempo de procesamiento.")
     
     use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
