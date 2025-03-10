@@ -1,30 +1,26 @@
 # main.py
 """
-Trafiquea: Plataforma Integral para Transporte, Rutas y Demanda
+Trafiquea: Plataforma Integral para Transporte y Rutas en Tiempo Real
 
-Este dashboard está diseñado para:
-    - Optimizar rutas en tiempo real con mapas interactivos, clima y simulación de congestión.
-    - Predecir la demanda de transporte mediante un enfoque híbrido (Prophet + LightGBM).
-    - Simular escenarios ante variaciones de condiciones (clima, tráfico, demanda).
-    - Mostrar métricas operativas y sostenibilidad con indicadores ambientales.
-    - Ofrecer un módulo de integración para plataformas logísticas (ej. Zmove, SAVI) que mejore el matcheo, tiempos y costes.
+Esta aplicación interactiva permite:
+    - Optimizar rutas en tiempo real con mapas interactivos y datos del clima.
+    - Mostrar información de tráfico en tiempo real en la zona del usuario, con detalles por calle.
+    - Proyectar tiempos de viaje futuros (por horas) mostrando saturación y variación de tiempos.
+    - Ofrecer una opción de integración vía API para que usuarios interesados puedan dejar sus datos de contacto.
 
-La solución se basa en técnicas disruptivas, con inspiración en proyectos líderes del sector, y utiliza APIs públicas y modelos open source sin inversión adicional.
+Las funcionalidades están diseñadas para aportar valor en el día a día del transporte, sin mencionar empresas específicas.
 """
 
 # =============================================================================
 # Importación de librerías necesarias
 # =============================================================================
 from datetime import datetime, timedelta
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
-
-# Modelos de predicción y boosting
 from prophet import Prophet
 import lightgbm as lgb
 
@@ -32,7 +28,7 @@ import lightgbm as lgb
 # Configuración de la página
 # =============================================================================
 st.set_page_config(
-    page_title="Trafiquea: Transporte y Demanda en Tiempo Real",
+    page_title="Trafiquea: Transporte y Rutas en Tiempo Real",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -87,8 +83,7 @@ def get_weather_open_meteo(lat: float, lon: float):
 @st.cache_data(ttl=3600)
 def get_transit_demand_data():
     """
-    Carga datos históricos de demanda de transporte desde una URL pública.
-    Para este ejemplo se utiliza un CSV de muestra alojado en GitHub.
+    Carga datos históricos de demanda (simulados) desde un CSV de muestra.
     Se espera que el CSV contenga columnas 'Fecha' y 'Demanda'.
     """
     url = "https://raw.githubusercontent.com/plotly/datasets/master/2014_apple_stock.csv"
@@ -103,106 +98,78 @@ def get_transit_demand_data():
         return pd.DataFrame()
 
 # =============================================================================
-# Funciones para Predicción de Demanda (Prophet + LightGBM)
+# Funciones para Simulación de Tráfico y Pronóstico de Tiempos de Viaje
 # =============================================================================
 
-@st.cache_data(ttl=3600)
-def forecast_demand_prophet(df: pd.DataFrame, forecast_days: int):
+def simulate_traffic_by_street(location_coords):
     """
-    Entrena un modelo Prophet con datos históricos y pronostica la demanda para 'forecast_days' días.
+    Simula datos de congestión por calle alrededor de la ubicación del usuario.
+    Retorna un DataFrame con calles, nivel de congestión y tiempo estimado de viaje (min).
     """
-    df_prophet = df.copy().rename(columns={"Fecha": "ds", "Demanda": "y"})
-    model = Prophet(daily_seasonality=True, yearly_seasonality=True, weekly_seasonality=True)
-    model.fit(df_prophet)
-    future = model.make_future_dataframe(periods=forecast_days)
-    forecast = model.predict(future)
-    forecast_future = forecast.tail(forecast_days)[["ds", "yhat"]]
-    forecast_future.rename(columns={"ds": "Fecha", "yhat": "Predicción_Prophet"}, inplace=True)
-    return forecast_future
-
-def create_time_features(df: pd.DataFrame):
-    """
-    Crea features temporales a partir de la columna 'Fecha' para usar en LightGBM.
-    """
-    df_feat = df.copy()
-    df_feat["dia_semana"] = df_feat["Fecha"].dt.dayofweek
-    df_feat["mes"] = df_feat["Fecha"].dt.month
-    df_feat["dia_mes"] = df_feat["Fecha"].dt.day
-    df_feat["semana_del_año"] = df_feat["Fecha"].dt.isocalendar().week.astype(int)
-    return df_feat
-
-@st.cache_data(ttl=3600)
-def forecast_demand_lightgbm(df: pd.DataFrame, forecast_days: int):
-    """
-    Entrena un modelo LightGBM con features temporales y pronostica la demanda para 'forecast_days' días.
-    """
-    df_lgb = df.copy()
-    df_lgb = create_time_features(df_lgb)
-    features = ["dia_semana", "mes", "dia_mes", "semana_del_año"]
-    X = df_lgb[features]
-    y = df_lgb["Demanda"]
-    lgb_train = lgb.Dataset(X, label=y)
-    params = {"objective": "regression", "metric": "rmse", "verbose": -1, "seed": 42}
-    model = lgb.train(params, lgb_train, num_boost_round=50)
-    last_date = df_lgb["Fecha"].max()
-    future_dates = [last_date + timedelta(days=i) for i in range(1, forecast_days + 1)]
-    df_future = pd.DataFrame({"Fecha": future_dates})
-    df_future = create_time_features(df_future)
-    X_future = df_future[features]
-    preds = model.predict(X_future)
-    df_future["Predicción_LGBM"] = preds
-    return df_future[["Fecha", "Predicción_LGBM"]]
-
-def ensemble_forecast_demand(df: pd.DataFrame, forecast_days: int):
-    """
-    Combina las predicciones de Prophet y LightGBM mediante promedio simple para obtener una estimación robusta.
-    """
-    forecast_prophet = forecast_demand_prophet(df, forecast_days)
-    forecast_lgbm = forecast_demand_lightgbm(df, forecast_days)
-    forecast_ensemble = pd.merge(forecast_prophet, forecast_lgbm, on="Fecha", how="inner")
-    forecast_ensemble["Demanda Predicha"] = (forecast_ensemble["Predicción_Prophet"] + forecast_ensemble["Predicción_LGBM"]) / 2
-    return forecast_ensemble[["Fecha", "Demanda Predicha"]]
-
-# =============================================================================
-# Funciones Adicionales: Congestión y Simulación de Escenarios
-# =============================================================================
-
-def simulate_traffic_data():
-    """
-    Simula datos de congestión de tráfico en tiempo real.
-    Retorna un diccionario con un índice de congestión y tiempo de viaje estimado.
-    """
-    # Simulación: valores aleatorios en rangos realistas
-    congestion_index = np.random.choice(["Bajo", "Moderado", "Alto", "Muy Alto"])
-    travel_time = np.random.randint(10, 30)  # en minutos
-    return {"congestion": congestion_index, "travel_time": travel_time}
-
-def simulate_scenario_changes():
-    """
-    Simula cambios en el escenario: variaciones en el clima y tráfico que afectan la ruta.
-    Retorna un DataFrame comparativo con datos simulados de rutas convencionales vs. óptimas.
-    """
+    calles = ["Calle A", "Calle B", "Calle C", "Calle D", "Calle E"]
+    congestiones = np.random.choice(["Bajo", "Moderado", "Alto", "Muy Alto"], size=5)
+    tiempos = np.random.randint(5, 20, size=5)
     df = pd.DataFrame({
-        "Escenario": ["Convencional", "Óptimo"],
-        "Tiempo de Viaje (min)": [np.random.randint(15, 25), np.random.randint(10, 15)],
-        "Emisiones (kg CO₂/día)": [np.random.randint(20, 30), np.random.randint(10, 20)]
+        "Calle": calles,
+        "Congestión": congestiones,
+        "Tiempo Estimado (min)": tiempos
     })
     return df
+
+def simulate_traffic_forecast(hour_offset):
+    """
+    Simula el pronóstico de tráfico para 'hour_offset' horas en el futuro.
+    Retorna un diccionario con:
+        - saturacion: nivel de congestión.
+        - tiempo_normal: tiempo de viaje normal (min).
+        - tiempo_proyectado: tiempo de viaje ajustado por tráfico (min).
+    """
+    # Simulamos que a mayor hora_offset aumenta la congestión
+    if hour_offset <= 2:
+        saturacion = "Bajo"
+        factor = 1.0
+    elif hour_offset <= 4:
+        saturacion = "Moderado"
+        factor = 1.2
+    else:
+        saturacion = "Alto"
+        factor = 1.5
+    tiempo_normal = np.random.randint(10, 15)
+    tiempo_proyectado = round(tiempo_normal * factor)
+    return {"saturacion": saturacion, "tiempo_normal": tiempo_normal, "tiempo_proyectado": tiempo_proyectado}
+
+# =============================================================================
+# Funciones para Predicción de Tiempos de Viaje (Opcional)
+# =============================================================================
+# Se podría ampliar con datos históricos y modelos, pero en este prototipo se simulan resultados.
+
+# =============================================================================
+# Función para mostrar un formulario de integración vía API
+# =============================================================================
+def show_integration_form():
+    st.subheader("Solicita Integración vía API")
+    with st.form("form_integration"):
+        nombre = st.text_input("Nombre")
+        apellidos = st.text_input("Apellidos")
+        institucion = st.text_input("Institución o Empresa")
+        mensaje = st.text_area("Mensaje (opcional)")
+        submitted = st.form_submit_button("Enviar")
+        if submitted:
+            # En un entorno real se enviaría un email o se registraría la solicitud
+            st.success("Gracias por tu interés. Se enviará la información a nocodelover@gmail.com.")
 
 # =============================================================================
 # Diseño y Lógica Principal del Dashboard
 # =============================================================================
-
 def main_app():
-    st.title("Trafiquea: Plataforma Integral para Transporte y Demanda")
+    st.title("Trafiquea: Transporte y Rutas en Tiempo Real")
     st.markdown("""
     **Descripción del Proyecto:**  
-    Plataforma disruptiva que optimiza rutas y predice la demanda de transporte a nivel global.  
-    Dirigida a usuarios finales y plataformas logísticas (ej. Zmove, SAVI),  
-    la solución ofrece mapas interactivos, simulación de escenarios, análisis de métricas operativas y sostenibilidad.
+    Plataforma integral que ofrece optimización de rutas, visualización de tráfico en tiempo real y pronósticos de tiempos de viaje para ayudar a planificar mejor los desplazamientos.  
+    La aplicación permite al usuario configurar sus necesidades y ver información detallada (por calles, horarios, etc.), además de ofrecer una opción para integración vía API.
     """)
     
-    # --- Pestaña: Optimización de Rutas y Mapas Interactivos ---
+    # --- Tab: Optimización de Rutas ---
     st.sidebar.title("Configuración")
     st.sidebar.subheader("Optimización de Rutas")
     origin = st.sidebar.text_input("Dirección de Origen", "Plaza Mayor, Madrid")
@@ -215,7 +182,7 @@ def main_app():
             weather = get_weather_open_meteo(origin_coords[0], origin_coords[1])
             st.success("Ruta y datos actualizados.")
             st.write(f"**Clima en Origen:** {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
-            # Mapa interactivo: muestra ruta, origen y destino
+            # Mapa interactivo: ruta, origen y destino
             fig_map = go.Figure()
             if route_geo:
                 coords = route_geo["coordinates"]
@@ -254,98 +221,60 @@ def main_app():
         else:
             st.error("No se pudieron geolocalizar las direcciones.")
     
-    # --- Pestaña: Predicción de Demanda ---
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Predicción de Demanda")
-    forecast_days = st.sidebar.slider("Días a predecir:", min_value=1, max_value=30, value=5,
-                                        help="Número de días futuros a predecir.")
-    df_demand = get_transit_demand_data()
-    if df_demand.empty:
-        st.error("No se encontraron datos reales de demanda.")
-    else:
-        st.subheader("Datos Históricos de Demanda")
-        st.line_chart(df_demand.set_index("Fecha")["Demanda"])
+    # --- Tabs del Dashboard ---
+    tabs = st.tabs(["Tráfico en Tiempo Real", "Pronóstico de Tiempos de Viaje", "API Integración"])
     
-    tabs = st.tabs(["Predicción de Demanda", "Métricas Operativas", "Sostenibilidad", "Simulación de Escenarios", "Integración Logística"])
-    
-    # --- Pestaña 1: Predicción de Demanda (Ensemble Prophet + LightGBM) ---
+    # --- Tab: Tráfico en Tiempo Real ---
     with tabs[0]:
-        st.header("Pronóstico de Demanda de Transporte")
-        if not df_demand.empty:
-            forecast_ensemble = ensemble_forecast_demand(df_demand, forecast_days)
-            if not forecast_ensemble.empty:
-                st.subheader("Pronóstico Híbrido (Prophet + LightGBM)")
-                fig_pred = px.line(forecast_ensemble, x="Fecha", y="Demanda Predicha", title="Demanda Futura Estimada")
-                st.plotly_chart(fig_pred, use_container_width=True)
-                st.download_button(
-                    label="Descargar Pronóstico (CSV)",
-                    data=forecast_ensemble.to_csv(index=False).encode("utf-8"),
-                    file_name="pronostico_demanda.csv",
-                    mime="text/csv"
+        st.header("Tráfico en Tiempo Real")
+        st.markdown("Ingresa tu dirección actual para ver tu ubicación y la congestión en calles cercanas.")
+        current_address = st.text_input("Dirección Actual", "Gran Vía, Madrid", key="current")
+        if st.button("Mostrar Mi Ubicación", key="btn_location"):
+            user_coords = geocode_address(current_address)
+            if user_coords:
+                st.success("Ubicación obtenida.")
+                weather = get_weather_open_meteo(user_coords[0], user_coords[1])
+                st.write(f"**Clima en tu Ubicación:** {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
+                fig_user = go.Figure(go.Scattermapbox(
+                    mode="markers",
+                    lon=[user_coords[1]],
+                    lat=[user_coords[0]],
+                    marker={"size": 14, "color": "blue"},
+                    name="Tu Ubicación"
+                ))
+                fig_user.update_layout(
+                    mapbox_style="open-street-map",
+                    mapbox_zoom=14,
+                    mapbox_center={"lat": user_coords[0], "lon": user_coords[1]},
+                    margin={"r":0,"t":0,"l":0,"b":0}
                 )
+                st.plotly_chart(fig_user, use_container_width=True)
+                # Mostrar congestión simulada por calles
+                df_traffic = simulate_traffic_by_street(user_coords)
+                st.subheader("Congestión por Calles Cercanas")
+                st.table(df_traffic)
+            else:
+                st.error("No se pudo obtener tu ubicación. Verifica la dirección.")
     
-    # --- Pestaña 2: Métricas Operativas en Tiempo Real ---
+    # --- Tab: Pronóstico de Tiempos de Viaje ---
     with tabs[1]:
-        st.header("Métricas Operativas en Tiempo Real")
-        weather = get_weather_open_meteo(40.4168, -3.7038)  # Coordenadas de Madrid
-        traffic = simulate_traffic_data()
-        st.metric("Temperatura (°C)", f"{weather['temperature']}°C")
-        st.metric("Viento (km/h)", f"{weather['windspeed']} km/h")
-        st.metric("Nivel de Congestión", traffic["congestion"])
-        st.metric("Tiempo Estimado de Viaje", f"{traffic['travel_time']} min")
-        st.metric("Ahorro en Combustible", "3.5 litros/km")
+        st.header("Pronóstico de Tiempos de Viaje")
+        st.markdown("Selecciona cuántas horas en el futuro deseas conocer la situación del tráfico.")
+        hour_offset = st.slider("Horas en el Futuro:", min_value=1, max_value=6, value=2)
+        forecast = simulate_traffic_forecast(hour_offset)
+        st.subheader(f"Pronóstico para dentro de {hour_offset} hora(s):")
+        st.write(f"**Nivel de Saturación:** {forecast['saturacion']}")
+        st.write(f"**Tiempo de Viaje Normal:** {forecast['tiempo_normal']} min")
+        st.write(f"**Tiempo de Viaje Estimado:** {forecast['tiempo_proyectado']} min")
     
-    # --- Pestaña 3: Sostenibilidad e Impacto Ambiental ---
+    # --- Tab: API Integración ---
     with tabs[2]:
-        st.header("Sostenibilidad e Impacto Ambiental")
+        st.header("API Integración")
         st.markdown("""
-        **Indicadores de Sostenibilidad:**
-        - Emisiones de CO₂ Reducidas: 15 kg CO₂/día (estimado).
-        - Incentivos para el Uso de Transporte Ecológico.
-        - Análisis Comparativo entre Rutas Convencionales y Óptimas.
+        Si deseas integrar esta solución en tu sistema mediante una API, por favor rellena el siguiente formulario.
+        Se enviará la información a nuestro equipo para que te contactemos (correo: nocodelover@gmail.com).
         """)
-        df_emisiones = pd.DataFrame({
-            "Tipo de Ruta": ["Convencional", "Óptima"],
-            "Emisiones (kg CO₂/día)": [25, 15]
-        })
-        fig_emisiones = px.bar(df_emisiones, x="Tipo de Ruta", y="Emisiones (kg CO₂/día)",
-                               title="Comparativa de Emisiones")
-        st.plotly_chart(fig_emisiones, use_container_width=True)
-    
-    # --- Pestaña 4: Simulación de Escenarios ---
-    with tabs[3]:
-        st.header("Simulación de Escenarios y Optimización de Rutas")
-        st.markdown("""
-        Simula cambios en las condiciones de tráfico y clima para visualizar su impacto en:
-        - Tiempo de viaje.
-        - Emisiones de CO₂.
-        - Optimización de rutas.
-        """)
-        df_scenarios = simulate_scenario_changes()
-        fig_scenarios = px.bar(df_scenarios, x="Escenario", y=["Tiempo de Viaje (min)", "Emisiones (kg CO₂/día)"],
-                               barmode="group", title="Simulación de Escenarios")
-        st.plotly_chart(fig_scenarios, use_container_width=True)
-    
-    # --- Pestaña 5: Integración para Logística (Zmove / SAVI) ---
-    with tabs[4]:
-        st.header("Integración para Plataformas Logísticas")
-        st.markdown("""
-        **Zmove y Transportes SAVI** pueden aprovechar este sistema para:
-        - Obtener rutas optimizadas en tiempo real.
-        - Pronosticar la demanda y ajustar la oferta de transporte.
-        - Visualizar métricas operativas y ambientales para la toma de decisiones.
-        - Reducir tiempos y costes operativos mediante un matcheo eficiente.
-        """)
-        integration_data = {
-            "Ruta Óptima": "12 min, 8 km",
-            "Demanda Actual": 120,
-            "Demanda Pronosticada": 135,
-            "Ahorro en Combustible": "3.5 litros/km",
-            "Reducción de Emisiones": "15 kg CO₂/día"
-        }
-        for key, value in integration_data.items():
-            st.write(f"**{key}:** {value}")
-        st.info("Este módulo se integra mediante APIs REST a sistemas logísticos, facilitando una operación fluida y eficiente.")
+        show_integration_form()
 
 # =============================================================================
 # Ejecución de la aplicación
