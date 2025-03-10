@@ -13,26 +13,31 @@ import joblib
 # =============================================================================
 
 def geocode_address(address: str):
-    geolocator = Nominatim(user_agent="trafiquea_dashboard")
+    geolocator = Nominatim(user_agent=st.secrets.get("nominatim", {}).get("user_agent", "trafiquea_dashboard"))
     location = geolocator.geocode(address)
     if location:
         return (location.latitude, location.longitude), location.address
     return None, None
 
 def reverse_geocode(lat: float, lon: float):
-    geolocator = Nominatim(user_agent="trafiquea_reverse")
+    geolocator = Nominatim(user_agent=st.secrets.get("nominatim", {}).get("user_agent", "trafiquea_dashboard"))
     location = geolocator.reverse((lat, lon), language="es")
     if location:
         return location.address
     return "Dirección no encontrada"
 
 # =============================================================================
-# Integración de APIs Reales: Clima y Rutas
+# Integración de APIs Reales: Open-Meteo, OSRM y Datos Abiertos
 # =============================================================================
 
 def get_weather_open_meteo(lat: float, lon: float):
     url = "https://api.open-meteo.com/v1/forecast"
-    params = {"latitude": lat, "longitude": lon, "current_weather": True, "timezone": "auto"}
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "current_weather": True,
+        "timezone": "auto"
+    }
     response = requests.get(url, params=params)
     if response.status_code == 200:
         data = response.json()
@@ -59,25 +64,32 @@ def get_route_osrm(origin_coords, destination_coords):
     return None
 
 def get_real_traffic_data(ayuntamiento: str):
+    # En producción, aquí se haría una consulta real a la API de datos abiertos del ayuntamiento.
+    # Ejemplo: st.secrets.datos_abiertos.api_url
+    return {
+        "congestion": np.random.choice(["Bajo", "Moderado", "Alto"]),
+        "emisiones_co2": np.random.uniform(100, 300)  # kg CO₂/día
+    }
+
+@st.cache_data(ttl=3600)
+def get_miteco_packages():
     """
-    Función de ejemplo para obtener datos reales de tráfico y sostenibilidad 
-    para un ayuntamiento. En producción se integraría una API pública de datos 
-    abiertos (por ejemplo, del portal de Castilla-La Mancha).
+    Llama al endpoint package_list de la API de datos abiertos del MITECO.
+    Se cachea durante 1 hora para evitar exceder las peticiones.
     """
-    # Ejemplo: URL real de la API de datos abiertos (a reemplazar)
-    # url = f"https://datos.castillalamancha.es/api/trafico?municipio={ayuntamiento}"
-    # response = requests.get(url)
-    # data = response.json()
-    # return data
-    return {"congestion": np.random.choice(["Bajo", "Moderado", "Alto"]),
-            "emisiones_co2": np.random.uniform(100, 300)}  # kg CO₂/día
+    base_url = st.secrets.get("miteco", {}).get("api_url", "https://datosabiertos.miteco.gob.es/ptb/api/3/action")
+    endpoint = "package_list"
+    url = f"{base_url}/{endpoint}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.json()
+    return None
 
 # =============================================================================
-# Simulación de Tráfico y Tiempos de Viaje
+# Simulación de Tráfico y Modelos de ML/DL
 # =============================================================================
 
 def simulate_zone_factor(full_address: str):
-    # Ajuste de factor de congestión según la zona; se puede ampliar con datos reales
     address_lower = full_address.lower()
     if "talavera" in address_lower:
         return 1.3
@@ -143,14 +155,11 @@ def simulate_traffic_forecast(hour_offset):
     tiempo_proyectado = round(tiempo_normal * factor)
     return {"saturacion": saturacion, "tiempo_normal": tiempo_normal, "tiempo_proyectado": tiempo_proyectado}
 
-# =============================================================================
-# Integración de Modelos de Machine Learning
-# =============================================================================
-
 @st.cache_resource
 def load_demand_model():
     try:
-        model = joblib.load("model_demand.pkl")
+        model_path = st.secrets.get("model", {}).get("model_path", "model_demand.pkl")
+        model = joblib.load(model_path)
         return model
     except Exception:
         return None
@@ -158,12 +167,11 @@ def load_demand_model():
 def predict_demand(input_features):
     model = load_demand_model()
     if model:
-        prediction = model.predict(np.array([input_features]))
-        return prediction[0]
+        return model.predict(np.array([input_features]))[0]
     return None
 
 # =============================================================================
-# Análisis de Datos Históricos (Últimos 6 meses)
+# Análisis de Datos Históricos (6 meses)
 # =============================================================================
 
 def analyze_historical_data():
@@ -179,12 +187,26 @@ def analyze_historical_data():
     st.write(f"- Promedio de viajes/día: {avg_val:.2f}")
 
 # =============================================================================
-# Calculadora de CAE para Empresas
+# Calculadora de CAE (para Empresas)
 # =============================================================================
 
 def calculate_cae(volume_kg: float):
-    factor_cae = 0.001  # 1 CAE por cada 1000 kg de CO₂ evitados
+    factor_cae = 0.001
     return volume_kg * factor_cae
+
+# =============================================================================
+# Formulario de Integración vía API
+# =============================================================================
+
+def show_integration_form():
+    with st.form("integration_form_final", clear_on_submit=True):
+        nombre = st.text_input("Nombre", key="api_nombre")
+        apellidos = st.text_input("Apellidos", key="api_apellidos")
+        institucion = st.text_input("Institución o Empresa", key="api_institucion")
+        mensaje = st.text_area("Mensaje (opcional)", key="api_mensaje")
+        submitted = st.form_submit_button("Enviar Solicitud")
+        if submitted:
+            st.success("Solicitud enviada. Nos pondremos en contacto contigo.")
 
 # =============================================================================
 # Componentes Comunes: Mapas y Funcionalidades
@@ -194,11 +216,11 @@ def show_map_and_traffic():
     with st.form("traffic_form_final", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
         with col1:
-            origin = st.text_input("Origen", "Plaza Mayor, Madrid, España")
+            origin = st.text_input("Origen", "Plaza Mayor, Madrid, España", key="traffic_origin")
         with col2:
-            destination = st.text_input("Destino", "Puerta del Sol, Madrid, España")
+            destination = st.text_input("Destino", "Puerta del Sol, Madrid, España", key="traffic_destination")
         with col3:
-            start_time = st.time_input("Hora de Inicio", datetime.now().time())
+            start_time = st.time_input("Hora de Inicio", datetime.now().time(), key="traffic_time")
         submitted = st.form_submit_button("Calcular Ruta")
     
     if submitted:
@@ -216,11 +238,12 @@ def show_map_and_traffic():
             st.error("No se pudo obtener la ruta con OSRM.")
             return
         segments, arrival_time = simulate_route_segments(route_data["steps"], start_dt, weather, zone_factor)
-        m_map = folium.Map(location=[(origin_coords[0] + dest_coords[0]) / 2,
-                                     (origin_coords[1] + dest_coords[1]) / 2],
+        m_map = folium.Map(location=[(origin_coords[0]+dest_coords[0])/2,
+                                     (origin_coords[1]+dest_coords[1])/2],
                            zoom_start=12, tiles="OpenStreetMap")
         for seg in segments:
-            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]], color=seg["color"], weight=4).add_to(m_map)
+            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]],
+                            color=seg["color"], weight=4).add_to(m_map)
         folium.Marker(origin_coords, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_map)
         folium.Marker(dest_coords, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_map)
         st_folium(m_map, width=700)
@@ -232,15 +255,15 @@ def show_map_and_traffic():
             st.write(f"Clima: {weather['temperatura']}°C, Viento: {weather['viento']} km/h")
 
 def show_forecast():
-    st.write("Seleccione el número de horas en el futuro:")
+    st.write("Seleccione cuántas horas en el futuro desea conocer la situación del tráfico:")
     hours = list(range(1,25))
-    selected_hour = st.selectbox("Horas en el futuro:", hours)
+    selected_hour = st.selectbox("Horas en el futuro:", hours, key="forecast_hours")
     col1, col2 = st.columns(2)
     with col1:
-        origin = st.text_input("Origen (Pronóstico)", "Plaza Mayor, Madrid, España")
+        origin = st.text_input("Origen (Pronóstico)", "Plaza Mayor, Madrid, España", key="forecast_origin")
     with col2:
-        destination = st.text_input("Destino (Pronóstico)", "Puerta del Sol, Madrid, España")
-    if st.button("Mostrar Pronóstico"):
+        destination = st.text_input("Destino (Pronóstico)", "Puerta del Sol, Madrid, España", key="forecast_destination")
+    if st.button("Mostrar Pronóstico", key="btn_forecast"):
         origin_coords, origin_full = geocode_address(origin)
         dest_coords, dest_full = geocode_address(destination)
         if not (origin_coords and dest_coords):
@@ -254,11 +277,12 @@ def show_forecast():
             st.error("No se pudo obtener la ruta.")
             return
         segments, arrival_time = simulate_route_segments(route_data["steps"], future_dt, weather, zone_factor)
-        m_fore = folium.Map(location=[(origin_coords[0] + dest_coords[0]) / 2,
-                                      (origin_coords[1] + dest_coords[1]) / 2],
+        m_fore = folium.Map(location=[(origin_coords[0]+dest_coords[0])/2,
+                                      (origin_coords[1]+dest_coords[1])/2],
                              zoom_start=12, tiles="OpenStreetMap")
         for seg in segments:
-            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]], color=seg["color"], weight=4).add_to(m_fore)
+            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]],
+                            color=seg["color"], weight=4).add_to(m_fore)
         folium.Marker(origin_coords, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_fore)
         folium.Marker(dest_coords, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_fore)
         st_folium(m_fore, width=700)
@@ -271,7 +295,7 @@ def show_forecast():
             st.write(f"Clima: {weather['temperatura']}°C, Viento: {weather['viento']} km/h")
 
 def show_simulation_advanced():
-    offset = st.slider("Horas en el Futuro (simulación):", 1, 6, 2)
+    offset = st.slider("Horas en el Futuro (simulación):", 1, 6, 2, key="simulation_slider")
     result = simulate_traffic_forecast(offset)
     st.write(f"Nivel de Saturación: {result['saturacion']}")
     st.write(f"Tiempo Normal: {result['tiempo_normal']} min")
@@ -286,11 +310,11 @@ def show_talavera_module():
     with st.form("talavera_module_form", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
         with col1:
-            origin = st.text_input("Origen (Talavera)", "Plaza de España, Talavera de la Reina, España")
+            origin = st.text_input("Origen (Talavera)", "Plaza de España, Talavera de la Reina, España", key="talavera_origin")
         with col2:
-            destination = st.text_input("Destino (Talavera)", "Centro, Talavera de la Reina, España")
+            destination = st.text_input("Destino (Talavera)", "Centro, Talavera de la Reina, España", key="talavera_destination")
         with col3:
-            start_time = st.time_input("Hora de Inicio", datetime.now().time())
+            start_time = st.time_input("Hora de Inicio", datetime.now().time(), key="talavera_time")
         submitted = st.form_submit_button("Calcular Ruta Talavera")
     if submitted:
         origin_coords, origin_full = geocode_address(origin)
@@ -307,10 +331,12 @@ def show_talavera_module():
             st.error("No se pudo obtener la ruta para Talavera.")
             return
         segments, arrival_time = simulate_route_segments(route_data["steps"], start_dt, weather, zone_factor)
-        m_tal = folium.Map(location=[(origin_coords[0]+dest_coords[0])/2, (origin_coords[1]+dest_coords[1])/2],
+        m_tal = folium.Map(location=[(origin_coords[0]+dest_coords[0])/2,
+                                     (origin_coords[1]+dest_coords[1])/2],
                            zoom_start=13, tiles="OpenStreetMap")
         for seg in segments:
-            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]], color=seg["color"], weight=4).add_to(m_tal)
+            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]],
+                            color=seg["color"], weight=4).add_to(m_tal)
         folium.Marker(origin_coords, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_tal)
         folium.Marker(dest_coords, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_tal)
         st_folium(m_tal, width=700)
@@ -331,14 +357,18 @@ def show_talavera_module():
 
 def ayuntamientos_section():
     st.header("Ayuntamientos")
-    st.write("Soluciones para la gestión urbana y la sostenibilidad.")
-    # Selección de ayuntamiento real (ejemplo: datos de Castilla-La Mancha)
     ayto = st.selectbox("Seleccione un ayuntamiento", 
                         ["Talavera de la Reina", "Toledo Capital", "Illescas", "Seseña", "Ocaña"],
                         key="ayto_selector")
     real_data = get_real_traffic_data(ayto)
     st.write(f"Congestión actual: {real_data['congestion']}")
     st.write(f"Emisiones CO₂ estimadas: {real_data['emisiones_co2']:.1f} kg/día")
+    
+    # Llamada a la API del MITECO para obtener información de paquetes (por ejemplo)
+    miteco_data = get_miteco_packages()
+    if miteco_data and "result" in miteco_data:
+        st.write("Paquetes disponibles en MITECO:")
+        st.write(miteco_data["result"])
     
     ayto_tabs = st.tabs(["Mapa y Tráfico", "Predicción", "Talavera y Comarca", "Simulación", "Integración API"])
     with ayto_tabs[0]:
@@ -354,7 +384,6 @@ def ayuntamientos_section():
 
 def empresas_section():
     st.header("Empresas")
-    st.write("Optimice rutas, reduzca costes y aproveche créditos de emisiones (CAE).")
     emp_tabs = st.tabs(["Mapa y Tráfico", "Predicción", "Simulación", "Calculadora CAE", "Integración API"])
     with emp_tabs[0]:
         show_map_and_traffic()
@@ -366,14 +395,13 @@ def empresas_section():
         st.write("Calculadora de CAE")
         volume = st.number_input("CO₂ evitado (kg)", min_value=0.0, value=1000.0, step=100.0, key="coe_volume")
         if st.button("Calcular CAE", key="calc_cae"):
-            cae = calculate_cae(volume)
-            st.write(f"CAE estimados: {cae:.2f}")
+            cae_val = calculate_cae(volume)
+            st.write(f"CAE estimados: {cae_val:.2f}")
     with emp_tabs[4]:
         show_integration_form()
 
 def particulares_section():
     st.header("Particulares")
-    st.write("Optimice sus desplazamientos diarios.")
     part_tabs = st.tabs(["Mapa y Tráfico", "Predicción", "Opciones Eco"])
     with part_tabs[0]:
         show_map_and_traffic()
@@ -381,7 +409,7 @@ def particulares_section():
         show_forecast()
     with part_tabs[2]:
         st.write("Opciones Eco: Rutas optimizadas para bicicleta y transporte público (simulado).")
-        st.write("En una versión real se integrarían APIs en modo cycling/transit.")
+        st.write("En una versión real se integrarían APIs específicas para modos eco.")
 
 # =============================================================================
 # Aplicación Principal
@@ -391,8 +419,7 @@ def main_app():
     st.title("Trafiquea")
     st.write("Bienvenido. Nuestra plataforma ofrece soluciones integrales de movilidad y sostenibilidad adaptadas a Ayuntamientos, Empresas y Particulares.")
     
-    # Selección del tipo de usuario
-    user_type = st.selectbox("Tipo de Usuario", ["Ayuntamiento", "Empresa", "Particular"], key="user_type")
+    user_type = st.selectbox("Tipo de Usuario", ["Ayuntamiento", "Empresa", "Particular"], key="user_type_selector")
     st.write("---")
     
     if user_type == "Ayuntamiento":
