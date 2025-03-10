@@ -11,3 +11,5 @@ joblib
 numba
 xgboost
 geopy
+folium
+streamlit-folium
