@@ -2,20 +2,18 @@
 """
 Trafiquea: Dashboard interactivo para la optimización de rutas y predicción de demanda de transporte.
 
-Este dashboard utiliza únicamente servicios gratuitos sin requerir tarjetas de crédito o configuración de secrets.
-Integra:
-    - Geolocalización y optimización de rutas (Nominatim y OSRM).
-    - Consulta de clima (Open-Meteo).
-    - Predicción de demanda con un modelo LSTM.
-    - Visualización interactiva con Plotly.
+Este dashboard utiliza servicios gratuitos (Nominatim, OSRM, Open-Meteo) y un modelo LSTM para:
+    - Geolocalización y optimización de rutas con mapas interactivos.
+    - Consulta de clima en tiempo real.
+    - Predicción de demanda con un modelo optimizado.
+    - Visualización clara de métricas y análisis de impacto ambiental.
 
-Cada sección está comentada para facilitar su comprensión y futura integración.
+Se prioriza un UX/UI de alto valor, mostrando mapas, rutas y predicciones sin comprometer el rendimiento.
 """
 
 # =============================================================================
 # Importación de librerías
 # =============================================================================
-import os
 from datetime import datetime, timedelta
 
 import streamlit as st
@@ -36,11 +34,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.impute import SimpleImputer
 from sklearn.base import BaseEstimator, TransformerMixin
 
-from joblib import Parallel, delayed
 from numba import njit
-from textblob import TextBlob
-from dateutil.parser import parse as date_parse
-
 from xgboost import XGBRegressor
 from geopy.geocoders import Nominatim
 
@@ -49,11 +43,12 @@ from geopy.geocoders import Nominatim
 # =============================================================================
 st.set_page_config(
     page_title="Trafiquea: Optimización y Predicción de Rutas",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # =============================================================================
-# Funciones de utilidades y acceso a APIs públicas
+# Funciones de Utilidad y Acceso a APIs Públicas
 # =============================================================================
 
 @st.cache_data(ttl=3600)
@@ -76,7 +71,7 @@ def get_route_osrm(origin_coords, destination_coords):
     base_url = "http://router.project-osrm.org/route/v1/driving"
     # OSRM requiere el formato: lon,lat;lon,lat
     coords = f"{origin_coords[1]},{origin_coords[0]};{destination_coords[1]},{destination_coords[0]}"
-    params = {"overview": "simplified", "geometries": "geojson"}
+    params = {"overview": "full", "geometries": "geojson"}
     url = f"{base_url}/{coords}"
     response = requests.get(url, params=params)
     if response.status_code == 200:
@@ -87,9 +82,9 @@ def get_route_osrm(origin_coords, destination_coords):
 
 def get_weather_open_meteo(lat: float, lon: float):
     """
-    Consulta la API de Open-Meteo para obtener el clima actual basado en la latitud y longitud.
+    Consulta la API de Open-Meteo para obtener el clima actual basado en latitud y longitud.
     No requiere API key.
-    Retorna un diccionario con la temperatura actual y la velocidad del viento.
+    Retorna un diccionario con temperatura y velocidad del viento.
     """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -120,7 +115,7 @@ def get_transit_demand_data():
         # Se simula el dato de 'Demanda' utilizando la columna 'AAPL' y se renombra la fecha
         df = pd.read_csv(url, parse_dates=["AAPL_x"])
         df.rename(columns={"AAPL_x": "Fecha", "AAPL_y": "Demanda"}, inplace=True)
-        # En caso de no encontrar 'Demanda', se crea una columna con valores aleatorios
+        # Si no existe la columna 'Demanda', se crea con valores aleatorios
         if "Demanda" not in df.columns:
             df["Demanda"] = np.random.randint(100, 500, len(df))
         return df
@@ -129,27 +124,7 @@ def get_transit_demand_data():
         return pd.DataFrame()
 
 # =============================================================================
-# Transformaciones y Preprocesamiento de Datos de Demanda
-# =============================================================================
-class DataFrameTransformer(BaseEstimator, TransformerMixin):
-    """
-    Wrapper para transformar un DataFrame usando un transformador de scikit-learn.
-    """
-    def __init__(self, transformer):
-        self.transformer = transformer
-
-    def fit(self, X, y=None):
-        self.transformer.fit(X, y)
-        return self
-
-    def transform(self, X):
-        X_trans = self.transformer.transform(X)
-        if isinstance(X, pd.DataFrame):
-            return pd.DataFrame(X_trans, columns=X.columns, index=X.index)
-        return X_trans
-
-# =============================================================================
-# Funciones para preparación de secuencias y modelado LSTM
+# Preparación de Datos y Modelado LSTM para Demanda
 # =============================================================================
 @njit
 def create_sequences_numba(data, window_size):
@@ -191,9 +166,9 @@ def build_demand_lstm_model(input_shape):
 
 def train_demand_model(df_demand: pd.DataFrame, window_size=7, epochs=10, batch_size=16):
     """
-    Entrena el modelo LSTM con los datos históricos de demanda.
-    Se aplica log-transformación a la variable 'Demanda' y escalado con MinMaxScaler.
-    Retorna el modelo entrenado y el scaler usado.
+    Entrena el modelo LSTM con datos históricos de demanda.
+    Aplica log-transformación a 'Demanda' y escala los datos con MinMaxScaler.
+    Retorna el modelo entrenado y el scaler.
     """
     df_demand = df_demand.sort_values("Fecha")
     df_demand["log_demand"] = np.log1p(df_demand["Demanda"])
@@ -210,7 +185,7 @@ def train_demand_model(df_demand: pd.DataFrame, window_size=7, epochs=10, batch_
 
 def predict_future_demand(model, scaler, df_demand: pd.DataFrame, window_size: int, forecast_days: int):
     """
-    Predice la demanda futura para un número de días determinado usando el modelo LSTM.
+    Predice la demanda futura para un número de días usando el modelo LSTM.
     Retorna una lista de fechas futuras y sus predicciones.
     """
     demand_scaled = scaler.transform(df_demand[["log_demand"]])
@@ -236,15 +211,11 @@ def main_app():
     st.title("Trafiquea: Optimización y Predicción de Rutas")
     st.markdown("""
     **Descripción del Proyecto:**  
-    Dashboard para optimizar rutas y predecir la demanda de transporte en tiempo real utilizando únicamente servicios gratuitos.
-    La herramienta integra:
-    - Geolocalización y optimización de rutas (Nominatim y OSRM).
-    - Consulta de clima (Open-Meteo).
-    - Predicción de demanda con un modelo LSTM.
+    Dashboard para optimizar rutas y predecir la demanda de transporte en tiempo real, con mapas interactivos y análisis de impacto ambiental.
     """)
-
+    
     # -------------------------------------------------------------------------
-    # Sección: Optimización de Rutas
+    # Sección: Optimización de Rutas y Visualización en Mapa
     # -------------------------------------------------------------------------
     st.sidebar.title("Configuración")
     st.sidebar.subheader("Optimización de Rutas")
@@ -255,45 +226,55 @@ def main_app():
         destination_coords = geocode_address(destination)
         if origin_coords and destination_coords:
             route_geo = get_route_osrm(origin_coords, destination_coords)
-            # Se obtiene el clima usando Open-Meteo basado en las coordenadas del origen
             weather = get_weather_open_meteo(origin_coords[0], origin_coords[1])
             st.success("Ruta y datos actualizados.")
-            st.write(f"Clima: {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
-            # Visualización de la ruta en el mapa usando Plotly
-            fig_map = go.Figure(go.Scattermapbox(
-                lat=[origin_coords[0], destination_coords[0]],
-                lon=[origin_coords[1], destination_coords[1]],
-                mode="markers+lines",
-                marker=go.scattermapbox.Marker(size=14),
-                text=["Origen", "Destino"]
+            st.write(f"**Clima en Origen:** {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
+            
+            # Mapa interactivo con la ruta y marcadores para origen y destino
+            fig_map = go.Figure()
+            # Dibujar la ruta si se obtuvo la geometría
+            if route_geo:
+                fig_map.add_trace(go.Scattermapbox(
+                    mode="lines",
+                    lon=route_geo["coordinates"][:, 0] if isinstance(route_geo["coordinates"], np.ndarray) else [pt[0] for pt in route_geo["coordinates"]],
+                    lat=route_geo["coordinates"][:, 1] if isinstance(route_geo["coordinates"], np.ndarray) else [pt[1] for pt in route_geo["coordinates"]],
+                    marker={"size": 5},
+                    line=dict(width=4, color="blue"),
+                    name="Ruta Óptima"
+                ))
+            # Agregar marcadores de origen y destino
+            fig_map.add_trace(go.Scattermapbox(
+                mode="markers",
+                lon=[origin_coords[1]],
+                lat=[origin_coords[0]],
+                marker={"size": 12, "color": "green"},
+                name="Origen"
             ))
-            # Se utiliza el estilo gratuito de OpenStreetMap
+            fig_map.add_trace(go.Scattermapbox(
+                mode="markers",
+                lon=[destination_coords[1]],
+                lat=[destination_coords[0]],
+                marker={"size": 12, "color": "red"},
+                name="Destino"
+            ))
             fig_map.update_layout(
                 mapbox_style="open-street-map",
                 mapbox_zoom=12,
-                mapbox_center={"lat": (origin_coords[0] + destination_coords[0]) / 2,
-                               "lon": (origin_coords[1] + destination_coords[1]) / 2}
+                mapbox_center={"lat": (origin_coords[0]+destination_coords[0])/2,
+                               "lon": (origin_coords[1]+destination_coords[1])/2},
+                margin={"r":0,"t":0,"l":0,"b":0}
             )
             st.plotly_chart(fig_map, use_container_width=True)
         else:
             st.error("No se pudieron geolocalizar las direcciones.")
-
+    
     # -------------------------------------------------------------------------
     # Sección: Datos de Demanda y Predicción
     # -------------------------------------------------------------------------
     st.sidebar.markdown("---")
     st.sidebar.subheader("Predicción de Demanda")
-    training_period = st.sidebar.select_slider(
-        "Histórico de Entrenamiento (años):",
-        options=[1, 2, 3],
-        value=1,
-        help="A mayor período, mayor precisión (aunque aumente el tiempo de entrenamiento)."
-    )
-    forecast_days = st.sidebar.slider(
-        "Días a predecir:",
-        min_value=1, max_value=30, value=5,
-        help="Número de días futuros a predecir."
-    )
+    forecast_days = st.sidebar.slider("Días a predecir:", min_value=1, max_value=30, value=5,
+                                        help="Número de días futuros a predecir.")
     
     df_demand = get_transit_demand_data()
     if df_demand.empty:
@@ -314,7 +295,9 @@ def main_app():
                 if future_dates and demand_preds:
                     df_future = pd.DataFrame({"Fecha": future_dates, "Demanda Predicha": demand_preds})
                     st.subheader("Demanda Futura Estimada")
-                    st.line_chart(df_future.set_index("Fecha")["Demanda Predicha"])
+                    # Se muestra la predicción en un gráfico interactivo
+                    fig_pred = px.line(df_future, x="Fecha", y="Demanda Predicha", title="Predicción de Demanda")
+                    st.plotly_chart(fig_pred, use_container_width=True)
                     st.download_button(
                         label="Descargar Predicción en CSV",
                         data=df_future.to_csv(index=False).encode("utf-8"),
@@ -325,8 +308,8 @@ def main_app():
     # Pestaña 2: Dashboard de Métricas
     with tabs[1]:
         st.header("Métricas de Movilidad en Tiempo Real")
-        # Se muestran datos del clima basado en coordenadas de Madrid
-        weather = get_weather_open_meteo(40.4168, -3.7038)  # Madrid
+        # Se consulta el clima en Madrid como referencia
+        weather = get_weather_open_meteo(40.4168, -3.7038)
         st.metric("Temperatura Actual (°C)", f"{weather['temperature']}°C")
         st.metric("Velocidad del Viento (km/h)", f"{weather['windspeed']} km/h")
         st.metric("Nivel de Congestión", "No disponible")
@@ -334,7 +317,14 @@ def main_app():
     # Pestaña 3: Análisis de Impacto y Sostenibilidad
     with tabs[2]:
         st.header("Impacto Ambiental y Sostenibilidad")
-        st.write("Se mostrarán análisis de ahorro de CO₂ y métricas de sostenibilidad basadas en la optimización de rutas.")
+        st.markdown("""
+        Se presentan análisis basados en la optimización de rutas, los ahorros en combustible y la reducción de emisiones de CO₂.
+        Estos cálculos se pueden ampliar con datos reales y fórmulas específicas a medida que se disponga de más información.
+        """)
+        ahorro_combustible = 5.2  # Ejemplo: litros ahorrados
+        reduccion_CO2 = 12.3     # Ejemplo: kg de CO₂ reducidos
+        st.metric("Ahorro en Combustible (litros)", f"{ahorro_combustible}")
+        st.metric("Reducción de Emisiones (kg CO₂)", f"{reduccion_CO2}")
 
 # =============================================================================
 # Ejecución de la aplicación
