@@ -2,12 +2,12 @@ streamlit
 pandas
 numpy
 plotly
-tensorflow==2.15.0
 requests
+prophet
+lightgbm
+tensorflow
 scikit-learn
 joblib
 numba
-textblob
-python-dateutil
 xgboost
 geopy
