@@ -1,33 +1,21 @@
-# main.py
 """
-Trafiquea: Plataforma Integral para Transporte y Rutas en Tiempo Real
+Trafiquea: Modelo Especializado para Talavera de la Reina
 
-Este dashboard utiliza pestañas (tabs) para organizar las siguientes funcionalidades:
+Este dashboard está enfocado en la ciudad de Talavera de la Reina y ofrece las siguientes funcionalidades:
+  1. Optimización de Rutas en Tiempo Real:
+     - Permite ingresar direcciones de origen y destino (por defecto, se asumen direcciones de Talavera de la Reina).
+     - Se solicita la hora de inicio del viaje y se calcula la ruta mediante OSRM.
+     - La ruta se divide en segmentos a los que se asigna un nivel de congestión simulado según la zona, la hora y condiciones climáticas.
+  2. Pronóstico de Ruta:
+     - Permite seleccionar un intervalo de horas (hasta 24) en el futuro para obtener proyecciones de tráfico y tiempos de viaje.
+  3. Análisis de Datos Históricos:
+     - Se muestran tendencias y estadísticas simuladas de demanda y tráfico en Talavera de la Reina.
+  4. Simulación Avanzada:
+     - Permite comparar escenarios modificando parámetros (p.ej., cambios en condiciones climáticas y hora del viaje) para ver el impacto en los tiempos de viaje.
+  5. Integración API:
+     - Se ofrece un formulario para que usuarios interesados soliciten la integración vía API (la información se enviará internamente).
 
-1. Tráfico en Tiempo Real:
-   - Ingreso manual de dirección de origen y destino (incluyendo ciudad, estado, país).
-   - Selección de la hora de inicio del viaje.
-   - Cálculo de ruta mediante OSRM y visualización de segmentos coloreados según el nivel de tráfico simulado.
-   - Muestra de distancia total y hora de llegada estimada.
-   
-2. Pronósticos de Ruta:
-   - Permite seleccionar cuántas horas en el futuro se desea conocer la situación del tráfico.
-   - Se simulan los tiempos de viaje (normal vs. ajustado por tráfico) y se muestra la ruta óptima para ese escenario.
-   
-3. Análisis de Datos:
-   - Se muestran análisis y visualizaciones (por ejemplo, correlación entre clima y tráfico, tendencias históricas de demanda).
-   - Se pueden integrar modelos de clustering o regresión para segmentar zonas o predecir la demanda.
-   
-4. Simulación Avanzada:
-   - Permite comparar escenarios modificando parámetros (por ejemplo, condiciones climáticas, hora de viaje) para ver cómo varían los tiempos y rutas.
-   
-5. Integrar API:
-   - Formulario para que interesados dejen sus datos y soliciten integración vía API.
-
-Nota:  
-- Se usa Folium para mostrar mapas de OpenStreetMap con un estilo limpio y enfocado en calles.  
-- Las funciones de geocodificación se basan en Nominatim, por lo que se recomienda ingresar direcciones completas para mejores resultados.
-- Este prototipo se puede potenciar con modelos avanzados de data science (regresión, clustering, series temporales) conforme se disponga de datos reales.
+Este modelo aprovecha datos públicos y simulaciones específicas para Talavera de la Reina, lo que facilita la presentación de un caso de uso al ayuntamiento y a otros actores locales.
 """
 
 import streamlit as st
@@ -46,7 +34,7 @@ import pandas as pd
 def geocode_address(address: str):
     """
     Geocodifica una dirección usando Nominatim.
-    Retorna ((lat, lon), dirección completa) o (None, None) si falla.
+    Devuelve ((lat, lon), dirección completa) o (None, None) en caso de fallo.
     """
     geolocator = Nominatim(user_agent="trafiquea_dashboard")
     location = geolocator.geocode(address)
@@ -54,9 +42,9 @@ def geocode_address(address: str):
         return (location.latitude, location.longitude), location.address
     return None, None
 
-def reverse_geocode(lat, lon):
+def reverse_geocode(lat: float, lon: float):
     """
-    Geocodificación inversa: de lat/lon obtiene la dirección completa.
+    Obtiene la dirección completa a partir de latitud y longitud mediante geocodificación inversa.
     """
     geolocator = Nominatim(user_agent="trafiquea_reverse")
     location = geolocator.reverse((lat, lon), language="en")
@@ -65,13 +53,31 @@ def reverse_geocode(lat, lon):
     return "Dirección no encontrada"
 
 # =============================================================================
+# Función para Simular Factor de Tráfico Específico para Talavera de la Reina
+# =============================================================================
+
+def simulate_zone_factor(full_address: str):
+    """
+    Asigna un factor de tráfico basado en la zona geográfica.
+    Para Talavera de la Reina se asigna un factor específico.
+    """
+    address_lower = full_address.lower()
+    if "talavera" in address_lower:
+        return 1.3
+    return 1.2
+
+# =============================================================================
 # Función para Obtener Ruta con OSRM
 # =============================================================================
 
 def get_route_osrm(origin_coords, destination_coords):
     """
-    Calcula la ruta entre dos puntos usando OSRM.
-    Retorna un dict con geometry (GeoJSON), steps (lista de segmentos), distance (metros) y duration (segundos).
+    Calcula la ruta entre dos puntos mediante la API OSRM.
+    Devuelve un diccionario con:
+      - geometry: GeoJSON de la ruta.
+      - steps: Lista de segmentos con distancia, duración y geometría.
+      - distance: Distancia total en metros.
+      - duration: Duración total en segundos.
     """
     base_url = "http://router.project-osrm.org/directions/v5/mapbox/driving"
     coords = f"{origin_coords[1]},{origin_coords[0]};{destination_coords[1]},{destination_coords[0]}"
@@ -94,20 +100,19 @@ def get_route_osrm(origin_coords, destination_coords):
 # Funciones para Simulación de Tráfico y Tiempos de Viaje
 # =============================================================================
 
-def assign_traffic_level(distance_km, start_time, weather):
+def assign_traffic_level(distance_km, start_time, weather, zone_factor):
     """
-    Asigna un nivel de tráfico y un factor multiplicador de tiempo según:
-      - Hora de inicio (hora punta).
-      - Condiciones climáticas (viento fuerte).
-      - Distancia (trayectos cortos o largos).
-    Retorna (nivel, factor) donde nivel es "Bajo", "Moderado" o "Alto".
+    Asigna un nivel de tráfico y un factor multiplicador basado en:
+      - Hora de inicio (hora punta o no).
+      - Condiciones climáticas (viento).
+      - Distancia del segmento.
+      - Factor específico de la zona (para Talavera se utiliza simulate_zone_factor).
+    Devuelve (nivel, factor) donde nivel es "Bajo", "Moderado" o "Alto".
     """
     hour = start_time.hour
     if 7 <= hour <= 9 or 17 <= hour <= 19:
-        base_level = "Alto"
         base_factor = 1.5
     else:
-        base_level = "Moderado"
         base_factor = 1.2
 
     if weather and weather.get("windspeed") and weather["windspeed"] > 20:
@@ -118,9 +123,11 @@ def assign_traffic_level(distance_km, start_time, weather):
     elif distance_km > 5:
         base_factor += 0.1
 
-    if base_factor <= 1.2:
+    base_factor *= zone_factor
+
+    if base_factor <= 1.3:
         level = "Bajo"
-    elif 1.2 < base_factor < 1.5:
+    elif 1.3 < base_factor < 1.6:
         level = "Moderado"
     else:
         level = "Alto"
@@ -129,28 +136,28 @@ def assign_traffic_level(distance_km, start_time, weather):
 
 def color_for_level(level):
     """
-    Devuelve un color hexadecimal según el nivel de tráfico.
+    Devuelve un color hexadecimal según el nivel de congestión.
+    Verde para "Bajo", naranja para "Moderado", rojo para "Alto".
     """
     if level == "Bajo":
-        return "#2ecc71"  # Verde
+        return "#2ecc71"
     elif level == "Moderado":
-        return "#f39c12"  # Naranja
+        return "#f39c12"
     else:
-        return "#e74c3c"  # Rojo
+        return "#e74c3c"
 
-def simulate_route_segments(steps, start_time, weather):
+def simulate_route_segments(steps, start_time, weather, zone_factor):
     """
-    Recorre los steps de la ruta (de OSRM) y asigna para cada segmento un nivel de tráfico.
-    Retorna:
-      - Una lista de segmentos (con coordenadas, color, distancia y tiempo ajustado).
-      - La hora estimada de llegada.
+    Recorre los pasos (steps) de la ruta y asigna un nivel de tráfico simulado a cada segmento.
+    Devuelve una lista de segmentos (con coordenadas, color, distancia y tiempo ajustado)
+    y la hora estimada de llegada.
     """
     segments = []
     current_time = start_time
     for step in steps:
         distance_m = step["distance"]
         distance_km = distance_m / 1000.0
-        level, factor = assign_traffic_level(distance_km, current_time, weather)
+        level, factor = assign_traffic_level(distance_km, current_time, weather, zone_factor)
         duration_s = step["duration"] * factor
         current_time += timedelta(seconds=duration_s)
         segments.append({
@@ -164,8 +171,11 @@ def simulate_route_segments(steps, start_time, weather):
 
 def simulate_traffic_forecast(hour_offset):
     """
-    Simula el pronóstico de tráfico para 'hour_offset' horas en el futuro.
-    Retorna un dict con saturación, tiempo de viaje normal y tiempo de viaje ajustado.
+    Simula el pronóstico de tráfico para un intervalo en horas (hasta 6 horas).
+    Devuelve un diccionario con:
+      - saturacion: Nivel de congestión.
+      - tiempo_normal: Tiempo de viaje normal (min).
+      - tiempo_proyectado: Tiempo de viaje ajustado (min).
     """
     if hour_offset <= 2:
         saturacion = "Bajo"
@@ -181,15 +191,13 @@ def simulate_traffic_forecast(hour_offset):
     return {"saturacion": saturacion, "tiempo_normal": tiempo_normal, "tiempo_proyectado": tiempo_proyectado}
 
 # =============================================================================
-# Funciones para Análisis de Datos (Ejemplo: Tendencias y Correlaciones)
+# Función para Análisis de Datos Históricos Simulados
 # =============================================================================
 
 def analyze_historical_data():
     """
-    Ejemplo de análisis de datos históricos de demanda.
-    Aquí se simula la carga de un dataset y se muestran tendencias y correlaciones.
+    Carga un dataset simulado (usando datos de ejemplo) y muestra tendencias y estadísticas.
     """
-    # Cargamos datos simulados (por ejemplo, del CSV de OSRM)
     url = "https://raw.githubusercontent.com/plotly/datasets/master/2014_apple_stock.csv"
     try:
         df = pd.read_csv(url, parse_dates=["AAPL_x"])
@@ -198,27 +206,19 @@ def analyze_historical_data():
         st.error("Error al cargar datos históricos.")
         return
 
-    # Convertir la Demanda en valores simulados si es necesario
     if "Demanda" not in df.columns:
         df["Demanda"] = np.random.randint(100, 500, len(df))
     df.sort_values("Fecha", inplace=True)
-    
-    st.subheader("Tendencia Histórica de Demanda")
     st.line_chart(df.set_index("Fecha")["Demanda"])
-    
-    # Simular correlación entre demanda y fecha (p.ej., tendencia ascendente o estacionalidad)
-    st.subheader("Análisis Estadístico Simulado")
-    st.write("Se podría implementar un análisis de regresión o clustering para segmentar zonas y predecir demanda.")
-    # Aquí se muestra un resumen estadístico como ejemplo
     st.write(df.describe())
 
 # =============================================================================
-# Función para el Formulario de Integración vía API
+# Función para Mostrar el Formulario de Integración vía API
 # =============================================================================
 
 def show_integration_form():
-    st.subheader("Solicita Integración vía API")
     with st.form("form_integration"):
+        st.subheader("Solicita Integración vía API")
         nombre = st.text_input("Nombre")
         apellidos = st.text_input("Apellidos")
         institucion = st.text_input("Institución o Empresa")
@@ -228,68 +228,24 @@ def show_integration_form():
             st.success("Solicitud enviada correctamente. Nos pondremos en contacto contigo.")
 
 # =============================================================================
-# Diseño Principal del Dashboard con Tabs
+# Tab Especializado para Talavera de la Reina
 # =============================================================================
 
-def main_app():
-    st.title("Trafiquea: Plataforma Integral para Transporte y Rutas en Tiempo Real")
+def tab_talavera():
+    st.header("Modelo Especializado: Talavera de la Reina")
     st.markdown("""
-    **Bienvenido a Trafiquea.**  
-    Esta plataforma ofrece múltiples funcionalidades:
-    - **Tráfico en Tiempo Real:** Visualiza rutas y niveles de congestión.
-    - **Pronósticos de Ruta:** Obtén proyecciones para hasta 24 horas en el futuro.
-    - **Análisis de Datos:** Explora tendencias históricas y correlaciones.
-    - **Simulación Avanzada:** Compara escenarios y ajusta parámetros para optimizar rutas.
-    - **Integrar API:** Solicita integración mediante un formulario.
+    Este módulo se enfoca en Talavera de la Reina utilizando datos públicos y simulaciones específicas para la zona.
+    Las direcciones se asumen dentro del área de Talavera de la Reina para optimizar la geocodificación y análisis.
     """)
-    
-    tabs = st.tabs(["Tráfico en Tiempo Real", "Pronósticos de Ruta", "Análisis de Datos", "Simulación Avanzada", "Integrar API"])
-    
-    # Tab 1: Tráfico en Tiempo Real
-    with tabs[0]:
-        tab_trafico_en_tiempo_real()
-    
-    # Tab 2: Pronósticos de Ruta
-    with tabs[1]:
-        tab_pronosticos_ruta()
-    
-    # Tab 3: Análisis de Datos
-    with tabs[2]:
-        st.subheader("Análisis de Datos Históricos")
-        analyze_historical_data()
-    
-    # Tab 4: Simulación Avanzada
-    with tabs[3]:
-        st.subheader("Simulación Avanzada de Escenarios")
-        st.markdown("""
-        Modifica los parámetros para ver cómo varían los tiempos de viaje y rutas bajo diferentes condiciones.
-        """)
-        hour_offset = st.slider("Horas en el Futuro:", min_value=1, max_value=6, value=2)
-        forecast = simulate_traffic_forecast(hour_offset)
-        st.write(f"**Nivel de Saturación:** {forecast['saturacion']}")
-        st.write(f"**Tiempo de Viaje Normal:** {forecast['tiempo_normal']} min")
-        st.write(f"**Tiempo de Viaje Estimado (con tráfico):** {forecast['tiempo_proyectado']} min")
-    
-    # Tab 5: Integrar API
-    with tabs[4]:
-        show_integration_form()
 
-# =============================================================================
-# Pestañas Específicas: Tráfico en Tiempo Real y Pronósticos de Ruta
-# =============================================================================
-
-def tab_trafico_en_tiempo_real():
+    # Sub-tab: Tráfico en Tiempo Real para Talavera
     st.subheader("Tráfico en Tiempo Real")
-    st.markdown("""
-    Ingresa las direcciones de **origen** y **destino** (con ciudad, estado, país) y selecciona la hora de inicio de tu viaje.
-    La ruta se dibujará con segmentos coloreados según la saturación de tráfico simulada.
-    """)
-    with st.form("form_trafico"):
+    with st.form("form_trafico_talavera"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            origin = st.text_input("Dirección de Origen", "Plaza Mayor, Madrid, España")
+            origin = st.text_input("Dirección de Origen", "Plaza de España, Talavera de la Reina, España")
         with col2:
-            destination = st.text_input("Dirección de Destino", "Puerta del Sol, Madrid, España")
+            destination = st.text_input("Dirección de Destino", "Ayuntamiento, Talavera de la Reina, España")
         with col3:
             start_time_input = st.time_input("Hora de Inicio", datetime.now().time())
         submitted = st.form_submit_button("Calcular Ruta")
@@ -298,28 +254,32 @@ def tab_trafico_en_tiempo_real():
         origin_coords, origin_full = geocode_address(origin)
         dest_coords, dest_full = geocode_address(destination)
         if not (origin_coords and dest_coords):
-            st.error("No se pudieron geocodificar las direcciones. Verifica que estén completas.")
+            st.error("Verifique que las direcciones estén completas y sean correctas.")
             return
         now = datetime.now()
         start_dt = datetime(now.year, now.month, now.day, start_time_input.hour, start_time_input.minute)
         weather = get_weather_open_meteo(origin_coords[0], origin_coords[1])
+        # Utilizamos el factor específico para Talavera
+        zone_factor = simulate_zone_factor(origin_full)
         route_data = get_route_osrm(origin_coords, dest_coords)
         if not route_data:
             st.error("No se pudo obtener la ruta con OSRM.")
             return
-        segments, arrival_time = simulate_route_segments(route_data["steps"], start_dt, weather)
-        m = folium.Map(location=[(origin_coords[0]+dest_coords[0])/2, (origin_coords[1]+dest_coords[1])/2],
-                       zoom_start=12, tiles="OpenStreetMap")
+        segments, arrival_time = simulate_route_segments(route_data["steps"], start_dt, weather, zone_factor)
+        m = folium.Map(location=[(origin_coords[0] + dest_coords[0]) / 2, (origin_coords[1] + dest_coords[1]) / 2],
+                       zoom_start=13, tiles="OpenStreetMap")
         for seg in segments:
             folium.PolyLine(locations=[(pt[1], pt[0]) for pt in seg["coords"]],
                             color=seg["color"], weight=4).add_to(m)
-        folium.Marker(origin_coords, popup=origin_full, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m)
-        folium.Marker(dest_coords, popup=dest_full, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m)
+        folium.Marker(origin_coords, popup=origin_full, tooltip="Origen",
+                      icon=folium.Icon(color="green")).add_to(m)
+        folium.Marker(dest_coords, popup=dest_full, tooltip="Destino",
+                      icon=folium.Icon(color="red")).add_to(m)
         st_folium(m, width=700)
         total_distance = route_data["distance"] / 1000.0
         total_time = sum(seg["time_s"] for seg in segments)
         st.write(f"**Distancia Total:** {total_distance:.2f} km")
-        st.write(f"**Hora de Llegada Estimada:** {arrival_time.strftime('%H:%M')} (~{int(total_time/60)} min de viaje)")
+        st.write(f"**Hora de Llegada Estimada:** {arrival_time.strftime('%H:%M')} (~{int(total_time/60)} min)")
         if weather:
             st.write(f"**Clima en Origen:** {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
         st.markdown("""
@@ -329,83 +289,97 @@ def tab_trafico_en_tiempo_real():
         - Rojo: Alto  
         """)
 
-def tab_pronosticos_ruta():
-    st.subheader("Pronósticos de Ruta (hasta 24 horas)")
-    st.markdown("""
-    Selecciona cuántas horas en el futuro deseas conocer la situación del tráfico y la ruta óptima para ese momento.
-    Se muestran estimaciones de tiempo de viaje (normal vs. ajustado por tráfico) y la ruta en el mapa.
-    """)
-    hour_options = list(range(1,25))
-    selected_hour = st.selectbox("Horas en el futuro:", hour_options, format_func=lambda x: f"{x} hora{'s' if x>1 else ''}")
+    # Sub-tab: Pronóstico de Ruta para Talavera
+    st.subheader("Pronóstico de Ruta (hasta 24 horas)")
+    hour_options = list(range(1, 25))
+    selected_hour = st.selectbox("Horas en el futuro:", hour_options,
+                                 format_func=lambda x: f"{x} hora{'s' if x > 1 else ''}")
     col1, col2 = st.columns(2)
     with col1:
-        origin = st.text_input("Dirección de Origen (Pronóstico)", "Plaza Mayor, Madrid, España")
+        origin_forecast = st.text_input("Origen (Pronóstico)", "Plaza de España, Talavera de la Reina, España")
     with col2:
-        destination = st.text_input("Dirección de Destino (Pronóstico)", "Puerta del Sol, Madrid, España")
+        destination_forecast = st.text_input("Destino (Pronóstico)", "Ayuntamiento, Talavera de la Reina, España")
     
     if st.button("Mostrar Pronóstico"):
-        origin_coords, origin_full = geocode_address(origin)
-        dest_coords, dest_full = geocode_address(destination)
-        if not (origin_coords and dest_coords):
-            st.error("No se pudieron geocodificar las direcciones.")
+        origin_coords_f, origin_full_f = geocode_address(origin_forecast)
+        dest_coords_f, dest_full_f = geocode_address(destination_forecast)
+        if not (origin_coords_f and dest_coords_f):
+            st.error("Error en la geocodificación de las direcciones.")
             return
         future_dt = datetime.now() + timedelta(hours=selected_hour)
-        weather = get_weather_open_meteo(origin_coords[0], origin_coords[1])
-        route_data = get_route_osrm(origin_coords, dest_coords)
-        if not route_data:
+        weather_f = get_weather_open_meteo(origin_coords_f[0], origin_coords_f[1])
+        zone_factor_f = simulate_zone_factor(origin_full_f)
+        route_data_f = get_route_osrm(origin_coords_f, dest_coords_f)
+        if not route_data_f:
             st.error("No se pudo obtener la ruta.")
             return
-        segments, arrival_time = simulate_route_segments(route_data["steps"], future_dt, weather)
-        m_future = folium.Map(location=[(origin_coords[0]+dest_coords[0])/2, (origin_coords[1]+dest_coords[1])/2],
-                              zoom_start=12, tiles="OpenStreetMap")
-        for seg in segments:
+        segments_f, arrival_time_f = simulate_route_segments(route_data_f["steps"], future_dt, weather_f, zone_factor_f)
+        m_f = folium.Map(location=[(origin_coords_f[0] + dest_coords_f[0]) / 2, (origin_coords_f[1] + dest_coords_f[1]) / 2],
+                         zoom_start=13, tiles="OpenStreetMap")
+        for seg in segments_f:
             folium.PolyLine(locations=[(pt[1], pt[0]) for pt in seg["coords"]],
-                            color=seg["color"], weight=4).add_to(m_future)
-        folium.Marker(origin_coords, popup=origin_full, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_future)
-        folium.Marker(dest_coords, popup=dest_full, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_future)
-        st_folium(m_future, width=700)
-        total_distance = route_data["distance"] / 1000.0
-        total_time = sum(seg["time_s"] for seg in segments)
-        st.write(f"**Distancia Total:** {total_distance:.2f} km")
+                            color=seg["color"], weight=4).add_to(m_f)
+        folium.Marker(origin_coords_f, popup=origin_full_f, tooltip="Origen",
+                      icon=folium.Icon(color="green")).add_to(m_f)
+        folium.Marker(dest_coords_f, popup=dest_full_f, tooltip="Destino",
+                      icon=folium.Icon(color="red")).add_to(m_f)
+        st_folium(m_f, width=700)
+        total_distance_f = route_data_f["distance"] / 1000.0
+        total_time_f = sum(seg["time_s"] for seg in segments_f)
+        st.write(f"**Distancia Total:** {total_distance_f:.2f} km")
         st.write(f"**Hora de Salida (Futura):** {future_dt.strftime('%d/%m %H:%M')}")
-        st.write(f"**Hora de Llegada Estimada:** {arrival_time.strftime('%H:%M')} (~{int(total_time/60)} min de viaje)")
-        if weather:
-            st.write(f"**Clima en Origen (aprox.):** {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
+        st.write(f"**Hora de Llegada Estimada:** {arrival_time_f.strftime('%H:%M')} (~{int(total_time_f/60)} min)")
+        if weather_f:
+            st.write(f"**Clima en Origen (aprox.):** {weather_f['temperature']}°C, Viento: {weather_f['windspeed']} km/h")
+    
+    # Sub-tab: Análisis de Datos Históricos
+    st.subheader("Análisis de Datos Históricos para Talavera")
+    st.markdown("A continuación se muestran tendencias y estadísticas simuladas de demanda en Talavera de la Reina.")
+    # Simular dataset para Talavera (usar datos de ejemplo y ajustar)
+    url = "https://raw.githubusercontent.com/plotly/datasets/master/2014_apple_stock.csv"
+    try:
+        df_talavera = pd.read_csv(url, parse_dates=["AAPL_x"])
+        df_talavera.rename(columns={"AAPL_x": "Fecha", "AAPL_y": "Demanda"}, inplace=True)
+    except Exception as e:
+        st.error("Error al cargar datos históricos.")
+        df_talavera = pd.DataFrame()
+    if df_talavera.empty:
+        st.write("No hay datos disponibles.")
+    else:
+        # Simular que los datos corresponden a Talavera ajustando la demanda
+        df_talavera["Demanda"] = df_talavera["Demanda"] * 0.8  # Factor de ajuste
+        df_talavera.sort_values("Fecha", inplace=True)
+        st.line_chart(df_talavera.set_index("Fecha")["Demanda"])
+        st.write(df_talavera.describe())
+    
+    # Sub-tab: Simulación Avanzada de Escenarios
+    st.subheader("Simulación Avanzada de Escenarios")
+    st.markdown("Ajuste parámetros para simular cómo varían los tiempos de viaje en Talavera de la Reina.")
+    hour_offset = st.slider("Horas en el Futuro:", min_value=1, max_value=6, value=2)
+    forecast = simulate_traffic_forecast(hour_offset)
+    st.write(f"**Nivel de Saturación Simulado:** {forecast['saturacion']}")
+    st.write(f"**Tiempo de Viaje Normal (simulado):** {forecast['tiempo_normal']} min")
+    st.write(f"**Tiempo de Viaje Estimado (simulado):** {forecast['tiempo_proyectado']} min")
+    
+    # Sub-tab: Integración API
+    st.subheader("Integrar API")
+    show_integration_form()
 
 # =============================================================================
-# Ejecución del Dashboard
+# Función Principal del Dashboard
 # =============================================================================
 
 def main_app():
-    st.title("Trafiquea: Plataforma Integral para Transporte y Rutas en Tiempo Real")
+    st.title("Trafiquea: Modelo Especializado para Talavera de la Reina")
     st.markdown("""
-    **Bienvenido a Trafiquea.**  
-    Explora nuestras funcionalidades:
-      - **Tráfico en Tiempo Real:** Calcula rutas con niveles de congestión simulados.
-      - **Pronósticos de Ruta:** Proyecta rutas y tiempos de viaje para hasta 24 horas en el futuro.
-      - **Análisis de Datos:** Revisa tendencias y análisis históricos de demanda (funcionalidad ampliable).
-      - **Simulación Avanzada:** Compara escenarios modificando parámetros.
-      - **Integrar API:** Solicita la integración de esta solución en tu sistema.
+    Esta plataforma se ha desarrollado específicamente para Talavera de la Reina utilizando datos públicos y simulaciones adaptadas a la zona.  
+    Las funcionalidades incluyen:
+      - Optimización de rutas en tiempo real con análisis de tráfico por zona.
+      - Pronósticos de ruta para intervalos de tiempo futuros.
+      - Análisis de tendencias y simulación avanzada para apoyar la planificación.
+      - Un formulario para solicitar la integración vía API.
     """)
-    tabs = st.tabs(["Tráfico en Tiempo Real", "Pronósticos de Ruta", "Análisis de Datos", "Simulación Avanzada", "Integrar API"])
-    
-    with tabs[0]:
-        tab_trafico_en_tiempo_real()
-    with tabs[1]:
-        tab_pronosticos_ruta()
-    with tabs[2]:
-        st.subheader("Análisis de Datos Históricos")
-        analyze_historical_data()
-    with tabs[3]:
-        st.subheader("Simulación Avanzada de Escenarios")
-        st.markdown("Modifica los parámetros para ver cómo varían los tiempos de viaje y la congestión.")
-        hour_offset = st.slider("Horas en el Futuro:", min_value=1, max_value=6, value=2)
-        forecast = simulate_traffic_forecast(hour_offset)
-        st.write(f"**Nivel de Saturación:** {forecast['saturacion']}")
-        st.write(f"**Tiempo de Viaje Normal:** {forecast['tiempo_normal']} min")
-        st.write(f"**Tiempo de Viaje Estimado (con tráfico):** {forecast['tiempo_proyectado']} min")
-    with tabs[4]:
-        show_integration_form()
+    tab_talavera()
 
 if __name__ == "__main__":
     main_app()
