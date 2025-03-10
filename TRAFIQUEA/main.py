@@ -1,31 +1,15 @@
 """
 Trafiquea: Plataforma Integral para Transporte y Rutas en Tiempo Real
 
-Este dashboard integra las siguientes funcionalidades:
-  1. Tráfico en Tiempo Real:
-     - Permite al usuario ingresar direcciones de origen y destino (incluyendo ciudad, estado, país) y la hora de inicio del viaje.
-     - Calcula la ruta usando OSRM, la divide en segmentos y asigna niveles de congestión simulados según la zona, hora y condiciones climáticas.
-     - Visualiza la ruta y la ubicación en un mapa utilizando Folium (basado en OpenStreetMap).
+Este dashboard ofrece funcionalidades para distintos públicos:
   
-  2. Pronósticos de Ruta (hasta 24 horas):
-     - Permite seleccionar cuántas horas en el futuro se desea conocer la situación del tráfico.
-     - Simula la congestión y estima tiempos de viaje (normal y ajustado por tráfico) para ese intervalo.
-     - Visualiza la ruta óptima para el escenario pronosticado.
+  - Ayuntamientos: Funcionalidades específicas para la gestión urbana, análisis de datos históricos y simulación avanzada de escenarios en ciudades, con un enfoque en Talavera de la Reina.
+  
+  - Empresas: Herramientas de optimización de rutas en tiempo real, pronósticos de ruta y un formulario de integración vía API para la mejora de la eficiencia logística.
+  
+  - Particulares: Funcionalidades sencillas de cálculo de rutas y pronósticos para viajes cotidianos.
 
-  3. Análisis de Datos:
-     - Muestra tendencias históricas y estadísticas simuladas (utilizando un dataset de ejemplo) para analizar la demanda.
-
-  4. Simulación Avanzada:
-     - Permite al usuario modificar parámetros (por ejemplo, horas en el futuro) para simular y comparar escenarios de tráfico.
-
-  5. Integrar API:
-     - Presenta un formulario para que los interesados soliciten la integración vía API, enviando sus datos (sin exponer correos).
-
-  6. Modelo Especializado para Talavera de la Reina:
-     - Un tab específico que utiliza simulaciones y factores de tráfico adaptados a Talavera de la Reina, con direcciones predefinidas para la zona.
-
-Las geocodificaciones (directa e inversa) se realizan mediante Nominatim y las rutas se calculan usando la API pública de OSRM.
-Los mapas se renderizan con Folium a través de streamlit-folium.
+Se utilizan geocodificación y reverse geocodificación mediante Nominatim, la API de OSRM para obtener rutas y Folium (a través de streamlit-folium) para visualizar mapas de OpenStreetMap.
 """
 
 import streamlit as st
@@ -42,10 +26,6 @@ import pandas as pd
 # =============================================================================
 
 def geocode_address(address: str):
-    """
-    Geocodifica una dirección usando Nominatim.
-    Devuelve ((lat, lon), dirección completa) o (None, None) en caso de fallo.
-    """
     geolocator = Nominatim(user_agent="trafiquea_dashboard")
     location = geolocator.geocode(address)
     if location:
@@ -53,9 +33,6 @@ def geocode_address(address: str):
     return None, None
 
 def reverse_geocode(lat: float, lon: float):
-    """
-    Realiza la geocodificación inversa para obtener la dirección completa.
-    """
     geolocator = Nominatim(user_agent="trafiquea_reverse")
     location = geolocator.reverse((lat, lon), language="en")
     if location:
@@ -63,36 +40,22 @@ def reverse_geocode(lat: float, lon: float):
     return "Dirección no encontrada"
 
 # =============================================================================
-# Función para Simular Factor de Tráfico Basado en la Zona
+# Factor de Tráfico por Zona
 # =============================================================================
 
 def simulate_zone_factor(full_address: str):
-    """
-    Asigna un factor de tráfico basado en la zona extraída de la dirección completa.
-    Para zonas específicas de interés, se asignan factores distintos.
-    """
     address_lower = full_address.lower()
-    # Por ejemplo, si se detecta "talavera" se aplica un factor específico.
     if "talavera" in address_lower:
         return 1.3
     return 1.2
 
 # =============================================================================
-# Función para Obtener Clima usando Open-Meteo
+# Obtener Clima con Open-Meteo
 # =============================================================================
 
 def get_weather_open_meteo(lat: float, lon: float):
-    """
-    Consulta la API de Open-Meteo para obtener el clima actual (temperatura y viento)
-    en función de la latitud y longitud.
-    """
     url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "current_weather": True,
-        "timezone": "auto"
-    }
+    params = {"latitude": lat, "longitude": lon, "current_weather": True, "timezone": "auto"}
     response = requests.get(url, params=params)
     if response.status_code == 200:
         data = response.json()
@@ -101,18 +64,10 @@ def get_weather_open_meteo(lat: float, lon: float):
     return None
 
 # =============================================================================
-# Función para Obtener Ruta con OSRM
+# Obtener Ruta con OSRM
 # =============================================================================
 
 def get_route_osrm(origin_coords, destination_coords):
-    """
-    Calcula la ruta entre dos puntos usando la API OSRM.
-    Devuelve un diccionario con:
-      - geometry: GeoJSON de la ruta.
-      - steps: Lista de segmentos (cada uno con distancia, duración y geometría).
-      - distance: Distancia total en metros.
-      - duration: Duración total en segundos.
-    """
     base_url = "http://router.project-osrm.org/directions/v5/mapbox/driving"
     coords = f"{origin_coords[1]},{origin_coords[0]};{destination_coords[1]},{destination_coords[0]}"
     params = {"overview": "full", "geometries": "geojson", "steps": "true"}
@@ -131,62 +86,39 @@ def get_route_osrm(origin_coords, destination_coords):
     return None
 
 # =============================================================================
-# Funciones para Simulación de Tráfico y Tiempos de Viaje
+# Simulación de Tráfico y Tiempos de Viaje
 # =============================================================================
 
 def assign_traffic_level(distance_km, start_time, weather, zone_factor):
-    """
-    Asigna un nivel de tráfico y un factor multiplicador de tiempo basado en:
-      - Hora de inicio (hora punta).
-      - Condiciones climáticas (viento).
-      - Distancia del segmento.
-      - Factor específico de la zona.
-    Devuelve (nivel, factor) donde nivel es "Bajo", "Moderado" o "Alto".
-    """
     hour = start_time.hour
     if 7 <= hour <= 9 or 17 <= hour <= 19:
         base_factor = 1.5
     else:
         base_factor = 1.2
-
     if weather and weather.get("windspeed") and weather["windspeed"] > 20:
         base_factor += 0.2
-
     if distance_km < 1:
         base_factor -= 0.1
     elif distance_km > 5:
         base_factor += 0.1
-
     base_factor *= zone_factor
-
     if base_factor <= 1.3:
         level = "Bajo"
     elif 1.3 < base_factor < 1.6:
         level = "Moderado"
     else:
         level = "Alto"
-
     return level, max(1.0, base_factor)
 
 def color_for_level(level):
-    """
-    Devuelve un color hexadecimal según el nivel de congestión.
-    Verde para "Bajo", naranja para "Moderado" y rojo para "Alto".
-    """
     if level == "Bajo":
-        return "#2ecc71"
+        return "#2ecc71"  # Verde
     elif level == "Moderado":
-        return "#f39c12"
+        return "#f39c12"  # Naranja
     else:
-        return "#e74c3c"
+        return "#e74c3c"  # Rojo
 
 def simulate_route_segments(steps, start_time, weather, zone_factor):
-    """
-    Itera sobre los pasos de la ruta y asigna un nivel de tráfico simulado a cada segmento.
-    Devuelve:
-      - Una lista de segmentos (con coordenadas, color, distancia y tiempo ajustado).
-      - La hora estimada de llegada.
-    """
     segments = []
     current_time = start_time
     for step in steps:
@@ -205,13 +137,6 @@ def simulate_route_segments(steps, start_time, weather, zone_factor):
     return segments, current_time
 
 def simulate_traffic_forecast(hour_offset):
-    """
-    Simula el pronóstico de tráfico para un número de horas en el futuro (hasta 6 horas).
-    Devuelve un diccionario con:
-      - saturacion: Nivel de congestión.
-      - tiempo_normal: Tiempo de viaje normal (min).
-      - tiempo_proyectado: Tiempo de viaje ajustado (min).
-    """
     if hour_offset <= 2:
         saturacion = "Bajo"
         factor = 1.0
@@ -226,13 +151,10 @@ def simulate_traffic_forecast(hour_offset):
     return {"saturacion": saturacion, "tiempo_normal": tiempo_normal, "tiempo_proyectado": tiempo_proyectado}
 
 # =============================================================================
-# Función para Análisis de Datos Históricos (Simulados)
+# Análisis de Datos Históricos
 # =============================================================================
 
 def analyze_historical_data():
-    """
-    Carga un dataset de ejemplo y muestra tendencias históricas y estadísticas simuladas.
-    """
     url = "https://raw.githubusercontent.com/plotly/datasets/master/2014_apple_stock.csv"
     try:
         df = pd.read_csv(url, parse_dates=["AAPL_x"])
@@ -240,7 +162,6 @@ def analyze_historical_data():
     except Exception as e:
         st.error("Error al cargar datos históricos.")
         return
-
     if "Demanda" not in df.columns:
         df["Demanda"] = np.random.randint(100, 500, len(df))
     df.sort_values("Fecha", inplace=True)
@@ -248,7 +169,7 @@ def analyze_historical_data():
     st.write(df.describe())
 
 # =============================================================================
-# Función para Mostrar el Formulario de Integración vía API
+# Formulario de Integración vía API
 # =============================================================================
 
 def show_integration_form():
@@ -263,14 +184,63 @@ def show_integration_form():
             st.success("Solicitud enviada correctamente. Nos pondremos en contacto contigo.")
 
 # =============================================================================
-# Tab: Tráfico en Tiempo Real
+# Tabs para Particulares, Empresas y Ayuntamientos
+# =============================================================================
+
+def tab_particulares():
+    st.header("Particulares")
+    st.markdown("""
+    Funcionalidades para usuarios individuales:
+      - Calcular rutas en tiempo real y obtener pronósticos de viaje.
+    """)
+    st.subheader("Tráfico en Tiempo Real")
+    tab_trafico_en_tiempo_real()
+    st.subheader("Pronósticos de Ruta")
+    tab_pronosticos_ruta()
+
+def tab_empresas():
+    st.header("Empresas")
+    st.markdown("""
+    Herramientas para mejorar la eficiencia operativa:
+      - Optimización de rutas en tiempo real.
+      - Pronósticos de ruta para planificación logística.
+      - Integración vía API.
+      - Simulación avanzada de escenarios.
+    """)
+    st.subheader("Tráfico en Tiempo Real")
+    tab_trafico_en_tiempo_real()
+    st.subheader("Pronósticos de Ruta")
+    tab_pronosticos_ruta()
+    st.subheader("Simulación Avanzada")
+    tab_simulacion_avanzada()
+    st.subheader("Integrar API")
+    tab_integrar_api()
+
+def tab_ayuntamientos():
+    st.header("Ayuntamientos")
+    st.markdown("""
+    Funcionalidades orientadas a la planificación urbana y gestión de movilidad:
+      - Modelo especializado para Talavera de la Reina.
+      - Análisis de datos históricos y simulación avanzada de escenarios.
+      - Pronósticos y optimización de rutas con enfoque local.
+    """)
+    st.subheader("Modelo Especializado - Talavera de la Reina")
+    tab_talavera()
+    st.subheader("Análisis de Datos Históricos")
+    tab_analisis_datos()
+    st.subheader("Simulación Avanzada")
+    tab_simulacion_avanzada()
+    st.subheader("Integrar API")
+    tab_integrar_api()
+
+# =============================================================================
+# Tabs: Funcionalidades Comunes
 # =============================================================================
 
 def tab_trafico_en_tiempo_real():
-    st.subheader("Tráfico en Tiempo Real")
     st.markdown("""
-    Ingrese las direcciones de origen y destino (con ciudad, estado, país) y la hora de inicio de su viaje.
-    La ruta se visualizará con segmentos coloreados según el nivel de congestión simulado, adaptado a la zona.
+    Ingrese las direcciones de origen y destino (incluyendo ciudad, estado, país) y la hora de inicio de su viaje.
+    La ruta se visualizará con segmentos coloreados según el nivel de congestión simulado.
     """)
     with st.form("form_trafico"):
         col1, col2, col3 = st.columns(3)
@@ -320,14 +290,9 @@ def tab_trafico_en_tiempo_real():
         - Rojo: Alto  
         """)
 
-# =============================================================================
-# Tab: Pronósticos de Ruta (hasta 24 horas)
-# =============================================================================
-
 def tab_pronosticos_ruta():
-    st.subheader("Pronósticos de Ruta (hasta 24 horas)")
     st.markdown("""
-    Seleccione el número de horas en el futuro para conocer la situación del tráfico y la ruta óptima para ese momento.
+    Seleccione cuántas horas en el futuro desea conocer la situación del tráfico y la ruta óptima para ese momento.
     Se mostrarán estimaciones de tiempo de viaje (normal y ajustado) y la ruta correspondiente.
     """)
     hour_options = list(range(1, 25))
@@ -370,17 +335,9 @@ def tab_pronosticos_ruta():
         if weather:
             st.write(f"**Clima en Origen (aprox.):** {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
 
-# =============================================================================
-# Tab: Análisis de Datos Históricos
-# =============================================================================
-
 def tab_analisis_datos():
     st.subheader("Análisis de Datos Históricos")
     analyze_historical_data()
-
-# =============================================================================
-# Tab: Simulación Avanzada de Escenarios
-# =============================================================================
 
 def tab_simulacion_avanzada():
     st.subheader("Simulación Avanzada de Escenarios")
@@ -389,27 +346,21 @@ def tab_simulacion_avanzada():
     forecast = simulate_traffic_forecast(hour_offset)
     st.write(f"**Nivel de Saturación Simulado:** {forecast['saturacion']}")
     st.write(f"**Tiempo de Viaje Normal (simulado):** {forecast['tiempo_normal']} min")
-    st.write(f"**Tiempo de Viaje Estimado (con tráfico, simulado):** {forecast['tiempo_proyectado']} min")
-
-# =============================================================================
-# Tab: Integración vía API
-# =============================================================================
+    st.write(f"**Tiempo de Viaje Estimado (simulado):** {forecast['tiempo_proyectado']} min")
 
 def tab_integrar_api():
     show_integration_form()
 
 # =============================================================================
-# Tab Especializado: Talavera de la Reina
+# Tab Especializado para Talavera de la Reina
 # =============================================================================
 
 def tab_talavera():
     st.header("Modelo Especializado: Talavera de la Reina")
     st.markdown("""
-    Este módulo se enfoca en Talavera de la Reina utilizando datos públicos y simulaciones específicas para la zona.
-    Se asumen direcciones dentro del área de Talavera para optimizar la geocodificación y el análisis.
+    Este módulo se centra en Talavera de la Reina utilizando datos y simulaciones específicas para la zona.
+    Las direcciones se asumen dentro del área de Talavera para optimizar la geocodificación y el análisis.
     """)
-    
-    # Tráfico en Tiempo Real para Talavera
     st.subheader("Tráfico en Tiempo Real - Talavera")
     with st.form("form_trafico_talavera"):
         col1, col2, col3 = st.columns(3)
@@ -458,10 +409,9 @@ def tab_talavera():
         - Naranja: Moderado  
         - Rojo: Alto  
         """)
-
-    # Pronóstico para Talavera
+    
     st.subheader("Pronóstico de Ruta - Talavera (hasta 24 horas)")
-    selected_hour = st.selectbox("Horas en el futuro:", list(range(1,25)), format_func=lambda x: f"{x} hora{'s' if x > 1 else ''}")
+    selected_hour = st.selectbox("Horas en el futuro:", list(range(1, 25)), format_func=lambda x: f"{x} hora{'s' if x > 1 else ''}")
     col1, col2 = st.columns(2)
     with col1:
         origin_forecast = st.text_input("Origen (Pronóstico)", "Plaza de España, Talavera de la Reina, España")
@@ -500,9 +450,8 @@ def tab_talavera():
         if weather_f:
             st.write(f"**Clima en Origen (aprox.):** {weather_f['temperature']}°C, Viento: {weather_f['windspeed']} km/h")
     
-    # Análisis de Datos Históricos para Talavera
     st.subheader("Análisis de Datos Históricos para Talavera")
-    st.markdown("A continuación se muestran tendencias y estadísticas simuladas para Talavera de la Reina.")
+    st.markdown("Tendencias y estadísticas simuladas para Talavera de la Reina.")
     url = "https://raw.githubusercontent.com/plotly/datasets/master/2014_apple_stock.csv"
     try:
         df_talavera = pd.read_csv(url, parse_dates=["AAPL_x"])
@@ -513,12 +462,11 @@ def tab_talavera():
     if df_talavera.empty:
         st.write("No hay datos disponibles.")
     else:
-        df_talavera["Demanda"] = df_talavera["Demanda"] * 0.8  # Ajuste simulado para Talavera
+        df_talavera["Demanda"] = df_talavera["Demanda"] * 0.8
         df_talavera.sort_values("Fecha", inplace=True)
         st.line_chart(df_talavera.set_index("Fecha")["Demanda"])
         st.write(df_talavera.describe())
     
-    # Simulación Avanzada para Talavera
     st.subheader("Simulación Avanzada de Escenarios - Talavera")
     hour_offset = st.slider("Horas en el Futuro:", min_value=1, max_value=6, value=2)
     forecast = simulate_traffic_forecast(hour_offset)
@@ -526,7 +474,6 @@ def tab_talavera():
     st.write(f"**Tiempo de Viaje Normal (simulado):** {forecast['tiempo_normal']} min")
     st.write(f"**Tiempo de Viaje Estimado (simulado):** {forecast['tiempo_proyectado']} min")
     
-    # Integrar API para Talavera
     st.subheader("Integrar API")
     show_integration_form()
 
@@ -537,35 +484,73 @@ def tab_talavera():
 def main_app():
     st.title("Trafiquea: Plataforma Integral para Transporte y Rutas en Tiempo Real")
     st.markdown("""
-    Bienvenido a Trafiquea. Explore las funcionalidades:
-      - **Tráfico en Tiempo Real:** Calcule rutas y visualice la congestión adaptada a cada zona.
-      - **Pronósticos de Ruta:** Obtenga proyecciones de tráfico y tiempos de viaje hasta 24 horas en el futuro.
-      - **Análisis de Datos:** Revise tendencias históricas y estadísticas simuladas.
-      - **Simulación Avanzada:** Compare escenarios modificando parámetros.
-      - **Integrar API:** Solicite la integración de esta solución en su sistema.
-      - **Talavera de la Reina:** Módulo especializado para esta ciudad.
-    """)
-    tabs = st.tabs([
-        "Tráfico en Tiempo Real", 
-        "Pronósticos de Ruta", 
-        "Análisis de Datos", 
-        "Simulación Avanzada", 
-        "Integrar API", 
-        "Talavera de la Reina"
-    ])
+    Bienvenido a Trafiquea. Explore las funcionalidades según su perfil:
     
-    with tabs[0]:
-        tab_trafico_en_tiempo_real()
-    with tabs[1]:
-        tab_pronosticos_ruta()
-    with tabs[2]:
-        tab_analisis_datos()
-    with tabs[3]:
-        tab_simulacion_avanzada()
-    with tabs[4]:
-        tab_integrar_api()
-    with tabs[5]:
-        tab_talavera()
+    - **Ayuntamientos:** Herramientas específicas para la planificación urbana y gestión de movilidad.
+    - **Empresas:** Funcionalidades para optimizar rutas y planificar operaciones logísticas.
+    - **Particulares:** Herramientas para usuarios individuales que buscan calcular rutas y obtener pronósticos de viaje.
+    """)
+    main_tabs = st.tabs(["Ayuntamientos", "Empresas", "Particulares"])
+    
+    with main_tabs[0]:
+        tab_ayuntamientos()
+    with main_tabs[1]:
+        tab_empresas()
+    with main_tabs[2]:
+        tab_particulares()
+
+def tab_ayuntamientos():
+    st.header("Ayuntamientos")
+    st.markdown("""
+    Este módulo está orientado a la gestión urbana. Incluye:
+      - Modelo especializado para Talavera de la Reina.
+      - Análisis de datos históricos y simulación avanzada de escenarios.
+      - Funcionalidades de integración para facilitar la toma de decisiones.
+    """)
+    tab_talavera()
+    st.markdown("---")
+    st.subheader("Análisis de Datos Históricos")
+    tab_analisis_datos()
+    st.markdown("---")
+    st.subheader("Simulación Avanzada")
+    tab_simulacion_avanzada()
+    st.markdown("---")
+    st.subheader("Integrar API")
+    tab_integrar_api()
+
+def tab_empresas():
+    st.header("Empresas")
+    st.markdown("""
+    Herramientas para la optimización operativa y logística:
+      - Cálculo de rutas en tiempo real.
+      - Pronósticos de ruta para planificar operaciones.
+      - Simulación avanzada para comparar escenarios.
+      - Integración vía API para la conexión con sistemas internos.
+    """)
+    st.subheader("Tráfico en Tiempo Real")
+    tab_trafico_en_tiempo_real()
+    st.markdown("---")
+    st.subheader("Pronósticos de Ruta")
+    tab_pronosticos_ruta()
+    st.markdown("---")
+    st.subheader("Simulación Avanzada")
+    tab_simulacion_avanzada()
+    st.markdown("---")
+    st.subheader("Integrar API")
+    tab_integrar_api()
+
+def tab_particulares():
+    st.header("Particulares")
+    st.markdown("""
+    Funcionalidades para usuarios individuales:
+      - Cálculo de rutas en tiempo real.
+      - Pronósticos de ruta para conocer tiempos de viaje.
+    """)
+    st.subheader("Tráfico en Tiempo Real")
+    tab_trafico_en_tiempo_real()
+    st.markdown("---")
+    st.subheader("Pronósticos de Ruta")
+    tab_pronosticos_ruta()
 
 if __name__ == "__main__":
     main_app()
