@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 import joblib
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Geocodificación y Reverse Geocoding
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 def geocode_address(address: str):
     geolocator = Nominatim(user_agent="trafiquea_dashboard")
@@ -21,14 +21,14 @@ def geocode_address(address: str):
 
 def reverse_geocode(lat: float, lon: float):
     geolocator = Nominatim(user_agent="trafiquea_reverse")
-    location = geolocator.reverse((lat, lon), language="en")
+    location = geolocator.reverse((lat, lon), language="es")
     if location:
         return location.address
     return "Dirección no encontrada"
 
-# ---------------------------------------------------------------------------
-# Integración de APIs Reales
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Integración de APIs Reales: Clima y Rutas
+# =============================================================================
 
 def get_weather_open_meteo(lat: float, lon: float):
     url = "https://api.open-meteo.com/v1/forecast"
@@ -37,7 +37,7 @@ def get_weather_open_meteo(lat: float, lon: float):
     if response.status_code == 200:
         data = response.json()
         current = data.get("current_weather", {})
-        return {"temperature": current.get("temperature"), "windspeed": current.get("windspeed")}
+        return {"temperatura": current.get("temperature"), "viento": current.get("windspeed")}
     return None
 
 def get_route_osrm(origin_coords, destination_coords):
@@ -60,22 +60,24 @@ def get_route_osrm(origin_coords, destination_coords):
 
 def get_real_traffic_data(ayuntamiento: str):
     """
-    Consulta una API pública real (o portal de datos abiertos) para obtener información de tráfico y sostenibilidad
-    para el ayuntamiento indicado. En producción, se integraría una API real; aquí se devuelve un ejemplo.
+    Función de ejemplo para obtener datos reales de tráfico y sostenibilidad 
+    para un ayuntamiento. En producción se integraría una API pública de datos 
+    abiertos (por ejemplo, del portal de Castilla-La Mancha).
     """
-    # Ejemplo: se podría usar "https://datos.castillalamancha.es/api/trafico?ayuntamiento={ayuntamiento}"
-    # Para este ejemplo devolvemos datos fijos.
-    data = {
-        "congestion": np.random.choice(["Bajo", "Moderado", "Alto"]),
-        "co2_emissions": np.random.uniform(100, 300)  # kg CO₂/día
-    }
-    return data
+    # Ejemplo: URL real de la API de datos abiertos (a reemplazar)
+    # url = f"https://datos.castillalamancha.es/api/trafico?municipio={ayuntamiento}"
+    # response = requests.get(url)
+    # data = response.json()
+    # return data
+    return {"congestion": np.random.choice(["Bajo", "Moderado", "Alto"]),
+            "emisiones_co2": np.random.uniform(100, 300)}  # kg CO₂/día
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Simulación de Tráfico y Tiempos de Viaje
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 def simulate_zone_factor(full_address: str):
+    # Ajuste de factor de congestión según la zona; se puede ampliar con datos reales
     address_lower = full_address.lower()
     if "talavera" in address_lower:
         return 1.3
@@ -86,7 +88,7 @@ def simulate_zone_factor(full_address: str):
 def assign_traffic_level(distance_km, start_time, weather, zone_factor):
     hour = start_time.hour
     base_factor = 1.5 if (7 <= hour <= 9 or 17 <= hour <= 19) else 1.2
-    if weather and weather.get("windspeed") and weather["windspeed"] > 20:
+    if weather and weather.get("viento") and weather["viento"] > 20:
         base_factor += 0.2
     if distance_km < 1:
         base_factor -= 0.1
@@ -141,13 +143,12 @@ def simulate_traffic_forecast(hour_offset):
     tiempo_proyectado = round(tiempo_normal * factor)
     return {"saturacion": saturacion, "tiempo_normal": tiempo_normal, "tiempo_proyectado": tiempo_proyectado}
 
-# ---------------------------------------------------------------------------
-# Modelo de Machine Learning (Ejemplo)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Integración de Modelos de Machine Learning
+# =============================================================================
+
 @st.cache_resource
 def load_demand_model():
-    # Se asume que existe un modelo entrenado en "model_demand.pkl"
-    # En producción, este modelo se entrenaría con datos reales de movilidad.
     try:
         model = joblib.load("model_demand.pkl")
         return model
@@ -161,9 +162,10 @@ def predict_demand(input_features):
         return prediction[0]
     return None
 
-# ---------------------------------------------------------------------------
-# Datos Históricos Reales (Ejemplo) – Últimos 6 meses
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Análisis de Datos Históricos (Últimos 6 meses)
+# =============================================================================
+
 def analyze_historical_data():
     dates = pd.date_range(end=datetime.now(), periods=180)
     demand = np.random.randint(80, 300, len(dates))
@@ -176,22 +178,18 @@ def analyze_historical_data():
     st.write(f"- Mínimo de viajes/día: {min_val}")
     st.write(f"- Promedio de viajes/día: {avg_val:.2f}")
 
-# ---------------------------------------------------------------------------
-# Formulario de Integración vía API
-# ---------------------------------------------------------------------------
-def show_integration_form():
-    with st.form("integration_form_final", clear_on_submit=True):
-        nombre = st.text_input("Nombre")
-        apellidos = st.text_input("Apellidos")
-        institucion = st.text_input("Institución o Empresa")
-        mensaje = st.text_area("Mensaje (opcional)")
-        submitted = st.form_submit_button("Enviar Solicitud")
-        if submitted:
-            st.success("Solicitud enviada. Nos pondremos en contacto contigo.")
+# =============================================================================
+# Calculadora de CAE para Empresas
+# =============================================================================
 
-# ---------------------------------------------------------------------------
-# Funcionalidades Comunes
-# ---------------------------------------------------------------------------
+def calculate_cae(volume_kg: float):
+    factor_cae = 0.001  # 1 CAE por cada 1000 kg de CO₂ evitados
+    return volume_kg * factor_cae
+
+# =============================================================================
+# Componentes Comunes: Mapas y Funcionalidades
+# =============================================================================
+
 def show_map_and_traffic():
     with st.form("traffic_form_final", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
@@ -222,8 +220,7 @@ def show_map_and_traffic():
                                      (origin_coords[1] + dest_coords[1]) / 2],
                            zoom_start=12, tiles="OpenStreetMap")
         for seg in segments:
-            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]],
-                            color=seg["color"], weight=4).add_to(m_map)
+            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]], color=seg["color"], weight=4).add_to(m_map)
         folium.Marker(origin_coords, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_map)
         folium.Marker(dest_coords, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_map)
         st_folium(m_map, width=700)
@@ -232,11 +229,11 @@ def show_map_and_traffic():
         st.write(f"Distancia: {dist_km:.2f} km")
         st.write(f"Tiempo estimado: {arrival_time.strftime('%H:%M')} (~{int(total_time_s/60)} min)")
         if weather:
-            st.write(f"Clima: {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
+            st.write(f"Clima: {weather['temperatura']}°C, Viento: {weather['viento']} km/h")
 
 def show_forecast():
-    st.write("Seleccione cuántas horas en el futuro desea conocer la situación del tráfico.")
-    hours = list(range(1, 25))
+    st.write("Seleccione el número de horas en el futuro:")
+    hours = list(range(1,25))
     selected_hour = st.selectbox("Horas en el futuro:", hours)
     col1, col2 = st.columns(2)
     with col1:
@@ -261,8 +258,7 @@ def show_forecast():
                                       (origin_coords[1] + dest_coords[1]) / 2],
                              zoom_start=12, tiles="OpenStreetMap")
         for seg in segments:
-            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]],
-                            color=seg["color"], weight=4).add_to(m_fore)
+            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]], color=seg["color"], weight=4).add_to(m_fore)
         folium.Marker(origin_coords, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_fore)
         folium.Marker(dest_coords, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_fore)
         st_folium(m_fore, width=700)
@@ -272,7 +268,7 @@ def show_forecast():
         st.write(f"Salida (Futura): {future_dt.strftime('%H:%M')}")
         st.write(f"Llegada estimada: {arrival_time.strftime('%H:%M')} (~{int(total_time_s/60)} min)")
         if weather:
-            st.write(f"Clima: {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
+            st.write(f"Clima: {weather['temperatura']}°C, Viento: {weather['viento']} km/h")
 
 def show_simulation_advanced():
     offset = st.slider("Horas en el Futuro (simulación):", 1, 6, 2)
@@ -281,25 +277,26 @@ def show_simulation_advanced():
     st.write(f"Tiempo Normal: {result['tiempo_normal']} min")
     st.write(f"Tiempo Ajustado: {result['tiempo_proyectado']} min")
 
-# ---------------------------------------------------------------------------
-# Módulo Especializado para Talavera (y Comarca)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Módulo Especializado: Talavera y Comarca
+# =============================================================================
+
 def show_talavera_module():
     st.write("### Talavera y Comarca")
     with st.form("talavera_module_form", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
         with col1:
-            origin = st.text_input("Origen", "Plaza de España, Talavera de la Reina, España")
+            origin = st.text_input("Origen (Talavera)", "Plaza de España, Talavera de la Reina, España")
         with col2:
-            destination = st.text_input("Destino", "Centro, Talavera de la Reina, España")
+            destination = st.text_input("Destino (Talavera)", "Centro, Talavera de la Reina, España")
         with col3:
             start_time = st.time_input("Hora de Inicio", datetime.now().time())
-        submitted = st.form_submit_button("Calcular Ruta")
+        submitted = st.form_submit_button("Calcular Ruta Talavera")
     if submitted:
         origin_coords, origin_full = geocode_address(origin)
         dest_coords, dest_full = geocode_address(destination)
         if not (origin_coords and dest_coords):
-            st.error("Verifique las direcciones.")
+            st.error("No se pudo geocodificar las direcciones para Talavera.")
             return
         now_dt = datetime.now()
         start_dt = datetime(now_dt.year, now_dt.month, now_dt.day, start_time.hour, start_time.minute)
@@ -310,33 +307,39 @@ def show_talavera_module():
             st.error("No se pudo obtener la ruta para Talavera.")
             return
         segments, arrival_time = simulate_route_segments(route_data["steps"], start_dt, weather, zone_factor)
-        m_tal = folium.Map(location=[(origin_coords[0] + dest_coords[0]) / 2,
-                                     (origin_coords[1] + dest_coords[1]) / 2],
+        m_tal = folium.Map(location=[(origin_coords[0]+dest_coords[0])/2, (origin_coords[1]+dest_coords[1])/2],
                            zoom_start=13, tiles="OpenStreetMap")
         for seg in segments:
-            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]],
-                            color=seg["color"], weight=4).add_to(m_tal)
+            folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]], color=seg["color"], weight=4).add_to(m_tal)
         folium.Marker(origin_coords, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_tal)
         folium.Marker(dest_coords, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_tal)
         st_folium(m_tal, width=700)
         dist_km = route_data["distance"] / 1000.0
         total_time_s = sum(seg["time_s"] for seg in segments)
-        st.write(f"Distancia: {dist_km:.2f} km")
+        st.write(f"Distancia Talavera: {dist_km:.2f} km")
         st.write(f"Llegada estimada: {arrival_time.strftime('%H:%M')} (~{int(total_time_s/60)} min)")
         if weather:
-            st.write(f"Clima: {weather['temperature']}°C, Viento: {weather['windspeed']} km/h")
-    st.markdown("#### Datos Históricos en Talavera")
+            st.write(f"Clima: {weather['temperatura']}°C, Viento: {weather['viento']} km/h")
+    st.markdown("#### Datos Históricos (Talavera)")
     analyze_historical_data()
-    st.markdown("#### Simulación Avanzada en Talavera")
+    st.markdown("#### Simulación Avanzada (Talavera)")
     show_simulation_advanced()
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Secciones por Perfil
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 def ayuntamientos_section():
     st.header("Ayuntamientos")
-    st.write("Herramientas para la gestión urbana y sostenibilidad.")
+    st.write("Soluciones para la gestión urbana y la sostenibilidad.")
+    # Selección de ayuntamiento real (ejemplo: datos de Castilla-La Mancha)
+    ayto = st.selectbox("Seleccione un ayuntamiento", 
+                        ["Talavera de la Reina", "Toledo Capital", "Illescas", "Seseña", "Ocaña"],
+                        key="ayto_selector")
+    real_data = get_real_traffic_data(ayto)
+    st.write(f"Congestión actual: {real_data['congestion']}")
+    st.write(f"Emisiones CO₂ estimadas: {real_data['emisiones_co2']:.1f} kg/día")
+    
     ayto_tabs = st.tabs(["Mapa y Tráfico", "Predicción", "Talavera y Comarca", "Simulación", "Integración API"])
     with ayto_tabs[0]:
         show_map_and_traffic()
@@ -351,7 +354,7 @@ def ayuntamientos_section():
 
 def empresas_section():
     st.header("Empresas")
-    st.write("Optimización operativa, reducción de costes y cálculo de CAE.")
+    st.write("Optimice rutas, reduzca costes y aproveche créditos de emisiones (CAE).")
     emp_tabs = st.tabs(["Mapa y Tráfico", "Predicción", "Simulación", "Calculadora CAE", "Integración API"])
     with emp_tabs[0]:
         show_map_and_traffic()
@@ -361,34 +364,35 @@ def empresas_section():
         show_simulation_advanced()
     with emp_tabs[3]:
         st.write("Calculadora de CAE")
-        volume = st.number_input("Volumen de CO₂ evitado (kg)", min_value=0.0, value=1000.0, step=100.0)
-        if st.button("Calcular CAE"):
-            cae = volume * 0.001  # Ejemplo: 1 CAE por cada 1000 kg de CO₂ evitados
+        volume = st.number_input("CO₂ evitado (kg)", min_value=0.0, value=1000.0, step=100.0, key="coe_volume")
+        if st.button("Calcular CAE", key="calc_cae"):
+            cae = calculate_cae(volume)
             st.write(f"CAE estimados: {cae:.2f}")
     with emp_tabs[4]:
         show_integration_form()
 
 def particulares_section():
     st.header("Particulares")
-    st.write("Soluciones para optimizar sus desplazamientos diarios.")
+    st.write("Optimice sus desplazamientos diarios.")
     part_tabs = st.tabs(["Mapa y Tráfico", "Predicción", "Opciones Eco"])
     with part_tabs[0]:
         show_map_and_traffic()
     with part_tabs[1]:
         show_forecast()
     with part_tabs[2]:
-        st.write("Rutas en bicicleta y transporte público (simulado).")
-        st.write("En una versión real se integrarían APIs específicas para modos eco.")
+        st.write("Opciones Eco: Rutas optimizadas para bicicleta y transporte público (simulado).")
+        st.write("En una versión real se integrarían APIs en modo cycling/transit.")
 
-# ---------------------------------------------------------------------------
-# Función Principal del Dashboard
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Aplicación Principal
+# =============================================================================
 
 def main_app():
     st.title("Trafiquea")
-    st.write("Bienvenido. Esta plataforma ofrece soluciones de movilidad y sostenibilidad adaptadas a Ayuntamientos, Empresas y Particulares.")
+    st.write("Bienvenido. Nuestra plataforma ofrece soluciones integrales de movilidad y sostenibilidad adaptadas a Ayuntamientos, Empresas y Particulares.")
     
-    user_type = st.selectbox("Seleccione su tipo de usuario", ["Ayuntamiento", "Empresa", "Particular"], key="user_type")
+    # Selección del tipo de usuario
+    user_type = st.selectbox("Tipo de Usuario", ["Ayuntamiento", "Empresa", "Particular"], key="user_type")
     st.write("---")
     
     if user_type == "Ayuntamiento":
