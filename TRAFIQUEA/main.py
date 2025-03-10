@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
@@ -12,8 +13,11 @@ import plotly.express as px
 from prophet import Prophet
 import lightgbm as lgb
 
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
 # =============================================================================
-# GEOCODIFICACIÓN CON NOMINATIM (sin uso de secrets)
+# Funciones de Geocodificación
 # =============================================================================
 
 def geocode_address(address: str):
@@ -31,14 +35,10 @@ def reverse_geocode(lat: float, lon: float):
     return "Dirección no encontrada"
 
 # =============================================================================
-# INTEGRACIÓN DE APIS REALES
+# Integración de APIs: Open-Meteo, OSRM, EEA
 # =============================================================================
 
 def get_weather_open_meteo(lat: float, lon: float):
-    """
-    Consulta la API gratuita de Open‑Meteo, solicitando variables:
-    temperatura, viento, precipitación y nubosidad.
-    """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
@@ -60,9 +60,6 @@ def get_weather_open_meteo(lat: float, lon: float):
     return None
 
 def get_route_osrm(origin_coords, destination_coords):
-    """
-    Calcula la mejor ruta entre dos puntos usando el servicio público de OSRM.
-    """
     base_url = "http://router.project-osrm.org/directions/v5/mapbox/driving"
     coords = f"{origin_coords[1]},{origin_coords[0]};{destination_coords[1]},{destination_coords[0]}"
     params = {"overview": "full", "geometries": "geojson", "steps": "true"}
@@ -81,10 +78,6 @@ def get_route_osrm(origin_coords, destination_coords):
     return None
 
 def get_route_osrm_multiple(coords_list, profile="driving"):
-    """
-    Utiliza el Trip Service de OSRM para optimizar rutas con múltiples paradas.
-    coords_list: lista de tuplas (lat, lon)
-    """
     base_url = f"http://router.project-osrm.org/trip/v1/{profile}/"
     coords_str = ";".join([f"{lon},{lat}" for (lat, lon) in coords_list])
     params = {"roundtrip": "false", "source": "first", "destination": "last", "geometries": "geojson"}
@@ -98,10 +91,6 @@ def get_route_osrm_multiple(coords_list, profile="driving"):
 
 @st.cache_data(ttl=3600)
 def get_eea_air_quality():
-    """
-    Descarga datos reales de calidad del aire desde la EEA (Air Quality e-Reporting).
-    Se obtiene el XML y se parsea con xmltodict. Cacheado 1 hora.
-    """
     url = "https://discomap.eea.europa.eu/AQER/xml/aqmdata.xml"
     response = requests.get(url)
     if response.status_code == 200:
@@ -109,48 +98,47 @@ def get_eea_air_quality():
         return data_xml
     return None
 
-@st.cache_data(ttl=3600)
-def get_eea_mobility_data():
-    """
-    Descarga un CSV oficial de la EEA con datos de emisiones de vehículos nuevos.
-    URL oficial (actualizada): https://www.eea.europa.eu/system/files/2022_CO2_emissions_passenger_cars.csv
-    """
-    csv_url = "https://www.eea.europa.eu/system/files/2022_CO2_emissions_passenger_cars.csv"
+def download_file(url, filename, sep=None, encoding="utf-8"):
+    filepath = os.path.join(DATA_DIR, filename)
+    if not os.path.exists(filepath):
+        response = requests.get(url)
+        if response.status_code == 200:
+            with open(filepath, "wb") as f:
+                f.write(response.content)
     try:
-        df = pd.read_csv(csv_url, sep=";", encoding="latin1")
+        if sep:
+            df = pd.read_csv(filepath, sep=sep, encoding=encoding)
+        else:
+            df = pd.read_csv(filepath, encoding=encoding)
         return df
     except Exception as e:
-        st.error(f"Error al cargar datos de movilidad EEA: {e}")
+        st.error(f"Error al cargar {filename}: {e}")
         return None
+
+@st.cache_data(ttl=3600)
+def get_eea_mobility_data():
+    csv_url = "https://www.eea.europa.eu/system/files/2022_CO2_emissions_passenger_cars.csv"
+    return download_file(csv_url, "CO2_emissions_passenger_cars.csv", sep=";", encoding="latin1")
 
 @st.cache_data(ttl=3600)
 def get_eea_noise_data():
-    """
-    Descarga datos oficiales de ruido ambiental de la EEA.
-    URL oficial (actualizada): https://www.eea.europa.eu/system/files/2022_road_traffic_noise.csv
-    """
     noise_url = "https://www.eea.europa.eu/system/files/2022_road_traffic_noise.csv"
-    try:
-        df = pd.read_csv(noise_url, encoding="utf-8")
-        return df
-    except Exception as e:
-        st.error(f"Error al cargar datos de ruido EEA: {e}")
-        return None
+    return download_file(noise_url, "road_traffic_noise.csv", encoding="utf-8")
+
+@st.cache_data(ttl=3600)
+def load_municipios():
+    url = "https://raw.githubusercontent.com/juanbrujo/datasets/main/municipios_es.csv"
+    return download_file(url, "municipios_es.csv")
 
 def get_real_traffic_data(ayuntamiento: str):
-    """
-    Consulta datos reales de tráfico y emisiones para un ayuntamiento.
-    Debe integrarse con un API oficial a nivel municipal. Se deja aquí para reemplazo.
-    """
-    # URL oficial de datos abiertos de tráfico de España o de un ayuntamiento
-    # Por ejemplo, se podría usar un servicio del Ministerio de Transportes
+    # Reemplazar con API oficial de tráfico local; se utiliza un valor de ejemplo
     return {
         "congestion": np.random.choice(["Bajo", "Moderado", "Alto"]),
         "emisiones_co2": np.random.uniform(100, 300)
     }
 
 # =============================================================================
-# SIMULACIÓN DE TRÁFICO Y MODELO DE ML/DL
+# SIMULACIÓN DE TRÁFICO Y MODELO DE ML
 # =============================================================================
 
 def simulate_zone_factor(full_address: str):
@@ -226,10 +214,6 @@ def simulate_traffic_forecast(hour_offset):
 
 @st.cache_resource
 def load_demand_model():
-    """
-    Carga un modelo de ML entrenado con LightGBM para predecir la demanda de movilidad.
-    Si no existe, entrena un modelo básico a partir de datos históricos de la EEA.
-    """
     try:
         model = joblib.load("model_demand_lgbm.pkl")
         return model
@@ -263,7 +247,7 @@ def forecast_with_prophet(data: pd.DataFrame, periods: int = 24):
     return forecast
 
 # =============================================================================
-# ANÁLISIS Y VISUALIZACIÓN DE DATOS HISTÓRICOS (Movilidad, Ruido, Emisiones GEI)
+# ANÁLISIS Y VISUALIZACIÓN DE DATOS HISTÓRICOS
 # =============================================================================
 
 def load_historical_mobility_data():
@@ -298,15 +282,14 @@ def analyze_historical_data():
         st.dataframe(noise_df)
 
 # =============================================================================
-# CALCULADORA DE CAE (para Empresas)
+# CALCULADORA DE CAE
 # =============================================================================
 
 def calculate_cae(volume_kg: float):
-    factor_cae = 0.001
-    return volume_kg * factor_cae
+    return volume_kg * 0.001
 
 # =============================================================================
-# FORMULARIO DE INTEGRACIÓN (Sin claves)
+# FORMULARIO DE INTEGRACIÓN
 # =============================================================================
 
 def show_integration_form():
@@ -409,7 +392,7 @@ def show_forecast():
                      f"Precipitación: {weather['precipitacion']} mm, Nubosidad: {weather['nubosidad']}%")
 
 def show_simulation_advanced(key_prefix="default"):
-    st.subheader("Simulación Avanzada con Múltiples Paradas (Trip Service)")
+    st.subheader("Simulación Avanzada (Múltiples Paradas)")
     st.write("Ingrese cada dirección en una línea (mínimo 3).")
     addresses_text = st.text_area("Direcciones:", "Plaza Mayor, Madrid\nPuerta del Sol, Madrid\nAtocha, Madrid", key=f"trip_addresses_{key_prefix}")
     if st.button("Optimizar Ruta", key=f"btn_trip_{key_prefix}"):
@@ -440,22 +423,8 @@ def show_simulation_advanced(key_prefix="default"):
         st.write(f"Duración total: ~{int(duration_s/60)} min")
 
 # =============================================================================
-# MÓDULO DE SELECCIÓN DE PAÍS Y MUNICIPIOS (Ayuntamientos)
+# MÓDULO DE SELECCIÓN DE MUNICIPIOS
 # =============================================================================
-
-@st.cache_data(ttl=3600)
-def load_municipios():
-    """
-    Carga un dataset oficial de municipios de España.
-    Aquí se usa un dataset disponible en GitHub (reemplazar por la fuente oficial del INE si se desea).
-    """
-    url = "https://raw.githubusercontent.com/juanbrujo/datasets/main/municipios_es.csv"
-    try:
-        df = pd.read_csv(url)
-        return df
-    except Exception as e:
-        st.error(f"Error al cargar el dataset de municipios: {e}")
-        return None
 
 def select_municipio():
     df = load_municipios()
@@ -467,7 +436,7 @@ def select_municipio():
     return None
 
 # =============================================================================
-# SECCIONES POR PERFIL: AYUNTAMIENTOS Y EMPRESAS
+# SECCIONES: AYUNTAMIENTOS Y EMPRESAS
 # =============================================================================
 
 def ayuntamientos_section():
@@ -477,17 +446,17 @@ def ayuntamientos_section():
         st.error("No se pudo seleccionar un municipio.")
         return
     traffic_data = get_real_traffic_data(municipio)
-    st.write(f"**Congestión actual**: {traffic_data['congestion']}")
-    st.write(f"**Emisiones CO₂ estimadas**: {traffic_data['emisiones_co2']:.1f} kg/día")
+    st.write(f"**Congestión actual:** {traffic_data['congestion']}")
+    st.write(f"**Emisiones CO₂ estimadas:** {traffic_data['emisiones_co2']:.1f} kg/día")
     
     air_data = get_eea_air_quality()
     if air_data:
-        st.write("**Datos de Calidad del Aire (EEA)**:")
+        st.write("**Datos de Calidad del Aire (EEA):**")
         st.write(air_data)
     
     noise_df = get_eea_noise_data()
     if noise_df is not None:
-        st.write("**Datos de Ruido Ambiental (EEA)**:")
+        st.write("**Datos de Ruido Ambiental (EEA):**")
         st.dataframe(noise_df)
     
     ayto_tabs = st.tabs(["Mapa y Tráfico", "Predicción de Demanda", "Optimización (Múltiples Paradas)", "Integración API"])
@@ -496,14 +465,14 @@ def ayuntamientos_section():
     with ayto_tabs[1]:
         df_hist = load_historical_mobility_data()
         if df_hist is not None:
-            st.write("**Predicción de Demanda con LightGBM**:")
+            st.write("**Predicción de Demanda con LightGBM:**")
             df_hist["day"] = df_hist["ds"].dt.dayofyear
             input_day = st.number_input("Ingrese el día del año:", min_value=1, max_value=366,
                                           value=datetime.now().timetuple().tm_yday, key="input_day")
             pred = predict_demand([input_day])
             if pred is not None:
                 st.write(f"Predicción de demanda: {pred:.2f}")
-            st.write("**Predicción de Demanda con Prophet**:")
+            st.write("**Predicción de Demanda con Prophet:**")
             forecast = forecast_with_prophet(df_hist, periods=24)
             fig = px.line(forecast, x="ds", y="yhat", title="Predicción de Demanda (Prophet)")
             st.plotly_chart(fig)
@@ -520,14 +489,14 @@ def empresas_section():
     with emp_tabs[1]:
         df_hist = load_historical_mobility_data()
         if df_hist is not None:
-            st.write("**Predicción de Demanda con LightGBM**:")
+            st.write("**Predicción de Demanda con LightGBM:**")
             df_hist["day"] = df_hist["ds"].dt.dayofyear
             input_day = st.number_input("Ingrese el día del año:", min_value=1, max_value=366,
                                           value=datetime.now().timetuple().tm_yday, key="input_day_emp")
             pred = predict_demand([input_day])
             if pred is not None:
                 st.write(f"Predicción de demanda: {pred:.2f}")
-            st.write("**Predicción de Demanda con Prophet**:")
+            st.write("**Predicción de Demanda con Prophet:**")
             forecast = forecast_with_prophet(df_hist, periods=24)
             fig = px.line(forecast, x="ds", y="yhat", title="Predicción de Demanda (Prophet)")
             st.plotly_chart(fig)
@@ -549,11 +518,11 @@ def empresas_section():
 def main_app():
     st.title("Trafiquea: Dashboard de Movilidad y Sostenibilidad")
     st.markdown("""
-    Esta plataforma integra datos reales de la **EEA** (calidad del aire, emisiones, ruido ambiental),
-    variables meteorológicas de **Open‑Meteo**, rutas optimizadas con **OSRM** (incluyendo optimización de múltiples paradas)
-    y modelos de ML entrenados con **LightGBM** y **Prophet** para predecir la demanda de movilidad.
+    Esta plataforma integra datos reales de la EEA (calidad del aire, emisiones, ruido ambiental),
+    variables meteorológicas de Open‑Meteo, rutas optimizadas con OSRM (incluyendo optimización de múltiples paradas)
+    y modelos de ML entrenados con LightGBM y Prophet para predecir la demanda de movilidad.
     
-    Se utiliza además un dataset oficial de municipios de España para que los usuarios puedan seleccionar el municipio.
+    Se utiliza un dataset oficial de municipios de España para la selección de ayuntamientos.
     """)
     
     user_type = st.selectbox("Tipo de Usuario", ["Ayuntamiento", "Empresa"], key="user_type_selector")
