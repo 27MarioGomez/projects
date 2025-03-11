@@ -10,13 +10,17 @@ from prophet import Prophet
 import itertools
 from datetime import datetime
 
-# Intentar cargar spaCy y su modelo en español; si falla, usar fallback regex.
+# Intentar cargar spaCy y su modelo en español. Si falla, se usará un fallback regex.
 try:
     import spacy
+    # Si no está instalado, intenta descargarlo (esto puede tardar en el primer despliegue)
+    if not spacy.util.is_package("es_core_news_sm"):
+        from spacy.cli import download
+        download("es_core_news_sm")
     nlp_es = spacy.load("es_core_news_sm")
 except Exception:
     nlp_es = None
-    st.warning("No se pudo cargar spaCy o 'es_core_news_sm'. Se usará un método de extracción por regex.")
+    st.warning("No se pudo cargar spaCy o el modelo 'es_core_news_sm'. Se usará extracción por regex.")
 
 # -------------------------------------------------------------------------
 # CONFIGURACIÓN: API key de TomTom (definida en secrets.toml)
@@ -27,7 +31,7 @@ def get_tomtom_key():
     return st.secrets["tomtom"]["api_key"]
 
 # -------------------------------------------------------------------------
-# Solicitar ubicación actual mediante JavaScript
+# Solicitar ubicación actual mediante JavaScript (fallback: Madrid)
 # -------------------------------------------------------------------------
 def request_user_location():
     params = st.query_params
@@ -60,7 +64,7 @@ else:
 
 # -------------------------------------------------------------------------
 # MODELO PROPHET REALISTA (SINTÉTICO) CON REGRESSORES
-# Ajusta la influencia de precipitaciones fuertes
+# Se ajusta para sumar más retraso en caso de fuertes precipitaciones.
 # -------------------------------------------------------------------------
 @st.cache_resource
 def load_prophet_model():
@@ -80,7 +84,6 @@ def load_prophet_model():
         cloud = np.random.uniform(0, 100, n)
         base_time = 1.2 * distance
         wind_factor = (wind / 50) * 3
-        # Si precipitación > 10, aumentar el retraso
         precip_factor = (precip / 20) * (5 if precip <= 10 else 15)
         cloud_factor = (cloud / 100) * 2
         y = base_time + wind_factor + precip_factor + cloud_factor + np.random.normal(0, 2, n)
@@ -119,7 +122,7 @@ def predict_time(distance_km, temp, wind, precip, cloud):
     return forecast["yhat"].iloc[0]
 
 # -------------------------------------------------------------------------
-# OPEN-METEO: obtener variables meteorológicas
+# OPEN-METEO: Variables meteorológicas
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_weather_open_meteo(lat, lon):
@@ -144,7 +147,7 @@ def get_weather_open_meteo(lat, lon):
     return None
 
 # -------------------------------------------------------------------------
-# TOMTOM: SEARCH y ROUTING (incluyendo departAt)
+# TOMTOM SEARCH y ROUTING (con departAt en formato ISO 8601)
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=600)
 def tomtom_search(query, limit=5):
@@ -180,8 +183,7 @@ def tomtom_routing_api(origin_lat, origin_lon, dest_lat, dest_lon, vehicle_type=
         "travelMode": vehicle_type
     }
     if depart_at:
-        # TomTom requiere ISO 8601, por lo que se convierte
-        params["departAt"] = depart_at  # se espera que depart_at esté en ISO 8601
+        params["departAt"] = depart_at  # Se envía en ISO 8601
     if vehicle_type == "truck":
         params["vehicleCommercial"] = "true"
         params["vehicleMaxHeight"] = 4.0
@@ -205,7 +207,7 @@ def tomtom_traffic_flow(lat, lon):
     return None
 
 # -------------------------------------------------------------------------
-# TSP LOCAL (≤8 paradas) + Routing final
+# TSP LOCAL (≤8 paradas) y Routing final
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=600)
 def get_distance_time(lat1, lon1, lat2, lon2):
@@ -268,7 +270,7 @@ def final_routing_with_order(ordered_coords):
     return dist_m, time_s, route_points
 
 # -------------------------------------------------------------------------
-# Extracción de direcciones: usar spaCy o método regex de fallback
+# Extracción de direcciones: uso de spaCy o fallback regex
 # -------------------------------------------------------------------------
 def extract_addresses_es(text: str):
     if nlp_es:
@@ -278,12 +280,11 @@ def extract_addresses_es(text: str):
                             for tok in sent)]
         if addresses:
             return addresses
-    # Fallback: dividir por líneas y filtrar por keywords
-    keywords = ["calle", "avenida", "plaza", "carretera", "camino", "polígono"]
-    return [line.strip() for line in text.split("\n") if any(kw in line.lower() for kw in keywords)]
+    # Fallback: dividir por líneas e indicar que cada línea es una dirección
+    return [line.strip() for line in text.split("\n") if line.strip()]
 
 # -------------------------------------------------------------------------
-# Renderizar mapa con Folium en un placeholder para mantenerlo fijo
+# Renderizar mapa en un placeholder para mantenerlo fijo
 # -------------------------------------------------------------------------
 def render_map(route_points, lat_start, lon_start, lat_end=None, lon_end=None, color="blue"):
     center_lat = lat_start if lat_end is None else (lat_start + lat_end) / 2
@@ -295,23 +296,23 @@ def render_map(route_points, lat_start, lon_start, lat_end=None, lon_end=None, c
     folium.Marker((lat_start, lon_start), tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_map)
     if lat_end and lon_end:
         folium.Marker((lat_end, lon_end), tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_map)
-    map_placeholder = st.empty()
-    map_placeholder.st_folium(m_map, width=700)
+    st_folium(m_map, width=700)
 
 # -------------------------------------------------------------------------
 # TAB 1: Calcular ruta
 # -------------------------------------------------------------------------
 def tab_calcular_ruta():
     st.subheader("Calcular ruta")
-    # Seleccionar hora de salida (formato 24h)
-    hora_sel = st.selectbox("Hora de salida (24h)", [f"{i:02d}:00" for i in range(24)])
-    # Crear la fecha de salida en ISO 8601 (TomTom requiere ISO 8601)
+    # Inputs: Origen y Destino con sugerencias (dropdown)
+    origin_query = st.text_input("Origen (introduce una dirección por línea)", key="origin_query")
+    dest_query = st.text_input("Destino (introduce una dirección por línea)", key="dest_query")
+    # Hora de salida (mostrar en formato español, sin 24h)
+    hora_sel = st.selectbox("Hora de salida", [f"{i:02d}:00" for i in range(24)])
     hoy = datetime.now()
     depart_at = hoy.replace(hour=int(hora_sel.split(":")[0]), minute=0, second=0, microsecond=0)
-    depart_at_iso = depart_at.isoformat()
-    
-    origin_query = st.text_input("Origen")
-    dest_query = st.text_input("Destino")
+    depart_at_iso = depart_at.isoformat()  # para TomTom (ISO 8601)
+    depart_at_es = depart_at.strftime("%d-%m-%Y %H:%M")  # para mostrar al usuario
+    st.write(f"Fecha de salida: {depart_at_es}")
     
     if st.button("Calcular ruta"):
         origin_results = tomtom_search(origin_query)
@@ -345,8 +346,7 @@ def tab_calcular_ruta():
         if o_lat and o_lon and d_lat and d_lon:
             veh_dict = {"Coche": "car", "Camión": "truck", "Furgoneta": "van"}
             veh_type = st.selectbox("Tipo de Vehículo", list(veh_dict.keys()))
-            # Incluir departAt en la llamada
-            routing_data = tomtom_routing_api(o_lat, o_lon, d_lat, d_lon,
+            routing_data = tomtom_routing_api(o_lat, o_lon, d_lat, d_lon, 
                                               vehicle_type=veh_dict[veh_type],
                                               depart_at=depart_at_iso)
             if not routing_data or "routes" not in routing_data:
@@ -370,7 +370,7 @@ def tab_calcular_ruta():
                     route_points.append((point["latitude"], point["longitude"]))
             st.session_state["route_points"] = route_points
             
-            # Consultar tráfico en el punto medio
+            # Consultar tráfico y clima en el punto medio
             lat_mid = (o_lat + d_lat) / 2
             lon_mid = (o_lon + d_lon) / 2
             weather = get_weather_open_meteo(lat_mid, lon_mid) or {}
@@ -384,7 +384,7 @@ def tab_calcular_ruta():
                 flow = traffic_data["flowSegmentData"]
                 speed = flow.get("currentSpeed", 50)
             
-            # Mostrar métricas
+            # Mostrar métricas de clima y tráfico
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Temp", f"{temp:.1f} °C")
             col2.metric("Viento", f"{wind:.1f} km/h")
@@ -392,16 +392,17 @@ def tab_calcular_ruta():
             col4.metric("Nubosidad", f"{cloud:.1f} %")
             col5.metric("Vel. Tráfico", f"{speed} km/h")
             
-            # Renderizar mapa en un placeholder para que se mantenga fijo
-            render_map(route_points, o_lat, o_lon, d_lat, d_lon, color="blue")
-            st.caption("Leyenda: Azul: Ruta base. Marcador naranja: Zona de tráfico muy lento (si aplica).")
-
+            # Renderizar mapa (el mapa se mantiene en el mismo placeholder)
+            render_map(st.session_state["route_points"], o_lat, o_lon, d_lat, d_lon, color="blue")
+            st.caption("Leyenda: Azul: Ruta base. Si la velocidad en el punto medio es baja, se mostrará un marcador naranja.")
+            
 # -------------------------------------------------------------------------
 # TAB 2: Calcular ruta completa (TSP + NLP)
 # -------------------------------------------------------------------------
 def tab_calcular_ruta_completa():
     st.subheader("Calcular ruta completa")
-    texto = st.text_area("Ejemplo: 'Salir de Calle Alcalá 100, pasar por Plaza Mayor, luego Gran Vía 45 y terminar en Atocha'")
+    st.info("Indica una dirección por línea.")
+    texto = st.text_area("Ejemplo:\nSalir de Calle Alcalá 100\nPasar por Plaza Mayor\nLuego Gran Vía 45\nTerminar en Atocha")
     if st.button("Calcular"):
         addresses = extract_addresses_es(texto)
         if not addresses:
@@ -484,10 +485,10 @@ def main_app():
     st.title("Trafiquea: Dashboard para Empresas Logísticas")
     st.markdown("""
     **Funciones disponibles:**
-    - Calcular ruta: selecciona hora de salida, ingresa Origen y Destino; se muestra la ruta en el mapa con métricas de clima y tráfico.
-    - Calcular ruta completa: extrae direcciones desde un texto en español y optimiza el orden (TSP).
-    - Predicción de retrasos: utiliza un modelo Prophet realista para estimar retrasos.
-    - Calculadora CAE: estima ingresos potenciales a partir de kWh ahorrados.
+    - Calcular ruta: ingresa Origen y Destino (con sugerencias) y selecciona la hora de salida; se muestra la ruta en el mapa junto con métricas de clima y tráfico.
+    - Calcular ruta completa: ingresa una dirección por línea y se optimiza el orden (TSP).
+    - Predicción de retrasos: modelo Prophet realista para estimar retrasos.
+    - Calculadora CAE: estima ingresos por kWh ahorrados.
     """)
     tabs = st.tabs([
         "Calcular ruta",
