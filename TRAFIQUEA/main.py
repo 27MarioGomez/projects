@@ -12,23 +12,17 @@ import joblib
 import lightgbm as lgb
 from prophet import Prophet
 
-# --------------------------------------------------------------------------------
-# CONFIGURACIÓN: 
-# Se asume que tu API key de TomTom está en secrets.toml:
-# [tomtom]
-# api_key = "TU_API_KEY"
-# No se usa carpeta data, ni CSV locales.
-# --------------------------------------------------------------------------------
-
+# -----------------------------------------------------------------------------
+# CONFIGURACIÓN DE RUTAS Y SECRETOS
+# -----------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_tomtom_key():
     return st.secrets["tomtom"]["api_key"]
 
-# --------------------------------------------------------------------------------
-# ENTRENAR UN MODELO PROPHET REAL CON REGRESORES (distance, temp)
-# DATOS SINTÉTICOS PARA EJEMPLO
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# ENTRENAMIENTO MODELO PROPHET (SINTÉTICO) con 'distance' y 'temp' como REGRESSORS
+# -----------------------------------------------------------------------------
 @st.cache_resource
 def train_prophet_model():
     model_path = os.path.join(BASE_DIR, "prophet_tomtom_model.pkl")
@@ -36,17 +30,17 @@ def train_prophet_model():
         m = joblib.load(model_path)
         return m
     except:
-        st.warning("Entrenando modelo Prophet (sintético) con distance y temp como regressors.")
+        st.warning("Entrenando modelo Prophet sintético con 'distance' y 'temp' como regressors.")
         np.random.seed(42)
-        # Generar datos diarios en 2023
+        # Generamos datos diarios de un año
         dates = pd.date_range("2023-01-01", "2023-12-31", freq="D")
         n = len(dates)
-        distance = np.random.uniform(1, 50, n)  # km
+        distance = np.random.uniform(1, 50, n)
         temp = np.random.uniform(-5, 35, n)
-        # y = 100 + 2*distance + 3*temp + ruido
-        y = 100 + 2*distance + 3*temp + np.random.normal(0, 30, n)
+        # y = 60 + 2*distance + 1.5*temp + ruido
+        y = 60 + 2*distance + 1.5*temp + np.random.normal(0, 10, n)
+
         df = pd.DataFrame({"ds": dates, "y": y, "distance": distance, "temp": temp})
-        
         m = Prophet()
         m.add_regressor("distance")
         m.add_regressor("temp")
@@ -54,26 +48,26 @@ def train_prophet_model():
         joblib.dump(m, model_path)
         return m
 
-def predict_demand_prophet(distance_km: float, temperature: float):
+def predict_delay_with_prophet(distance_km: float, temperature: float, base_time: float):
     """
-    Carga el modelo Prophet entrenado con 'distance' y 'temp' como regressors.
-    Predice la demanda para la fecha actual (hoy).
+    Predice un 'tiempo de viaje' usando Prophet, y retorna la diferencia (retraso) con el base_time de TomTom.
     """
     m = train_prophet_model()
     if not m:
-        return None
-    # Crear un df futuro con un solo punto (hoy)
+        return None, None
     df_future = pd.DataFrame({
         "ds": [pd.Timestamp.now()],
         "distance": [distance_km],
         "temp": [temperature]
     })
     forecast = m.predict(df_future)
-    return forecast["yhat"].iloc[0]
+    predicted_time = forecast["yhat"].iloc[0]  # Valor sintético de 'tiempo'
+    delay = predicted_time - base_time
+    return predicted_time, delay
 
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # OPEN-METEO
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def get_weather_open_meteo(lat: float, lon: float):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -95,9 +89,9 @@ def get_weather_open_meteo(lat: float, lon: float):
         }
     return None
 
-# --------------------------------------------------------------------------------
-# TOMTOM: AUTOCOMPLETAR DIRECCIONES (Search/Geocoding)
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# TOMTOM: AUTOCOMPLETAR (Search/Geocoding)
+# -----------------------------------------------------------------------------
 def tomtom_search_autocomplete(query: str):
     tomtom_key = get_tomtom_key()
     url = f"https://api.tomtom.com/search/2/search/{query}.json"
@@ -122,7 +116,7 @@ def tomtom_search_autocomplete(query: str):
 
 def address_input_autocomplete(label: str, key: str):
     """
-    Muestra un text_input. Si la longitud > 3, llama tomtom_search_autocomplete.
+    Muestra un text_input. Si la longitud > 3, se llama tomtom_search_autocomplete.
     Muestra un selectbox con sugerencias. Retorna (address, lat, lon).
     """
     st.write(f"**{label}**")
@@ -144,9 +138,9 @@ def address_input_autocomplete(label: str, key: str):
                 lon = results[idx][2]
     return address_selected, lat, lon
 
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # TOMTOM ROUTING
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def tomtom_routing_api(origin_lat, origin_lon, dest_lat, dest_lon):
     tomtom_key = get_tomtom_key()
     url = f"https://api.tomtom.com/routing/1/calculateRoute/{origin_lat},{origin_lon}:{dest_lat},{dest_lon}/json"
@@ -161,13 +155,12 @@ def tomtom_routing_api(origin_lat, origin_lon, dest_lat, dest_lon):
         return data
     return None
 
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # TOMTOM WAYPOINT OPTIMIZATION
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def tomtom_waypoint_optimization(coords_list):
     tomtom_key = get_tomtom_key()
     url = f"https://api.tomtom.com/routing/1/waypointOptimization?key={tomtom_key}"
-    # Construir el JSON
     locations = []
     for lat, lon in coords_list:
         locations.append({"point": {"latitude": lat, "longitude": lon}})
@@ -182,25 +175,29 @@ def tomtom_waypoint_optimization(coords_list):
         return r.json()
     return None
 
-# --------------------------------------------------------------------------------
-# CALCULADORA DE CAE
-# --------------------------------------------------------------------------------
-def calculate_cae(volume_kg: float):
-    cae_generated = volume_kg
-    cost_min = cae_generated * 0.115
-    cost_max = cae_generated * 0.14
+# -----------------------------------------------------------------------------
+# CALCULADORA CAE
+# -----------------------------------------------------------------------------
+def calculate_cae(kwh: float):
+    """
+    kWh ahorrados. 1 CAE = 1 kWh. 
+    Precio medio: 0.115 - 0.14 €/kWh
+    """
+    cae_generated = kwh
+    cost_min = kwh * 0.115
+    cost_max = kwh * 0.14
     return cae_generated, cost_min, cost_max
 
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # TAB: Mapa y Tráfico
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def tab_mapa_trafico():
     st.subheader("Mapa y Tráfico")
-    st.write("Completa los campos de Origen y Destino (autocompletado).")
+    # Si tenemos en session_state un mapa dibujado, lo mostramos primero
+    if "route_map_html" in st.session_state:
+        st_folium(st.session_state["route_map_html"], width=700)
 
-    # Autocompletar Origen
     origin_address, origin_lat, origin_lon = address_input_autocomplete("Origen", "origin")
-    # Autocompletar Destino
     dest_address, dest_lat, dest_lon = address_input_autocomplete("Destino", "dest")
 
     if origin_lat and origin_lon and dest_lat and dest_lon:
@@ -213,10 +210,10 @@ def tab_mapa_trafico():
             summary = route["summary"]
             distance_m = summary["lengthInMeters"]
             duration_s = summary["travelTimeInSeconds"]
+
             st.write(f"Distancia: {distance_m/1000:.2f} km")
             st.write(f"Duración: ~{int(duration_s/60)} min")
 
-            # Construir Folium
             center_lat = (origin_lat + dest_lat)/2
             center_lon = (origin_lon + dest_lon)/2
             m_map = folium.Map(location=[center_lat, center_lon], zoom_start=12)
@@ -227,25 +224,34 @@ def tab_mapa_trafico():
                 name="TomTom Map"
             ).add_to(m_map)
 
-            # Extraer geometry
             latlons = []
             for leg in route["legs"]:
                 for point in leg["points"]:
                     latlons.append((point["latitude"], point["longitude"]))
+
             folium.PolyLine(latlons, color="blue", weight=5).add_to(m_map)
             folium.Marker((origin_lat, origin_lon), tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_map)
             folium.Marker((dest_lat, dest_lon), tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_map)
 
-            st_folium(m_map, width=700)
+            # Almacenamos en session_state la info
+            st.session_state["distance_km"] = distance_m / 1000.0
+            st.session_state["duration_s"] = duration_s
+            st.session_state["origin_lat"] = origin_lat
+            st.session_state["origin_lon"] = origin_lon
+            st.session_state["dest_lat"] = dest_lat
+            st.session_state["dest_lon"] = dest_lon
 
-# --------------------------------------------------------------------------------
+            # Renderizar el mapa y guardar su "objeto" en session_state
+            map_html = st_folium(m_map, width=700)
+            st.session_state["route_map_html"] = map_html
+
+# -----------------------------------------------------------------------------
 # TAB: Optimización Múltiples Paradas
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def tab_optimizar_paradas():
     st.subheader("Optimización Múltiples Paradas")
-    st.write("Ingresa direcciones (una por línea) para optimizar su orden.")
-
-    addresses_text = st.text_area("Direcciones:", "Plaza Mayor, Madrid\nPuerta del Sol, Madrid\nAtocha, Madrid")
+    addresses_text = st.text_area("Direcciones (una por línea)",
+                                  "Plaza Mayor, Madrid\nPuerta del Sol, Madrid\nAtocha, Madrid")
     if st.button("Optimizar Orden"):
         lines = [l.strip() for l in addresses_text.split("\n") if l.strip()]
         if len(lines) < 2:
@@ -253,7 +259,6 @@ def tab_optimizar_paradas():
             return
         coords_list = []
         for line in lines:
-            # Autocompletar la 1ra coincidencia
             results = tomtom_search_autocomplete(line)
             if not results:
                 st.warning(f"No se encontró la dirección: {line}")
@@ -261,7 +266,6 @@ def tab_optimizar_paradas():
             lat = results[0][1]
             lon = results[0][2]
             coords_list.append((lat, lon))
-        # Llamar a la API
         data_opt = tomtom_waypoint_optimization(coords_list)
         if not data_opt or "routes" not in data_opt:
             st.error("No se pudo optimizar con TomTom Waypoint Optimization API.")
@@ -290,75 +294,82 @@ def tab_optimizar_paradas():
             folium.Marker((lat, lon), tooltip=f"Parada {i+1}", icon=folium.Icon(color="blue")).add_to(m_map)
         st_folium(m_map, width=700)
 
-# --------------------------------------------------------------------------------
-# TAB: Predicción de Demanda (usando Prophet con 'distance' y 'temp' como regresores)
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# TAB: Predicción de Demanda (Prophet)
+# -----------------------------------------------------------------------------
 def tab_prediccion_demanda():
-    st.subheader("Predicción de Demanda")
-    st.write("Calcula la ruta con TomTom, extrae la distancia, obtiene la temperatura con Open‑Meteo, y usa Prophet.")
+    st.subheader("Predicción de Demanda con Ruta TomTom + Open-Meteo")
+    # Revisamos si tenemos la distancia y duracion en session_state
+    if "distance_km" not in st.session_state or "duration_s" not in st.session_state:
+        st.warning("Primero calcula la ruta en la pestaña 'Mapa y Tráfico'.")
+        return
 
-    # Autocompletar Origen/Destino
-    origin_address, origin_lat, origin_lon = address_input_autocomplete("Origen", "demanda_origin")
-    dest_address, dest_lat, dest_lon = address_input_autocomplete("Destino", "demanda_dest")
+    distance_km = st.session_state["distance_km"]
+    duration_s = st.session_state["duration_s"]
+    # Tomamos el punto medio para la meteorología
+    lat_m = (st.session_state["origin_lat"] + st.session_state["dest_lat"]) / 2
+    lon_m = (st.session_state["origin_lon"] + st.session_state["dest_lon"]) / 2
 
-    if origin_lat and origin_lon and dest_lat and dest_lon:
-        if st.button("Calcular Ruta y Predecir Demanda"):
-            # 1) Calcular ruta
-            data = tomtom_routing_api(origin_lat, origin_lon, dest_lat, dest_lon)
-            if not data or "routes" not in data:
-                st.error("No se pudo obtener la ruta con TomTom.")
-                return
-            route = data["routes"][0]
-            summary = route["summary"]
-            distance_m = summary["lengthInMeters"]
-            distance_km = distance_m / 1000.0
-            st.write(f"Distancia: {distance_km:.2f} km")
+    # Obtenemos la temperatura actual con Open-Meteo
+    meteo = get_weather_open_meteo(lat_m, lon_m)
+    if not meteo:
+        st.warning("No se pudo obtener la temperatura con Open-Meteo. Asignando temp=20°C.")
+        temperature = 20.0
+    else:
+        temperature = meteo["temperatura"] if meteo["temperatura"] is not None else 20.0
 
-            # 2) Obtener temperatura con Open-Meteo en el origen (o punto medio)
-            lat_clima = origin_lat  # O (origin_lat + dest_lat)/2
-            lon_clima = origin_lon  # O (origin_lon + dest_lon)/2
-            meteo = get_weather_open_meteo(lat_clima, lon_clima)
-            if not meteo:
-                st.warning("No se pudo obtener temperatura con Open‑Meteo. Usando temp=20.0 por defecto.")
-                temperature = 20.0
+    st.write(f"Distancia de la ruta: {distance_km:.2f} km")
+    st.write(f"Tiempo base (TomTom): ~{int(duration_s/60)} min")
+    st.write(f"Temperatura actual: {temperature:.1f} °C")
+
+    if st.button("Calcular 'Retraso'"):
+        predicted_time, delay = predict_delay_with_prophet(distance_km, temperature, duration_s/60.0)
+        if predicted_time is not None:
+            st.success(f"Tiempo estimado por el modelo: {predicted_time:.2f} min")
+            if delay >= 0:
+                st.error(f"Posible retraso: +{delay:.2f} min respecto a TomTom")
             else:
-                temperature = meteo["temperatura"] if meteo["temperatura"] is not None else 20.0
-                st.write(f"Temperatura actual: {temperature}°C")
+                st.info(f"Podrías llegar {abs(delay):.2f} min antes de lo esperado.")
+        else:
+            st.error("No se pudo predecir la demanda con Prophet.")
 
-            # 3) Predecir demanda con Prophet
-            pred_val = predict_demand_prophet(distance_km, temperature)
-            if pred_val is not None:
-                st.success(f"Demanda estimada: {pred_val:.2f} (unidades ficticias)")
-            else:
-                st.error("No se pudo predecir la demanda (modelo no disponible).")
-
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # TAB: Calculadora CAE
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def tab_calculadora_cae():
     st.subheader("Calculadora CAE")
-    st.write("1 CAE = 1 kWh ahorrado. Precio medio: 0.115 - 0.14 €/kWh.")
-    volume = st.number_input("CO₂ evitado (kg) / kWh ahorrados", min_value=0.0, value=1000.0, step=100.0)
+    st.write("Introduce los kWh ahorrados y estima los ingresos potenciales.")
+    kwh = st.number_input("kWh ahorrados", min_value=0.0, value=1000.0, step=100.0)
     if st.button("Calcular CAE"):
-        cae_val, cost_min, cost_max = calculate_cae(volume)
+        cae_val, cost_min, cost_max = calculate_cae(kwh)
         st.write(f"CAE generados: {cae_val:.2f} kWh")
         st.write(f"Ingresos estimados: entre {cost_min:.2f} € y {cost_max:.2f} €")
 
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # APP PRINCIPAL
-# --------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def main_app():
     st.title("Trafiquea: Dashboard para Empresas")
     st.markdown("""
-    Funcionalidades principales:
-    - **Mapa y Tráfico**: autocompletar direcciones (TomTom Search), mostrar ruta en Folium con tiles de TomTom.
-    - **Optimización Múltiples Paradas**: TomTom Waypoint Optimization.
-    - **Predicción de Demanda**: se calcula la distancia con TomTom, la temperatura con Open‑Meteo, 
-      y se usa un modelo **Prophet** (con regressors) para predecir.
-    - **Calculadora CAE**: estima ingresos por kWh ahorrado.
+    **Mapa y Tráfico:**  
+    - Autocompleta direcciones usando TomTom Search.  
+    - Calcula ruta con TomTom Routing y pinta un mapa con tiles de TomTom.  
+    **Optimización Múltiples Paradas:**  
+    - Usa TomTom Waypoint Optimization.  
+    **Predicción de Demanda:**  
+    - Toma la distancia de la ruta y la temperatura actual (Open-Meteo) para alimentar un modelo **Prophet**.  
+    - Compara con la duración base de TomTom y estima un posible "retraso" o adelanto.  
+    **Calculadora CAE:**  
+    - Introduce kWh ahorrados y estima ingresos (0.115-0.14 €/kWh).
     """)
 
-    tabs = st.tabs(["Mapa y Tráfico", "Optimización Múltiples Paradas", "Predicción de Demanda", "Calculadora CAE"])
+    tabs = st.tabs([
+        "Mapa y Tráfico", 
+        "Optimización Múltiples Paradas", 
+        "Predicción de Demanda", 
+        "Calculadora CAE"
+    ])
+
     with tabs[0]:
         tab_mapa_trafico()
     with tabs[1]:
