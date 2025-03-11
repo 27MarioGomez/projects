@@ -12,3 +12,4 @@ numba
 xgboost
 lightgbm
 prophet
+streamlit-geolocation
