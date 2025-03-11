@@ -433,11 +433,15 @@ def tab_tsp_nlp():
 
 def tab_trafico_ruta():
     st.subheader("Tráfico en Ruta")
-    if "origin_lat" not in st.session_state or "dest_lat" not in st.session_state:
+    origin_lat = st.session_state.get("origin_lat")
+    dest_lat = st.session_state.get("dest_lat")
+    origin_lon = st.session_state.get("origin_lon")
+    dest_lon = st.session_state.get("dest_lon")
+    if origin_lat is None or dest_lat is None or origin_lon is None or dest_lon is None:
         st.warning("Primero calcula la ruta en 'Mapa y Tráfico'.")
         return
-    lat_m = (st.session_state["origin_lat"] + st.session_state["dest_lat"]) / 2
-    lon_m = (st.session_state["origin_lon"] + st.session_state["dest_lon"]) / 2
+    lat_m = (origin_lat + dest_lat) / 2
+    lon_m = (origin_lon + dest_lon) / 2
     if st.button("Consultar Tráfico"):
         data_flow = tomtom_traffic_flow(lat_m, lon_m)
         if not data_flow or "flowSegmentData" not in data_flow:
@@ -454,6 +458,7 @@ def tab_trafico_ruta():
             st.warning("Tráfico moderado. Posibles retrasos.")
         else:
             st.info("Tráfico fluido.")
+
 
 def tab_prediccion_retrasos():
     st.subheader("Predicción de Retrasos con Modelo Realista")
