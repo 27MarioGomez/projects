@@ -12,6 +12,4 @@ numba
 xgboost
 lightgbm
 prophet
-spacy
-es-core-news-sm
-streamlit-geolocation
+stanza
