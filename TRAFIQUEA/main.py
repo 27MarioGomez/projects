@@ -21,7 +21,6 @@ def get_tomtom_key():
 
 # -----------------------------------------------------------------------------
 # MODELO PROPHET (SINTÉTICO) CON REGRESSORES: distance, temp, wind, precip, cloud
-# (Este modelo de ejemplo debe sustituirse por uno entrenado con datos reales)
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_prophet_model():
@@ -39,7 +38,6 @@ def load_prophet_model():
         wind = np.random.uniform(0, 50, n)
         precip = np.random.uniform(0, 20, n)
         cloud = np.random.uniform(0, 100, n)
-        # Tiempo base ficticio: y = 60 + 2*distance + 1.5*temp + 0.3*wind + 0.5*precip + 0.1*cloud + ruido
         y = 60 + 2 * distance + 1.5 * temp + 0.3 * wind + 0.5 * precip + 0.1 * cloud + np.random.normal(0, 15, n)
         df = pd.DataFrame({
             "ds": dates,
@@ -76,7 +74,7 @@ def predict_time_prophet(distance_km: float, temp: float, wind: float, precip: f
     return forecast["yhat"].iloc[0]
 
 # -----------------------------------------------------------------------------
-# OPEN-METEO: Obtener datos meteorológicos en tiempo real
+# OPEN-METEO: Obtener variables meteorológicas en tiempo real
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_weather_open_meteo(lat: float, lon: float):
@@ -101,7 +99,7 @@ def get_weather_open_meteo(lat: float, lon: float):
     return None
 
 # -----------------------------------------------------------------------------
-# TOMTOM SEARCH (Geocoding/Autocomplete)
+# TOMTOM SEARCH: Geocoding/Autocomplete
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=600)
 def tomtom_search(query: str, limit=5):
@@ -128,34 +126,23 @@ def tomtom_search(query: str, limit=5):
         return suggestions
     return []
 
-# Funciones para actualizar autocompletado en origen y destino al presionar Enter
-def update_origin():
-    query = st.session_state.origin_query
-    results = tomtom_search(query)
-    st.session_state.origin_options = [r[0] for r in results] if results else []
-    st.session_state.origin_results = results
-
-def update_dest():
-    query = st.session_state.dest_query
-    results = tomtom_search(query)
-    st.session_state.dest_options = [r[0] for r in results] if results else []
-    st.session_state.dest_results = results
-
-# -----------------------------------------------------------------------------
-# INTERFAZ DE AUTOCOMPLETADO: Origen y Destino
-# -----------------------------------------------------------------------------
-def input_address(label: str, key: str):
-    # El usuario escribe la dirección y, al pulsar Enter, se actualizan las sugerencias.
-    address = st.text_input(label, key=key, on_change=update_origin if key=="origin_query" else update_dest)
-    options_key = "origin_options" if key=="origin_query" else "dest_options"
-    results_key = "origin_results" if key=="origin_query" else "dest_results"
-    suggestions = st.session_state.get(options_key, [])
-    if suggestions:
-        choice = st.selectbox(f"Sugerencias para {label}", suggestions, key=f"sel_{key}")
-        # Buscar la sugerencia en los resultados almacenados
-        for r in st.session_state.get(results_key, []):
-            if r[0] == choice:
-                return r[0], r[1], r[2]
+def address_input_autocomplete(label: str, key: str):
+    """
+    Permite al usuario escribir la dirección y pulsar Enter para buscar.
+    Luego, se muestra un selectbox con las sugerencias (solo dirección) y se devuelve
+    (address, lat, lon) seleccionado.
+    """
+    address_input = st.text_input(f"Escribe la dirección {label}", key=key)
+    if st.button(f"Buscar {label}", key=f"btn_{key}"):
+        results = tomtom_search(address_input)
+        if results:
+            options = [r[0] for r in results]
+            choice = st.selectbox(f"Sugerencias para {label}", options, key=f"sel_{key}")
+            for r in results:
+                if r[0] == choice:
+                    return r[0], r[1], r[2]
+        else:
+            st.warning("No se encontraron sugerencias.")
     return None, None, None
 
 # -----------------------------------------------------------------------------
@@ -194,7 +181,7 @@ def tomtom_waypoint_optimization(coords_list):
     return None
 
 # -----------------------------------------------------------------------------
-# TOMTOM TRAFFIC API (Flow) - Ejemplo
+# TOMTOM TRAFFIC API (Flow)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=600)
 def tomtom_traffic_flow(lat: float, lon: float):
@@ -215,7 +202,7 @@ def calculate_cae(kwh: float):
     return kwh, cost_min, cost_max
 
 # -----------------------------------------------------------------------------
-# RENDERIZAR MAPA CON FOLIUM (con TomTom Tiles)
+# RENDERIZAR MAPA CON FOLIUM (utilizando TomTom Tiles)
 # -----------------------------------------------------------------------------
 def render_map(route_points, origin_lat, origin_lon, dest_lat=None, dest_lon=None):
     center_lat = (origin_lat if dest_lat is None else (origin_lat + dest_lat)/2)
@@ -234,12 +221,13 @@ def render_map(route_points, origin_lat, origin_lon, dest_lat=None, dest_lon=Non
 # -----------------------------------------------------------------------------
 def tab_mapa_trafico():
     st.subheader("Mapa y Tráfico")
-    st.write("Escribe la dirección de origen y destino y pulsa Enter.")
+    st.write("Escribe la dirección de Origen y Destino y pulsa 'Buscar'.")
 
+    st.write("**Origen**")
     origin_addr, origin_lat, origin_lon = address_input_autocomplete("Origen", "origin_query")
+    st.write("**Destino**")
     dest_addr, dest_lat, dest_lon = address_input_autocomplete("Destino", "dest_query")
 
-    # Guardamos coordenadas en session_state
     if origin_lat and origin_lon:
         st.session_state["origin_lat"] = origin_lat
         st.session_state["origin_lon"] = origin_lon
@@ -274,7 +262,8 @@ def tab_mapa_trafico():
 # -----------------------------------------------------------------------------
 def tab_optimizar_paradas():
     st.subheader("Optimización Múltiples Paradas")
-    addresses_text = st.text_area("Direcciones (una por línea):", "Plaza Mayor, Madrid\nPuerta del Sol, Madrid\nAtocha, Madrid")
+    addresses_text = st.text_area("Direcciones (una por línea):", 
+                                  "Plaza Mayor, Madrid\nPuerta del Sol, Madrid\nAtocha, Madrid")
     if st.button("Optimizar Orden"):
         lines = [l.strip() for l in addresses_text.split("\n") if l.strip()]
         if len(lines) < 2:
@@ -286,7 +275,6 @@ def tab_optimizar_paradas():
             if not results:
                 st.warning(f"No se encontró: {line}")
                 return
-            # Usamos la primera sugerencia
             coords_list.append((results[0][1], results[0][2]))
         data_opt = tomtom_waypoint_optimization(coords_list)
         if not data_opt or "routes" not in data_opt:
@@ -295,7 +283,6 @@ def tab_optimizar_paradas():
         route = data_opt["routes"][0]
         order = route.get("waypointsOrder", "No definido")
         st.success(f"Orden óptimo de paradas: {order}")
-
         route_points = []
         for leg in route["legs"]:
             for point in leg["points"]:
@@ -313,11 +300,11 @@ def tab_trafico_ruta():
     lat_m = (st.session_state["origin_lat"] + st.session_state["dest_lat"]) / 2
     lon_m = (st.session_state["origin_lon"] + st.session_state["dest_lon"]) / 2
     if st.button("Consultar Tráfico en Punto Medio"):
-        data_flow = tomtom_traffic_flow(lat_m, lon_m)
-        if not data_flow or "flowSegmentData" not in data_flow:
+        traffic_data = tomtom_traffic_flow(lat_m, lon_m)
+        if not traffic_data or "flowSegmentData" not in traffic_data:
             st.error("No se pudo obtener datos de tráfico.")
             return
-        flow = data_flow["flowSegmentData"]
+        flow = traffic_data["flowSegmentData"]
         st.write(f"Velocidad actual: {flow.get('currentSpeed')} km/h")
         st.write(f"Velocidad libre: {flow.get('freeFlowSpeed')} km/h")
         st.write(f"Tiempo actual: {flow.get('currentTravelTime')} s")
@@ -325,10 +312,10 @@ def tab_trafico_ruta():
         st.write(f"Confianza: {flow.get('confidence')}")
 
 # -----------------------------------------------------------------------------
-# TAB: Predicción de Demanda (Prophet con variables reales)
+# TAB: Predicción de Demanda y Retrasos en Ruta (Prophet)
 # -----------------------------------------------------------------------------
 def tab_prediccion_demanda():
-    st.subheader("Predicción de Demanda y Retrasos en Ruta")
+    st.subheader("Predicción de Demanda y Retrasos")
     if "distance_km" not in st.session_state or "duration_min" not in st.session_state:
         st.warning("Primero calcula la ruta en 'Mapa y Tráfico'.")
         return
@@ -340,7 +327,7 @@ def tab_prediccion_demanda():
 
     meteo = get_weather_open_meteo(lat_m, lon_m)
     if not meteo:
-        st.warning("No se pudo obtener datos meteorológicos. Se asume valores por defecto.")
+        st.warning("No se pudo obtener datos meteorológicos. Se usan valores por defecto.")
         temp = 20.0; wind = 0.0; precip = 0.0; cloud = 0.0
     else:
         temp = meteo["temp"]
@@ -349,10 +336,10 @@ def tab_prediccion_demanda():
         cloud = meteo["cloud"]
         st.write(f"Clima: Temp: {temp:.1f}°C, Viento: {wind:.1f} km/h, Precipitación: {precip:.1f} mm, Nubosidad: {cloud:.1f}%")
     
-    st.write(f"Distancia (TomTom): {distance_km:.2f} km")
+    st.write(f"Distancia: {distance_km:.2f} km")
     st.write(f"Tiempo base (TomTom): ~{duration_min:.2f} min")
     
-    if st.button("Calcular Predicción de Retraso"):
+    if st.button("Calcular Predicción"):
         predicted_time = predict_time_prophet(distance_km, temp, wind, precip, cloud)
         if predicted_time is None:
             st.error("Error en la predicción con Prophet.")
@@ -369,7 +356,7 @@ def tab_prediccion_demanda():
 # -----------------------------------------------------------------------------
 def tab_calculadora_cae():
     st.subheader("Calculadora CAE")
-    st.write("Introduce los kWh ahorrados para estimar los ingresos (0.115-0.14 €/kWh).")
+    st.write("Introduce los kWh ahorrados para estimar ingresos (0.115-0.14 €/kWh).")
     kwh = st.number_input("kWh ahorrados", min_value=0.0, value=1000.0, step=100.0)
     if st.button("Calcular CAE"):
         cae, cost_min, cost_max = calculate_cae(kwh)
@@ -385,8 +372,8 @@ def main_app():
     **Características Principales**:
     - **Map Display & Routing**: Calcula rutas y muestra mapas con tiles de TomTom.
     - **Waypoint Optimization**: Optimiza el orden de múltiples paradas.
-    - **Traffic API**: Consulta el flujo de tráfico en un punto (ejemplo).
-    - **Predicción de Retrasos**: Con datos de distancia y variables meteorológicas (Open‑Meteo) se estima el tiempo final de la ruta usando un modelo Prophet.
+    - **Traffic API**: Consulta el flujo de tráfico en un punto.
+    - **Predicción de Retrasos**: Estima el tiempo final de la ruta usando variables meteorológicas y un modelo Prophet.
     - **Calculadora CAE**: Estima ingresos por kWh ahorrados.
     """)
     tabs = st.tabs([
