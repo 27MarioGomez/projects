@@ -11,16 +11,16 @@ import joblib
 from prophet import Prophet
 import itertools
 
-# Intentar cargar spaCy en español
+# Intentar cargar spaCy y su modelo en español
 try:
     import spacy
     nlp_es = spacy.load("es_core_news_sm")
 except Exception as e:
     nlp_es = None
-    st.error("No se pudo cargar spaCy o el modelo es_core_news_sm.")
+    st.error("No se pudo cargar spaCy o el modelo 'es_core_news_sm'. Ejecuta 'python -m spacy download es_core_news_sm'.")
 
 # -----------------------------------------------------------------------------
-# CONFIGURACIÓN: Obtener API key de TomTom desde secrets.toml
+# CONFIGURACIÓN: API key de TomTom (definida en secrets.toml)
 # -----------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -28,13 +28,12 @@ def get_tomtom_key():
     return st.secrets["tomtom"]["api_key"]
 
 # -----------------------------------------------------------------------------
-# SOLICITAR UBICACIÓN ACTUAL CON JAVASCRIPT (redirección con query parameters)
+# SOLICITAR UBICACIÓN ACTUAL CON JAVASCRIPT (con fallback)
 # -----------------------------------------------------------------------------
 def request_location():
-    # Si no hay parámetros en la URL, ejecutar el script para pedir geolocalización
+    # Si no existen lat y lon en query params, pedimos ubicación con JavaScript
     params = st.experimental_get_query_params()
     if "lat" not in params or "lon" not in params:
-        # Script para solicitar ubicación y redirigir con lat/lon
         loc_script = """
         <script>
         if (navigator.geolocation) {
@@ -49,7 +48,6 @@ def request_location():
         st.components.v1.html(loc_script, height=0)
 request_location()
 
-# Si los parámetros existen, se guardan en session_state
 query_params = st.experimental_get_query_params()
 if "lat" in query_params and "lon" in query_params:
     try:
@@ -63,7 +61,7 @@ else:
     st.session_state["current_lon"] = -3.7033
 
 # -----------------------------------------------------------------------------
-# MODELO PROPHET (REALISTA) CON REGRESSORES
+# MODELO PROPHET REALISTA (SINTÉTICO) CON REGRESSORES
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_prophet_model():
@@ -194,7 +192,7 @@ def tomtom_routing_api(origin_lat, origin_lon, dest_lat, dest_lon, vehicle_type=
     return None
 
 # -----------------------------------------------------------------------------
-# TOMTOM WAYPOINT OPTIMIZATION (TSP)
+# TOMTOM WAYPOINT OPTIMIZATION: Usaremos TSP local (para ≤ 8 paradas)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=600)
 def get_distance_time(lat1, lon1, lat2, lon2):
@@ -263,7 +261,7 @@ def final_routing_with_order(ordered_coords):
     return dist_m, time_s, route_points
 
 # -----------------------------------------------------------------------------
-# NLP para extraer direcciones en español con spaCy
+# NLP con spaCy en español para extraer direcciones
 # -----------------------------------------------------------------------------
 def extract_addresses_es(text: str):
     if nlp_es:
@@ -271,15 +269,15 @@ def extract_addresses_es(text: str):
         addresses = [sent.text.strip() for sent in doc.sents if any(tok.lower_ in ["calle", "av", "av.", "plaza", "carretera", "camino"] for tok in sent)]
         if addresses:
             return addresses
-    # fallback: separar por línea
+    # Fallback: cada línea es una dirección
     return [line.strip() for line in text.split("\n") if line.strip()]
 
 # -----------------------------------------------------------------------------
-# RENDERIZAR MAPA
+# RENDERIZAR MAPA CON FOLIUM
 # -----------------------------------------------------------------------------
 def render_map(route_points, lat_start, lon_start, lat_end=None, lon_end=None, color="blue"):
-    center_lat = lat_start if lat_end is None else (lat_start + lat_end) / 2
-    center_lon = lon_start if lon_end is None else (lon_start + lon_end) / 2
+    center_lat = lat_start if lat_end is None else (lat_start + lat_end)/2
+    center_lon = lon_start if lon_end is None else (lon_start + lon_end)/2
     m_map = folium.Map(location=[center_lat, center_lon], zoom_start=12)
     tile_url = f"https://api.tomtom.com/map/1/tile/basic/main/{{z}}/{{x}}/{{y}}.png?key={get_tomtom_key()}"
     folium.TileLayer(tiles=tile_url, attr="TomTom").add_to(m_map)
@@ -290,27 +288,16 @@ def render_map(route_points, lat_start, lon_start, lat_end=None, lon_end=None, c
     st_folium(m_map, width=700)
 
 # -----------------------------------------------------------------------------
-# TAB: Mapa y Tráfico
+# TAB: Calcular ruta (Tab 1)
 # -----------------------------------------------------------------------------
-def tab_mapa_trafico():
-    st.subheader("Mapa y Tráfico")
-    
-    # Ubicación actual solicitada mediante JavaScript (si no se consigue, usa valores por defecto)
-    current_lat = st.session_state.get("current_lat", 40.4167)
-    current_lon = st.session_state.get("current_lon", -3.7033)
-    st.info(f"Ubicación actual (fijada): lat={current_lat:.4f}, lon={current_lon:.4f}")
-    m_base = folium.Map(location=[current_lat, current_lon], zoom_start=13)
-    tile_url = f"https://api.tomtom.com/map/1/tile/basic/main/{{z}}/{{x}}/{{y}}.png?key={get_tomtom_key()}"
-    folium.TileLayer(tiles=tile_url, attr="TomTom").add_to(m_base)
-    st_folium(m_base, width=700)
-    
-    veh_dict = {"Coche": "car", "Camión": "truck", "Furgoneta": "van"}
-    veh_type = st.selectbox("Tipo de Vehículo", list(veh_dict.keys()))
-    
+def tab_calcular_ruta():
+    st.subheader("Calcular ruta")
+    # Dropdown para hora de salida (formato 24 horas)
+    hora_salida = st.selectbox("Hora de salida", [f"{i:02d}:00" for i in range(24)])
+    st.write("Ingresa Origen y Destino:")
     origin_addr = st.text_input("Origen", key="origin_query")
     dest_addr = st.text_input("Destino", key="dest_query")
-    
-    if st.button("Calcular Ruta TomTom"):
+    if st.button("Calcular ruta"):
         origin_results = tomtom_search(origin_addr)
         if not origin_results:
             st.error("No se encontraron sugerencias para el origen.")
@@ -340,9 +327,11 @@ def tab_mapa_trafico():
             dest_lat, dest_lon = dest_results[0][1], dest_results[0][2]
 
         if origin_lat and origin_lon and dest_lat and dest_lon:
+            veh_dict = {"Coche": "car", "Camión": "truck", "Furgoneta": "van"}
+            veh_type = st.selectbox("Tipo de Vehículo", list(veh_dict.keys()))
             routing_data = tomtom_routing_api(origin_lat, origin_lon, dest_lat, dest_lon, vehicle_type=veh_dict[veh_type])
             if not routing_data or "routes" not in routing_data:
-                st.error("No se pudo obtener la ruta con TomTom Routing API.")
+                st.error("No se pudo obtener la ruta.")
                 return
             route = routing_data["routes"][0]
             dist_m = route["summary"]["lengthInMeters"]
@@ -353,25 +342,45 @@ def tab_mapa_trafico():
             st.session_state["origin_lon"] = origin_lon
             st.session_state["dest_lat"] = dest_lat
             st.session_state["dest_lon"] = dest_lon
-            st.session_state["distance_km"] = dist_m / 1000.0
-            st.session_state["duration_min"] = time_s / 60.0
+            st.session_state["distance_km"] = dist_m/1000.0
+            st.session_state["duration_min"] = time_s/60.0
             route_points = []
             for leg in route["legs"]:
                 for point in leg["points"]:
                     route_points.append((point["latitude"], point["longitude"]))
             st.session_state["route_points"] = route_points
-            render_map(route_points, origin_lat, origin_lon, dest_lat, dest_lon, color="blue")
+
+            # Consultar eventos de tráfico y agregar marcadores si hay incidencias
+            lat_mid = (origin_lat + dest_lat) / 2
+            lon_mid = (origin_lon + dest_lon) / 2
+            flow_data = tomtom_traffic_flow(lat_mid, lon_mid)
+            event_markers = []
+            if flow_data and "flowSegmentData" in flow_data:
+                flow = flow_data["flowSegmentData"]
+                current_speed = flow.get("currentSpeed", 0)
+                if current_speed < 30:
+                    event_markers.append((lat_mid, lon_mid, "Tráfico muy congestionado"))
+            # Renderizar mapa base con ruta en azul y eventos (si hay)
+            m = folium.Map(location=[lat_mid, lon_mid], zoom_start=12)
+            tile_url = f"https://api.tomtom.com/map/1/tile/basic/main/{{z}}/{{x}}/{{y}}.png?key={get_tomtom_key()}"
+            folium.TileLayer(tiles=tile_url, attr="TomTom").add_to(m)
+            folium.PolyLine(st.session_state["route_points"], color="blue", weight=5).add_to(m)
+            folium.Marker((origin_lat, origin_lon), tooltip="Origen", icon=folium.Icon(color="green")).add_to(m)
+            folium.Marker((dest_lat, dest_lon), tooltip="Destino", icon=folium.Icon(color="red")).add_to(m)
+            for lat_e, lon_e, msg in event_markers:
+                folium.Marker((lat_e, lon_e), tooltip=msg, icon=folium.Icon(color="orange", icon="exclamation-sign")).add_to(m)
+            st_folium(m, width=700)
 
 # -----------------------------------------------------------------------------
-# TAB: Ruta Alternativa (con avoidRoads)
+# TAB: Ruta alternativa (pintar sobre el mapa base existente)
 # -----------------------------------------------------------------------------
 def tab_ruta_alternativa():
-    st.subheader("Ruta Alternativa")
+    st.subheader("Ruta alternativa")
     if "origin_lat" not in st.session_state or "dest_lat" not in st.session_state:
-        st.warning("Primero calcula la ruta en 'Mapa y Tráfico'.")
+        st.warning("Primero calcula la ruta en 'Calcular ruta'.")
         return
-    road_avoid = st.text_input("Carretera a evitar (ej: A5)", "")
-    if st.button("Calcular Ruta Alternativa"):
+    road_to_avoid = st.text_input("Carretera a evitar (ejemplo: A5)", "")
+    if st.button("Calcular ruta alternativa"):
         tomtom_key = get_tomtom_key()
         url = f"https://api.tomtom.com/routing/1/calculateRoute/{st.session_state['origin_lat']},{st.session_state['origin_lon']}:{st.session_state['dest_lat']},{st.session_state['dest_lon']}/json"
         params = {
@@ -379,49 +388,62 @@ def tab_ruta_alternativa():
             "traffic": "true",
             "travelMode": "car"
         }
-        if road_avoid.strip():
-            params["avoidRoads"] = road_avoid.strip()
+        if road_to_avoid.strip():
+            params["avoidRoads"] = road_to_avoid.strip()
         r = requests.get(url, params=params)
         if r.status_code != 200:
-            st.error("No se pudo obtener la ruta alternativa.")
+            st.error("Error al obtener la ruta alternativa.")
             return
         data = r.json()
         if "routes" not in data or not data["routes"]:
             st.error("No se encontró ruta alternativa.")
             return
-        route = data["routes"][0]
-        dist_m = route["summary"]["lengthInMeters"]
-        time_s = route["summary"]["travelTimeInSeconds"]
-        st.write(f"Distancia alternativa: {dist_m/1000:.2f} km")
-        st.write(f"Tiempo alternativo: ~{int(time_s/60)} min")
+        route_alt = data["routes"][0]
+        dist_alt = route_alt["summary"]["lengthInMeters"]
+        time_alt = route_alt["summary"]["travelTimeInSeconds"]
+        st.write(f"Ruta alternativa: {dist_alt/1000:.2f} km, {int(time_alt/60)} min")
         alt_points = []
-        for leg in route["legs"]:
+        for leg in route_alt["legs"]:
             for point in leg["points"]:
                 alt_points.append((point["latitude"], point["longitude"]))
-        render_map(alt_points, st.session_state["origin_lat"], st.session_state["origin_lon"],
-                   st.session_state["dest_lat"], st.session_state["dest_lon"], color="red")
+        # Reutilizamos el mapa base almacenado en session_state["route_points"] si existe, o generamos uno nuevo
+        if "route_points" in st.session_state and st.session_state["route_points"]:
+            base_points = st.session_state["route_points"]
+            # Se vuelve a renderizar el mapa con la ruta base en azul y la alternativa en rojo
+            m = folium.Map(location=[(st.session_state["origin_lat"]+st.session_state["dest_lat"])/2,
+                                     (st.session_state["origin_lon"]+st.session_state["dest_lon"])/2], zoom_start=12)
+            tile_url = f"https://api.tomtom.com/map/1/tile/basic/main/{{z}}/{{x}}/{{y}}.png?key={get_tomtom_key()}"
+            folium.TileLayer(tiles=tile_url, attr="TomTom").add_to(m)
+            folium.PolyLine(base_points, color="blue", weight=5).add_to(m)
+            folium.PolyLine(alt_points, color="red", weight=5).add_to(m)
+            folium.Marker((st.session_state["origin_lat"], st.session_state["origin_lon"]), tooltip="Origen", icon=folium.Icon(color="green")).add_to(m)
+            folium.Marker((st.session_state["dest_lat"], st.session_state["dest_lon"]), tooltip="Destino", icon=folium.Icon(color="red")).add_to(m)
+            st_folium(m, width=700)
+        else:
+            st.error("No hay ruta base guardada.")
 
 # -----------------------------------------------------------------------------
-# TAB: TSP Avanzado (NLP para Múltiples Paradas)
+# TAB: Calcular ruta completa (TSP avanzado con NLP)
 # -----------------------------------------------------------------------------
-def tab_tsp_advanced():
-    st.subheader("Optimización de Múltiples Paradas (TSP + NLP)")
-    text = st.text_area("Escribe tu ruta en español (ejemplo: 'Salir de Calle Alcalá 100, pasar por Plaza Mayor, luego Gran Vía 45 y terminar en Atocha'):")
-    if st.button("Optimizar Ruta"):
+def tab_calcular_ruta_completa():
+    st.subheader("Calcular ruta completa")
+    st.info("Introduce un texto en español indicando origen, paradas y destino.")
+    text = st.text_area("Ejemplo: 'Salir de Calle Alcalá 100, pasar por Plaza Mayor, luego Gran Vía 45 y terminar en Atocha'")
+    if st.button("Calcular"):
         addresses = extract_addresses_es(text)
         if not addresses:
-            st.error("No se detectaron direcciones en el texto.")
+            st.error("No se detectaron direcciones.")
             return
         if len(addresses) > 8:
-            st.error("Demasiadas direcciones (>8). Reduce el número para optimizar la ruta.")
+            st.error("Demasiadas direcciones (más de 8).")
             return
         coords_list = []
         for addr in addresses:
-            results = tomtom_search(addr)
-            if not results:
+            res = tomtom_search(addr)
+            if not res:
                 st.error(f"No se encontró geocodificación para: {addr}")
                 return
-            coords_list.append((results[0][1], results[0][2]))
+            coords_list.append((res[0][1], res[0][2]))
         dist_matrix = compute_pairwise_distances(coords_list)
         best_order, best_cost, err = solve_tsp_bruteforce(dist_matrix)
         if err:
@@ -429,12 +451,12 @@ def tab_tsp_advanced():
             return
         st.success(f"Orden óptimo calculado. Distancia aproximada: {best_cost/1000:.2f} km")
         ordered_coords = [coords_list[i] for i in best_order]
-        dist_m, time_s, route_pts = final_routing_with_order(ordered_coords)
-        if dist_m is None:
-            st.error("No se pudo obtener la ruta final con TomTom.")
+        dist_total, time_total, route_pts = final_routing_with_order(ordered_coords)
+        if dist_total is None:
+            st.error("Error al obtener la ruta final.")
             return
-        st.write(f"Distancia total: {dist_m/1000:.2f} km")
-        st.write(f"Tiempo total: ~{int(time_s/60)} min")
+        st.write(f"Distancia total: {dist_total/1000:.2f} km")
+        st.write(f"Tiempo total: ~{int(time_total/60)} min")
         render_map(route_pts, ordered_coords[0][0], ordered_coords[0][1],
                    ordered_coords[-1][0], ordered_coords[-1][1], color="blue")
 
@@ -443,47 +465,45 @@ def tab_tsp_advanced():
 # -----------------------------------------------------------------------------
 def tab_trafico_ruta():
     st.subheader("Tráfico en Ruta")
-    if "origin_lat" not in st.session_state or "dest_lat" not in st.session_state:
-        st.warning("Primero calcula la ruta en 'Mapa y Tráfico'.")
+    if not (st.session_state.get("origin_lat") and st.session_state.get("dest_lat")):
+        st.warning("Primero calcula la ruta en 'Calcular ruta'.")
         return
-    lat_m = (st.session_state["origin_lat"] + st.session_state["dest_lat"]) / 2
-    lon_m = (st.session_state["origin_lon"] + st.session_state["dest_lon"]) / 2
-    if st.button("Consultar Tráfico en Punto Medio"):
-        data_flow = tomtom_traffic_flow(lat_m, lon_m)
+    lat_mid = (st.session_state["origin_lat"] + st.session_state["dest_lat"]) / 2
+    lon_mid = (st.session_state["origin_lon"] + st.session_state["dest_lon"]) / 2
+    if st.button("Consultar Tráfico"):
+        data_flow = tomtom_traffic_flow(lat_mid, lon_mid)
         if not data_flow or "flowSegmentData" not in data_flow:
-            st.error("No se pudo obtener datos de tráfico.")
+            st.error("No se pudieron obtener datos de tráfico.")
             return
         flow = data_flow["flowSegmentData"]
-        cur_spd = flow.get("currentSpeed", 0)
-        free_spd = flow.get("freeFlowSpeed", 0)
-        st.write(f"Velocidad actual: {cur_spd} km/h")
-        st.write(f"Velocidad libre: {free_spd} km/h")
-        if cur_spd < 20:
-            st.error("Tráfico muy congestionado. Considera ruta alternativa.")
-        elif cur_spd < 50:
-            st.warning("Tráfico moderado. Posibles retrasos.")
+        cur_speed = flow.get("currentSpeed", 0)
+        free_speed = flow.get("freeFlowSpeed", 0)
+        st.write(f"Velocidad actual: {cur_speed} km/h")
+        st.write(f"Velocidad libre: {free_speed} km/h")
+        if cur_speed < 20:
+            st.error("Tráfico muy congestionado.")
+        elif cur_speed < 50:
+            st.warning("Tráfico moderado. Podrías tener retrasos.")
         else:
             st.info("Tráfico fluido.")
 
 # -----------------------------------------------------------------------------
-# TAB: Predicción de Retrasos (Modelo Realista)
+# TAB: Predicción de Retrasos
 # -----------------------------------------------------------------------------
 def tab_prediccion_retrasos():
-    st.subheader("Predicción de Retrasos")
-    if "distance_km" not in st.session_state or "duration_min" not in st.session_state:
-        st.warning("Primero calcula la ruta en 'Mapa y Tráfico'.")
+    st.subheader("Predicción de retrasos")
+    if not (st.session_state.get("distance_km") and st.session_state.get("duration_min")):
+        st.warning("Primero calcula la ruta en 'Calcular ruta'.")
         return
     dist_km = st.session_state["distance_km"]
-    base_min = st.session_state["duration_min"]
-    lat_m = (st.session_state["origin_lat"] + st.session_state["dest_lat"]) / 2
-    lon_m = (st.session_state["origin_lon"] + st.session_state["dest_lon"]) / 2
-
-    st.write(f"Distancia (TomTom): {dist_km:.2f} km")
-    st.write(f"Tiempo base (TomTom): ~{base_min:.2f} min")
-
-    meteo = get_weather_open_meteo(lat_m, lon_m)
+    base_time = st.session_state["duration_min"]
+    lat_mid = (st.session_state["origin_lat"] + st.session_state["dest_lat"]) / 2
+    lon_mid = (st.session_state["origin_lon"] + st.session_state["dest_lon"]) / 2
+    st.write(f"Distancia: {dist_km:.2f} km")
+    st.write(f"Tiempo base: ~{base_time:.2f} min")
+    meteo = get_weather_open_meteo(lat_mid, lon_mid)
     if not meteo:
-        st.warning("No se pudo obtener datos meteorológicos. Se usan valores por defecto.")
+        st.warning("No se pudieron obtener datos meteorológicos. Se usarán valores por defecto.")
         temp, wind, precip, cloud = 20.0, 0.0, 0.0, 0.0
     else:
         temp = meteo["temp"]
@@ -491,14 +511,13 @@ def tab_prediccion_retrasos():
         precip = meteo["precip"]
         cloud = meteo["cloud"]
         st.write(f"Clima: Temp={temp:.1f}°C, Viento={wind:.1f} km/h, Precip={precip:.1f} mm, Nubosidad={cloud:.1f}%")
-    
-    if st.button("Calcular Predicción"):
-        predicted_time = predict_time(dist_km, temp, wind, precip, cloud)
-        if predicted_time is None:
-            st.error("Error en la predicción con Prophet.")
+    if st.button("Calcular predicción"):
+        pred_time = predict_time(dist_km, temp, wind, precip, cloud)
+        if pred_time is None:
+            st.error("Error en la predicción.")
             return
-        st.success(f"Tiempo estimado (modelo): {predicted_time:.2f} min")
-        delay = predicted_time - base_min
+        st.success(f"Tiempo estimado (modelo): {pred_time:.2f} min")
+        delay = pred_time - base_time
         if delay > 0:
             st.error(f"Retraso estimado: +{delay:.2f} min")
         else:
@@ -510,9 +529,9 @@ def tab_prediccion_retrasos():
 def tab_calculadora_cae():
     st.subheader("Calculadora CAE")
     kwh = st.number_input("kWh ahorrados", min_value=0.0, value=500.0, step=50.0)
-    if st.button("Calcular Ingresos"):
-        cae, cost_min, cost_max = calculate_cae(kwh)
-        st.write(f"CAE generados: {cae:.2f} kWh")
+    if st.button("Calcular ingresos"):
+        kwh_val, cost_min, cost_max = calculate_cae(kwh)
+        st.write(f"CAE generados: {kwh_val:.2f} kWh")
         st.write(f"Ingresos estimados: entre {cost_min:.2f} € y {cost_max:.2f} €")
 
 # -----------------------------------------------------------------------------
@@ -521,20 +540,20 @@ def tab_calculadora_cae():
 def main_app():
     st.title("Trafiquea: Dashboard para Empresas Logísticas")
     st.markdown("""
-    **Funciones**:
-    - **Mapa y Tráfico**: Muestra un mapa centrado en tu ubicación actual (si se obtiene) y permite calcular la ruta (con tipos de vehículo en español).
-    - **Ruta Alternativa**: Permite evitar una carretera ingresada y pinta la ruta alternativa en rojo.
-    - **TSP Avanzado (NLP)**: Extrae direcciones desde texto en español y calcula el orden óptimo (máx 8 paradas) mediante TSP.
-    - **Tráfico en Ruta**: Consulta el flujo de tráfico en el punto medio de la ruta y ofrece consejos.
-    - **Predicción de Retrasos**: Utiliza un modelo Prophet realista con variables meteorológicas para estimar retrasos.
-    - **Calculadora CAE**: Calcula ingresos potenciales a partir de kWh ahorrados.
+    **Funciones disponibles:**
+    - Calcular ruta (con selección de hora de salida y eventos en ruta)
+    - Ruta alternativa (evitar carretera específica)
+    - Calcular ruta completa (usando NLP para extraer direcciones y optimizar orden)
+    - Tráfico en ruta (consultar datos de tráfico en el trayecto)
+    - Predicción de retrasos (modelo realista con influencias meteorológicas)
+    - Calculadora CAE (ingresos por kWh ahorrados)
     """)
     tabs = st.tabs([
-        "Mapa y Tráfico",
-        "Ruta Alternativa",
-        "TSP Avanzado (NLP)",
-        "Tráfico en Ruta",
-        "Predicción de Retrasos",
+        "Calcular ruta",
+        "Ruta alternativa",
+        "Calcular ruta completa",
+        "Tráfico en ruta",
+        "Predicción de retrasos",
         "Calculadora CAE"
     ])
     with tabs[0]:
@@ -551,7 +570,7 @@ def main_app():
         tab_calculadora_cae()
 
 if __name__ == "__main__":
-    # Inicializar algunas variables de session_state si no existen
+    # Inicializar algunos valores en session_state si no existen
     for key in ["origin_lat", "origin_lon", "dest_lat", "dest_lon", "distance_km", "duration_min", "route_points"]:
         if key not in st.session_state:
             st.session_state[key] = None
