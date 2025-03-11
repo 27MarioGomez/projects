@@ -14,13 +14,14 @@ from prophet import Prophet
 import lightgbm as lgb
 
 # -----------------------------------------------------------------------------
-# Configuración de carpeta data
+# Ajuste de ruta para la carpeta 'data' relativa a este script
 # -----------------------------------------------------------------------------
-DATA_DIR = "data"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # -----------------------------------------------------------------------------
-# Funciones de Geocodificación
+# Geocodificación con Nominatim
 # -----------------------------------------------------------------------------
 def geocode_address(address: str):
     geolocator = Nominatim(user_agent="trafiquea_dashboard")
@@ -30,7 +31,7 @@ def geocode_address(address: str):
     return None, None
 
 # -----------------------------------------------------------------------------
-# Descarga y carga de CSV en carpeta data
+# Función para cargar archivos CSV en 'data'
 # -----------------------------------------------------------------------------
 def download_file(url, filename, sep=None, encoding="utf-8"):
     filepath = os.path.join(DATA_DIR, filename)
@@ -50,7 +51,7 @@ def download_file(url, filename, sep=None, encoding="utf-8"):
         return None
 
 # -----------------------------------------------------------------------------
-# Open‑Meteo (sin claves)
+# Open‑Meteo
 # -----------------------------------------------------------------------------
 def get_weather_open_meteo(lat: float, lon: float):
     url = "https://api.open-meteo.com/v1/forecast"
@@ -74,7 +75,7 @@ def get_weather_open_meteo(lat: float, lon: float):
     return None
 
 # -----------------------------------------------------------------------------
-# OSRM: Cálculo de Rutas y Trip Service
+# OSRM: Rutas y Trip Service
 # -----------------------------------------------------------------------------
 def get_route_osrm(origin_coords, destination_coords):
     base_url = "http://router.project-osrm.org/route/v1/driving"
@@ -107,7 +108,7 @@ def get_route_osrm_multiple(coords_list, profile="driving"):
     return None
 
 # -----------------------------------------------------------------------------
-# Ejemplo de Eurostat
+# Eurostat (opcional)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_eurostat_transport_data():
@@ -120,7 +121,7 @@ def get_eurostat_transport_data():
     return None
 
 # -----------------------------------------------------------------------------
-# Ejemplo de EEA Code API
+# EEA Code API (opcional)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_eea_code_api_content_types():
@@ -131,14 +132,14 @@ def get_eea_code_api_content_types():
     return None
 
 # -----------------------------------------------------------------------------
-# Carga de UNFCCC_v27.csv y filtrado para España
+# Carga y filtrado de UNFCCC_v27.csv
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_unfccc_data():
     filename = "UNFCCC_v27.csv"
     filepath = os.path.join(DATA_DIR, filename)
     if not os.path.exists(filepath):
-        st.error(f"No se encontró {filename} en la carpeta {DATA_DIR}.")
+        st.error(f"No se encontró {filename} en {DATA_DIR}. Verifica la ruta.")
         return None
     try:
         df = pd.read_csv(filepath)
@@ -151,30 +152,28 @@ def load_historical_mobility_data():
     df = get_unfccc_data()
     if df is None:
         return None
-    # Filtrar solo España
     df_es = df[df["Country_code"] == "ES"]
     if df_es.empty:
         st.error("No se encontraron datos para España en UNFCCC_v27.csv.")
         return None
-    # Agrupar por año y sumar las emisiones
+    # Agrupar por año, sumando 'emissions'
     df_grouped = df_es.groupby("Year")["emissions"].sum().reset_index()
-    # Convertir Year a fecha (1 enero de cada año)
     df_grouped["ds"] = pd.to_datetime(df_grouped["Year"].astype(str) + "-01-01", format="%Y-%m-%d")
     df_grouped.rename(columns={"emissions": "y"}, inplace=True)
     df_grouped = df_grouped[["ds", "y"]].sort_values("ds")
     return df_grouped
 
 # -----------------------------------------------------------------------------
-# Modelo ML (LightGBM) y Prophet
+# Modelo LightGBM y Prophet
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_demand_model():
-    model_path = "model_demand_lgbm.pkl"
+    model_path = os.path.join(BASE_DIR, "model_demand_lgbm.pkl")
     try:
         model = joblib.load(model_path)
         return model
     except:
-        st.warning("Modelo no encontrado. Entrenando nuevo modelo LightGBM con UNFCCC_v27.csv (España).")
+        st.warning("Entrenando nuevo modelo LightGBM con datos UNFCCC_v27 (España).")
         df = load_historical_mobility_data()
         if df is None or df.empty:
             st.error("No se pudieron cargar datos históricos para entrenar el modelo.")
@@ -204,7 +203,7 @@ def forecast_with_prophet(df: pd.DataFrame, periods: int = 5):
     return forecast
 
 # -----------------------------------------------------------------------------
-# Simulación de Tráfico por hora
+# Simulación de Tráfico (por hora)
 # -----------------------------------------------------------------------------
 def simulate_traffic_forecast(hour_offset: int):
     if hour_offset <= 2:
@@ -225,7 +224,7 @@ def simulate_traffic_forecast(hour_offset: int):
     }
 
 # -----------------------------------------------------------------------------
-# Función para simular los segmentos de ruta
+# Simulación de Ruta
 # -----------------------------------------------------------------------------
 def color_for_level(level):
     if level == "Bajo":
@@ -242,7 +241,6 @@ def simulate_route_segments(steps, start_time, weather, zone_factor):
         distance_m = step["distance"]
         distance_km = distance_m / 1000.0
         
-        # Ajustar factor según clima, distancia, etc.
         base_factor = 1.0
         if weather and weather.get("viento") and weather["viento"] > 20:
             base_factor += 0.2
@@ -253,7 +251,6 @@ def simulate_route_segments(steps, start_time, weather, zone_factor):
         duration_s = step["duration"] * total_factor
         current_time += timedelta(seconds=duration_s)
         
-        # Determinar nivel (bajo, moderado, alto)
         level = "Bajo"
         if total_factor >= 1.2:
             level = "Moderado"
@@ -270,7 +267,7 @@ def simulate_route_segments(steps, start_time, weather, zone_factor):
     return segments, current_time
 
 # -----------------------------------------------------------------------------
-# Mapa y Tráfico (OSRM)
+# Mapa y Tráfico
 # -----------------------------------------------------------------------------
 def show_map_and_traffic():
     st.subheader("Cálculo de Ruta (OSRM)")
@@ -290,7 +287,6 @@ def show_map_and_traffic():
         if not origin_coords or not dest_coords:
             st.error("Direcciones inválidas.")
             return
-        
         start_dt = datetime(datetime.now().year, datetime.now().month, datetime.now().day,
                             start_time.hour, start_time.minute)
         weather = get_weather_open_meteo(origin_coords[0], origin_coords[1])
@@ -302,10 +298,11 @@ def show_map_and_traffic():
             return
         
         segments, arrival_time = simulate_route_segments(route_data["steps"], start_dt, weather, zone_factor)
+        
+        # Mapa
         m_map = folium.Map(location=[(origin_coords[0] + dest_coords[0]) / 2,
                                      (origin_coords[1] + dest_coords[1]) / 2],
                            zoom_start=12, tiles="OpenStreetMap")
-        
         for seg in segments:
             folium.PolyLine([(pt[1], pt[0]) for pt in seg["coords"]],
                             color=seg["color"], weight=4).add_to(m_map)
@@ -332,13 +329,11 @@ def show_forecast():
     hours = list(range(1, 25))
     selected_hour = st.selectbox("Horas en el futuro (tráfico simulado):", hours, key="forecast_hours")
     
-    # Simulación de tráfico
     traffic_info = simulate_traffic_forecast(selected_hour)
     st.write(f"Nivel de Saturación: {traffic_info['saturacion']}")
     st.write(f"Tiempo Normal: {traffic_info['tiempo_normal']} min")
     st.write(f"Tiempo Proyectado: {traffic_info['tiempo_proyectado']} min")
     
-    # LightGBM / Prophet con datos de UNFCCC_v27.csv (España)
     df_hist = load_historical_mobility_data()
     if df_hist is not None and not df_hist.empty:
         st.write("**Predicción de Demanda (LightGBM)**")
@@ -354,7 +349,7 @@ def show_forecast():
             st.plotly_chart(fig)
 
 # -----------------------------------------------------------------------------
-# Optimización de Rutas con Múltiples Paradas (Trip Service)
+# Optimización de Rutas con Múltiples Paradas
 # -----------------------------------------------------------------------------
 def show_trip_service():
     st.subheader("Optimización de Ruta con Múltiples Paradas (OSRM Trip Service)")
@@ -387,7 +382,6 @@ def show_trip_service():
         
         for i, (lat, lon) in enumerate(coords_list):
             folium.Marker((lat, lon), tooltip=f"Parada {i+1}", icon=folium.Icon(color="blue")).add_to(m_trip)
-        
         st_folium(m_trip, width=700)
         st.write(f"Distancia total: {distance_m/1000:.2f} km")
         st.write(f"Duración total: ~{int(duration_s/60)} min")
@@ -396,8 +390,16 @@ def show_trip_service():
 # Calculadora de CAE
 # -----------------------------------------------------------------------------
 def calculate_cae(volume_kg: float):
-    factor = 0.001
-    return volume_kg * factor
+    """
+    Se asume 1 CAE = 1 kWh ahorrado.
+    El precio medio estimado oscila entre 115 y 140 €/MWh => 0.115 - 0.14 €/kWh.
+    """
+    # CAEs generados = volumen (kg) => asumiendo 1 kg CO2 = 1 kWh (ejemplo simplificado)
+    cae_generated = volume_kg  
+    # Rango de ingresos
+    cost_min = cae_generated * 0.115
+    cost_max = cae_generated * 0.14
+    return cae_generated, cost_min, cost_max
 
 # -----------------------------------------------------------------------------
 # Formulario de Integración
@@ -436,10 +438,11 @@ def empresas_section():
     
     with tabs[3]:
         st.write("Calculadora de CAE")
-        volume = st.number_input("CO₂ evitado (kg)", min_value=0.0, value=1000.0, step=100.0, key="coe_volume_emp")
+        volume = st.number_input("CO₂ evitado (kg) / kWh ahorrados", min_value=0.0, value=1000.0, step=100.0, key="coe_volume_emp")
         if st.button("Calcular CAE", key="calc_cae_emp"):
-            cae_val = calculate_cae(volume)
-            st.write(f"CAE estimados: {cae_val:.2f}")
+            cae_val, cost_min, cost_max = calculate_cae(volume)
+            st.write(f"CAE generados: {cae_val:.2f} kWh")
+            st.write(f"Ingresos estimados: entre {cost_min:.2f} € y {cost_max:.2f} €")
     
     with tabs[4]:
         show_integration_form()
@@ -460,10 +463,10 @@ def main_app():
     st.title("Trafiquea: Dashboard para Empresas")
     st.markdown("""
     Este dashboard se centra en funcionalidades para empresas logísticas:
-    - **Open‑Meteo** para datos meteorológicos,
-    - **OSRM** (servicio público) para rutas y optimización con múltiples paradas,
-    - **UNFCCC_v27.csv** para entrenar/cargar un modelo LightGBM y un ejemplo con Prophet,
-    - **Eurostat** y **EEA Code API** (opcional),
+    - **Open‑Meteo** para datos meteorológicos (temperatura, viento, precipitación, nubosidad).
+    - **OSRM** (servicio público) para rutas y optimización con múltiples paradas.
+    - **UNFCCC_v27.csv** para entrenar/cargar un modelo LightGBM y un ejemplo con Prophet (datos filtrados a España).
+    - **Eurostat** y **EEA Code API** (opcionales) para información adicional.
     - Simulación de tráfico por hora, cálculo de CAE, etc.
     """)
     
