@@ -13,4 +13,3 @@ xgboost
 lightgbm
 prophet
 spacy
-streamlit-geolocation
