@@ -12,4 +12,5 @@ numba
 xgboost
 lightgbm
 prophet
+spacy
 streamlit-geolocation
