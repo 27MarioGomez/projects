@@ -14,7 +14,7 @@ from prophet import Prophet
 import lightgbm as lgb
 
 # --------------------------------------------------------------------
-# Configuración: carpeta de datos y creación si no existe
+# Configuración de la carpeta de datos
 # --------------------------------------------------------------------
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -74,7 +74,7 @@ def get_weather_open_meteo(lat: float, lon: float):
     return None
 
 # --------------------------------------------------------------------
-# OSRM: /route/v1/driving y /trip/v1/driving
+# OSRM (público) para rutas y trip service
 # --------------------------------------------------------------------
 def get_route_osrm(origin_coords, destination_coords):
     base_url = "http://router.project-osrm.org/route/v1/driving"
@@ -108,12 +108,11 @@ def get_route_osrm_multiple(coords_list, profile="driving"):
     return None
 
 # --------------------------------------------------------------------
-# Eurostat: ejemplo de consulta
+# Llamada a Eurostat (opcional)
 # --------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_eurostat_transport_data():
-    # Ajustar según la doc oficial
-    dataset_id = "tsdtr020"
+    dataset_id = "tsdtr020"  # Ajustar
     params = {
         "format": "JSON",
         "geo": "ES"
@@ -125,14 +124,25 @@ def get_eurostat_transport_data():
     return None
 
 # --------------------------------------------------------------------
-# UNFCCC_v27.csv (datos de GEI)
+# EEA Code API (opcional): https://www.eea.europa.eu/code/api
+# --------------------------------------------------------------------
+@st.cache_data(ttl=3600)
+def get_eea_code_api_content_types():
+    """
+    Ejemplo de consulta a la EEA Code API en 'content-types'.
+    URL: https://www.eea.europa.eu/code/api/content-types/@@view
+    """
+    url = "https://www.eea.europa.eu/code/api/content-types/@@view"
+    r = requests.get(url)
+    if r.status_code == 200:
+        return r.text  # Devuelve HTML
+    return None
+
+# --------------------------------------------------------------------
+# UNFCCC_v27.csv (almacenado en data) para entrenar LightGBM
 # --------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_unfccc_data():
-    """
-    Carga UNFCCC_v27.csv (emisiones/absorciones totales GEI) desde la carpeta data.
-    Asegúrate de que el archivo existe en data.
-    """
     filename = "UNFCCC_v27.csv"
     filepath = os.path.join(DATA_DIR, filename)
     if not os.path.exists(filepath):
@@ -146,40 +156,34 @@ def get_unfccc_data():
         return None
 
 # --------------------------------------------------------------------
-# Modelo ML: LightGBM + Prophet
+# ML: Entrenar/Cargar modelo con UNFCCC_v27
 # --------------------------------------------------------------------
 @st.cache_resource
 def load_demand_model():
-    """
-    Carga/entrena un modelo LightGBM usando UNFCCC_v27.csv.
-    """
     model_path = "model_demand_lgbm.pkl"
     try:
         model = joblib.load(model_path)
         return model
     except:
-        st.warning("Modelo no encontrado, entrenando uno nuevo con UNFCCC_v27.csv.")
+        st.warning("Modelo no encontrado. Entrenando con UNFCCC_v27.csv.")
         df = get_unfccc_data()
         if df is None:
             st.error("No se pudo cargar UNFCCC_v27.csv para entrenar el modelo.")
             return None
         
-        # Ajustar columnas para el entrenamiento. Ejemplo: asumiendo que
-        # hay una columna 'Year' y otra 'Total_GEIs' para la demanda
-        # o un valor que queramos predecir
+        # Ajustar según columnas. Ejemplo: Year, Value
         if "Year" not in df.columns or "Value" not in df.columns:
-            st.error("No se encontraron columnas 'Year' y 'Value' en UNFCCC_v27.csv.")
+            st.error("Columnas 'Year' y 'Value' no encontradas en UNFCCC_v27.csv.")
             return None
         
         df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
-        df = df.dropna(subset=["Year", "Value"])
+        df.dropna(subset=["Year", "Value"], inplace=True)
         
         X = df[["Year"]]
         y = df["Value"]
         
         model = lgb.LGBMRegressor()
         model.fit(X, y)
-        
         joblib.dump(model, model_path)
         return model
 
@@ -189,74 +193,45 @@ def predict_demand(input_features):
         return model.predict(np.array([input_features]))[0]
     return None
 
-def forecast_with_prophet(data: pd.DataFrame, periods: int = 24):
+def forecast_with_prophet(df: pd.DataFrame, periods: int = 5):
     """
-    Ejemplo con Prophet, ajusta a tu estructura real de UNFCCC_v27
-    con columnas 'ds' (fecha) y 'y' (valor).
+    Ejemplo con Prophet. Ajustar a la estructura real del CSV.
     """
+    if "ds" not in df.columns or "y" not in df.columns:
+        st.error("No se encontraron columnas 'ds' y 'y' en el DataFrame para Prophet.")
+        return pd.DataFrame()
     m = Prophet()
-    m.fit(data)
-    future = m.make_future_dataframe(periods=periods, freq='Y')  # Ajusta freq según tu caso
+    m.fit(df)
+    future = m.make_future_dataframe(periods=periods, freq="Y")  # Ajusta la frecuencia si es por año
     forecast = m.predict(future)
     return forecast
 
 # --------------------------------------------------------------------
-# Análisis histórico en UNFCCC_v27
+# Simulación de Tráfico por Hora
 # --------------------------------------------------------------------
-def load_historical_mobility_data():
-    # Reemplazamos la carga anterior con la de UNFCCC_v27
-    df = get_unfccc_data()
-    if df is not None:
-        # Ajustar para Prophet: ds, y
-        # Ejemplo: si 'Year' es el tiempo y 'Value' la columna
-        # Se crea ds como una fecha ficticia (1-1-Year)
-        if "Year" in df.columns and "Value" in df.columns:
-            df["ds"] = pd.to_datetime(df["Year"], format="%Y", errors="coerce")
-            df.rename(columns={"Value": "y"}, inplace=True)
-            return df[["ds", "y"]].dropna()
-        else:
-            st.error("No se encontraron columnas 'Year' y 'Value' en UNFCCC_v27.csv.")
-            return None
-    return None
-
-def analyze_historical_data():
-    df = load_historical_mobility_data()
-    if df is None:
-        st.error("No se pudo analizar UNFCCC_v27.csv.")
-        return
-    st.write("Resumen de datos históricos de UNFCCC (GEI):")
-    max_val = df["y"].max()
-    min_val = df["y"].min()
-    avg_val = df["y"].mean()
-    st.write(f"- Máximo: {max_val}")
-    st.write(f"- Mínimo: {min_val}")
-    st.write(f"- Promedio: {avg_val:.2f}")
-    
-    fig = px.line(df, x="ds", y="y", title="Evolución de Emisiones/Absorciones (UNFCCC)")
-    st.plotly_chart(fig)
+def simulate_traffic_forecast(hour_offset):
+    """
+    Retorna un dict con saturacion, tiempo_normal, tiempo_proyectado
+    """
+    if hour_offset <= 2:
+        saturacion = "Bajo"
+        factor = 1.0
+    elif hour_offset <= 4:
+        saturacion = "Moderado"
+        factor = 1.2
+    else:
+        saturacion = "Alto"
+        factor = 1.5
+    tiempo_normal = np.random.randint(10, 15)
+    tiempo_proyectado = round(tiempo_normal * factor)
+    return {
+        "saturacion": saturacion,
+        "tiempo_normal": tiempo_normal,
+        "tiempo_proyectado": tiempo_proyectado
+    }
 
 # --------------------------------------------------------------------
-# Cálculo de CAE
-# --------------------------------------------------------------------
-def calculate_cae(volume_kg: float):
-    factor = 0.001
-    return volume_kg * factor
-
-# --------------------------------------------------------------------
-# Formulario de Integración
-# --------------------------------------------------------------------
-def show_integration_form():
-    with st.form("integration_form_final", clear_on_submit=True):
-        nombre = st.text_input("Nombre", key="api_nombre")
-        apellidos = st.text_input("Apellidos", key="api_apellidos")
-        institucion = st.text_input("Institución o Empresa", key="api_institucion")
-        mensaje = st.text_area("Mensaje (opcional)", key="api_mensaje")
-        submitted = st.form_submit_button("Enviar Solicitud")
-        if submitted:
-            st.success("Solicitud enviada. Nos pondremos en contacto contigo.")
-
-# --------------------------------------------------------------------
-# Funciones de OSRM y Mapa
+# Mapa y Tráfico
 # --------------------------------------------------------------------
 def show_map_and_traffic():
     st.subheader("Cálculo de Ruta (OSRM)")
@@ -279,13 +254,15 @@ def show_map_and_traffic():
         start_dt = datetime(datetime.now().year, datetime.now().month, datetime.now().day,
                             start_time.hour, start_time.minute)
         weather = get_weather_open_meteo(origin_coords[0], origin_coords[1])
-        zone_factor = simulate_zone_factor(origin_full)
+        zone_factor = 1.0  # Factor de zona, si se desea
         route_data = get_route_osrm(origin_coords, dest_coords)
         if not route_data:
             st.error("No se pudo obtener la ruta con OSRM.")
             return
+        # Simulación de segmentos
         segments, arrival_time = simulate_route_segments(route_data["steps"], start_dt, weather, zone_factor)
         
+        # Mapa Folium
         m_map = folium.Map(location=[(origin_coords[0] + dest_coords[0]) / 2,
                                      (origin_coords[1] + dest_coords[1]) / 2],
                            zoom_start=12, tiles="OpenStreetMap")
@@ -308,44 +285,45 @@ def show_map_and_traffic():
 # Predicción de Demanda y Tráfico
 # --------------------------------------------------------------------
 def show_forecast():
-    st.subheader("Predicción de Demanda y Tráfico (Simulado)")
-    hours = list(range(1, 25))
-    offset = st.selectbox("Horas en el futuro:", hours, key="forecast_hours")
+    st.subheader("Predicción de Demanda y Tráfico")
     
-    # Predicción de tráfico (simulado)
-    traffic_info = simulate_traffic_forecast(offset)
+    # Predicción de tráfico (simulada) por hora
+    hours = list(range(1, 25))
+    selected_hour = st.selectbox("Horas en el futuro (tráfico simulado):", hours, key="forecast_hours")
+    traffic_info = simulate_traffic_forecast(selected_hour)
     st.write(f"Nivel de Saturación: {traffic_info['saturacion']}")
     st.write(f"Tiempo Normal: {traffic_info['tiempo_normal']} min")
     st.write(f"Tiempo Proyectado: {traffic_info['tiempo_proyectado']} min")
     
-    # Predicción de demanda (LightGBM y Prophet) con UNFCCC
+    # Predicción de demanda (LightGBM/Prophet) usando UNFCCC_v27
     df_hist = load_historical_mobility_data()
-    if df_hist is not None:
-        st.write("**Predicción de Demanda con LightGBM:**")
-        current_year = datetime.now().year + offset
+    if df_hist is not None and len(df_hist) > 0:
+        st.write("**Predicción de Demanda con LightGBM**")
+        current_year = datetime.now().year + selected_hour
         pred = predict_demand([current_year])
         if pred is not None:
             st.write(f"Demanda estimada para el año {current_year}: {pred:.2f}")
         
-        st.write("**Predicción de Demanda con Prophet (ejemplo):**")
-        forecast = forecast_with_prophet(df_hist, periods=5)  # 5 periodos anuales
-        fig = px.line(forecast, x="ds", y="yhat", title="Demanda (Prophet)")
-        st.plotly_chart(fig)
+        st.write("**Predicción de Demanda con Prophet (ejemplo)**")
+        forecast = forecast_with_prophet(df_hist, periods=5)
+        if not forecast.empty:
+            fig = px.line(forecast, x="ds", y="yhat", title="Proyección de Emisiones/Absorciones (Prophet)")
+            st.plotly_chart(fig)
 
 # --------------------------------------------------------------------
-# Optimización de Rutas con Múltiples Paradas
+# Optimización de Rutas con Múltiples Paradas (Trip Service)
 # --------------------------------------------------------------------
 def show_trip_service():
-    st.subheader("Optimización de Ruta con Múltiples Paradas (OSRM Trip Service)")
+    st.subheader("Optimización de Ruta con Múltiples Paradas (OSRM)")
     addresses = st.text_area("Direcciones (una por línea):", "Plaza Mayor, Madrid\nPuerta del Sol, Madrid\nAtocha, Madrid")
     if st.button("Optimizar Ruta", key="btn_trip"):
-        lines = [a.strip() for a in addresses.split("\n") if a.strip()]
+        lines = [line.strip() for line in addresses.split("\n") if line.strip()]
         if len(lines) < 2:
             st.error("Ingrese al menos 2 direcciones.")
             return
         coords_list = []
         for addr in lines:
-            geoc, full_addr = geocode_address(addr)
+            geoc, _ = geocode_address(addr)
             if not geoc:
                 st.error(f"No se pudo geocodificar: {addr}")
                 return
@@ -375,7 +353,13 @@ def show_trip_service():
 # --------------------------------------------------------------------
 def empresas_section():
     st.header("Empresas")
-    tabs = st.tabs(["Mapa y Tráfico", "Predicción de Demanda", "Optimización Múltiples Paradas", "Calculadora CAE", "Integración API"])
+    tabs = st.tabs([
+        "Mapa y Tráfico",
+        "Predicción de Demanda",
+        "Optimización Múltiples Paradas",
+        "Calculadora CAE",
+        "Integración API"
+    ])
     
     with tabs[0]:
         show_map_and_traffic()
@@ -400,18 +384,17 @@ def empresas_section():
 # Aplicación Principal
 # --------------------------------------------------------------------
 def main_app():
-    st.title("Trafiquea (Versión Solo Empresas)")
+    st.title("Trafiquea: Versión para Empresas")
     st.markdown("""
-    Este dashboard se centra en funcionalidades para empresas logísticas:
+    Este dashboard se enfoca en funcionalidades para **empresas logísticas**:
     - **Open‑Meteo** para datos meteorológicos,
-    - **OSRM** para rutas (incluyendo múltiples paradas),
-    - **UNFCCC_v27.csv** (datos GEI) para entrenar/cargar un modelo LightGBM,
+    - **OSRM** (público) para rutas y optimización con múltiples paradas,
+    - **UNFCCC_v27.csv** (carpeta data) para entrenar/cargar un modelo LightGBM y usar Prophet,
     - **Eurostat** (opcional) para datos de transporte en España,
-    - **Predicción** de demanda con LightGBM/Prophet,
-    - **Calculadora CAE** y formularios de integración.
+    - Predicciones de tráfico (simulado) y demanda,
+    - Calculadora de CAE y formulario de integración.
     """)
     
-    # Directo a la sección de empresas
     empresas_section()
 
 if __name__ == "__main__":
