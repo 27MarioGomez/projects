@@ -12,4 +12,4 @@ numba
 xgboost
 lightgbm
 prophet
-stanza
+spacy
