@@ -1,5 +1,5 @@
 import streamlit as st
-st.set_page_config(layout="wide")  # Debe ser la primera instrucción del script
+st.set_page_config(layout="wide")  # Debe ser la primera instrucción
 
 import os
 import requests
@@ -9,6 +9,8 @@ import joblib
 from prophet import Prophet
 import itertools
 from datetime import datetime
+import folium
+from streamlit_folium import st_folium
 
 # -----------------------------------------------------------------------------
 # CONFIGURACIÓN: API key de TomTom (almacenada en st.secrets)
@@ -306,60 +308,21 @@ def get_departure_iso(hh: int, mm: int) -> str:
     return dt.isoformat()
 
 # -----------------------------------------------------------------------------
-# Renderizar mapa usando archivo HTML de TomTom (my-map.html)
+# Renderizar mapa con Folium (se mantiene el mapa fijo)
 # -----------------------------------------------------------------------------
-def render_tomtom_html(route_points, lat_start, lon_start, lat_end=None, lon_end=None, color="blue"):
-    try:
-        with open("my-map.html", "r", encoding="utf-8") as f:
-            html_template = f.read()
-    except Exception as e:
-        st.error("No se encontró el archivo my-map.html")
-        return ""
-    # Reemplazar el placeholder por la API key real
-    api_key = get_tomtom_key()
-    html_template = html_template.replace("{{tomtom_api_key}}", api_key)
-    # Inyectar polilínea y marcador destino si existen
+def render_map(route_points, lat_start, lon_start, lat_end=None, lon_end=None, color="blue"):
+    m_map = folium.Map(location=[lat_start, lon_start], zoom_start=12, control_scale=True)
+    # Usamos TomTom como tile layer
+    tile_url = f"https://api.tomtom.com/map/1/tile/basic/main/{{z}}/{{x}}/{{y}}.png?key={get_tomtom_key()}"
+    folium.TileLayer(tiles=tile_url, attr="TomTom").add_to(m_map)
+    # Marcador de ubicación actual
+    folium.Marker((lat_start, lon_start), tooltip="Tu ubicación actual", icon=folium.Icon(color="blue")).add_to(m_map)
     if route_points:
-        coords_js = []
-        for (la, lo) in route_points:
-            coords_js.append(f"[{lo}, {la}]")
-        coords_str = ",".join(coords_js)
-        polyline_script = f"""
-          var routeCoords = [{coords_str}];
-          var geojson = {{
-            type: 'Feature',
-            geometry: {{
-              type: 'LineString',
-              coordinates: routeCoords
-            }}
-          }};
-          map.on('load', function() {{
-            map.addSource('route', {{
-              type: 'geojson',
-              data: geojson
-            }});
-            map.addLayer({{
-              id: 'route-line',
-              type: 'line',
-              source: 'route',
-              paint: {{
-                'line-color': '{color}',
-                'line-width': 4
-              }}
-            }});
-          }});
-        """
-    else:
-        polyline_script = ""
-    marker_dest = ""
-    if lat_end is not None and lon_end is not None:
-        marker_dest = f"""
-          new tt.Marker({{ color: 'red' }})
-            .setLngLat([{lon_end}, {lat_end}])
-            .addTo(map);
-        """
-    html_code = html_template.replace("<!-- INSERT_POLYLINE -->", polyline_script + marker_dest)
-    return html_code
+        folium.PolyLine(route_points, color=color, weight=5).add_to(m_map)
+        folium.Marker(route_points[0], tooltip="Origen", icon=folium.Icon(color="green")).add_to(m_map)
+        if lat_end is not None and lon_end is not None:
+            folium.Marker((lat_end, lon_end), tooltip="Destino", icon=folium.Icon(color="red")).add_to(m_map)
+    st_folium(m_map, width=700)
 
 # -----------------------------------------------------------------------------
 # TAB 1: Calcular ruta
@@ -386,24 +349,28 @@ def tab_calcular_ruta():
         if not routing_data or "routes" not in routing_data:
             st.error("No se pudo obtener la ruta con TomTom.")
             return
+
         route = routing_data["routes"][0]
         dist_m = route["summary"]["lengthInMeters"]
         time_s = route["summary"]["travelTimeInSeconds"]
         dist_km = dist_m / 1000.0
         base_minutes = time_s / 60.0
         st.success(f"Ruta calculada. Distancia: {dist_km:.2f} km, Tiempo base: {format_minutes(base_minutes)}")
+
         st.session_state["origin_lat"] = o_lat
         st.session_state["origin_lon"] = o_lon
         st.session_state["dest_lat"] = d_lat
         st.session_state["dest_lon"] = d_lon
         st.session_state["distance_km"] = dist_km
         st.session_state["duration_min"] = base_minutes
+
         route_points = []
         for leg in route["legs"]:
             for point in leg["points"]:
                 route_points.append((point["latitude"], point["longitude"]))
         st.session_state["route_points"] = route_points
-        # Clima y tráfico
+
+        # Clima y tráfico en el punto medio
         lat_mid = (o_lat + d_lat) / 2
         lon_mid = (o_lon + d_lon) / 2
         weather = get_weather_open_meteo(lat_mid, lon_mid) or {}
@@ -418,20 +385,19 @@ def tab_calcular_ruta():
         st.write(f"Resultado: Distancia: {dist_km:.2f} km, Tiempo base: {format_minutes(base_minutes)}")
         st.write(f"Temperatura: {temp:.1f}ºC | Viento: {wind:.1f} km/h | Precipitaciones: {precip:.1f} mm | Nubosidad: {cloud:.1f}%")
         st.write(f"Velocidad de tráfico aprox: {speed} km/h")
-        html_code = render_tomtom_html(st.session_state["route_points"],
-                                       st.session_state["current_lat"],
-                                       st.session_state["current_lon"],
-                                       d_lat, d_lon, color="blue")
-        st.components.v1.html(html_code, height=700)
+
+        render_map(st.session_state["route_points"],
+                   st.session_state["current_lat"],
+                   st.session_state["current_lon"],
+                   d_lat, d_lon, color="blue")
     else:
         if "route_points" in st.session_state and st.session_state["route_points"]:
-            html_code = render_tomtom_html(st.session_state["route_points"],
-                                           st.session_state["current_lat"],
-                                           st.session_state["current_lon"],
-                                           st.session_state.get("dest_lat"),
-                                           st.session_state.get("dest_lon"),
-                                           color="blue")
-            st.components.v1.html(html_code, height=700)
+            render_map(st.session_state["route_points"],
+                       st.session_state["current_lat"],
+                       st.session_state["current_lon"],
+                       st.session_state.get("dest_lat"),
+                       st.session_state.get("dest_lon"),
+                       color="blue")
         else:
             st.info("Introduce Origen y Destino y pulsa 'Calcular ruta'.")
 
@@ -474,23 +440,21 @@ def tab_calcular_ruta_completa():
         st.session_state["origin_lon"] = ordered_coords[0][1]
         st.session_state["dest_lat"] = ordered_coords[-1][0]
         st.session_state["dest_lon"] = ordered_coords[-1][1]
-        html_code = render_tomtom_html(route_pts,
-                                       st.session_state["current_lat"],
-                                       st.session_state["current_lon"],
-                                       st.session_state["dest_lat"],
-                                       st.session_state["dest_lon"],
-                                       color="red")
-        st.components.v1.html(html_code, height=700)
+        render_map(route_pts,
+                   st.session_state["current_lat"],
+                   st.session_state["current_lon"],
+                   st.session_state["dest_lat"],
+                   st.session_state["dest_lon"],
+                   color="red")
     else:
         if "route_points" in st.session_state and st.session_state["route_points"]:
             st.info("Mostrando la última ruta TSP calculada:")
-            html_code = render_tomtom_html(st.session_state["route_points"],
-                                           st.session_state["current_lat"],
-                                           st.session_state["current_lon"],
-                                           st.session_state.get("dest_lat"),
-                                           st.session_state.get("dest_lon"),
-                                           color="red")
-            st.components.v1.html(html_code, height=700)
+            render_map(st.session_state["route_points"],
+                       st.session_state["current_lat"],
+                       st.session_state["current_lon"],
+                       st.session_state.get("dest_lat"),
+                       st.session_state.get("dest_lon"),
+                       color="red")
         else:
             st.info("Introduce direcciones y pulsa 'Calcular TSP'.")
 
@@ -571,23 +535,13 @@ def tab_calculadora_cae():
 def main_app():
     st.title("Trafiquea: Dashboard para Empresas Logísticas")
     option = st.sidebar.radio("Navegación", [
-        "Home",
         "Calcular ruta",
         "Calcular ruta completa",
         "Predicción de retrasos",
         "Consumo",
         "Calculadora CAE"
     ])
-    if option == "Home":
-        st.header("Home: Mapa fullscreen")
-        try:
-            with open("my-map.html", "r", encoding="utf-8") as f:
-                html_template = f.read()
-            html_code = html_template.replace("{{tomtom_api_key}}", get_tomtom_key())
-            st.components.v1.html(html_code, height=700)
-        except Exception as e:
-            st.error("Error al cargar el mapa fullscreen. Revisa que el archivo my-map.html exista.")
-    elif option == "Calcular ruta":
+    if option == "Calcular ruta":
         tab_calcular_ruta()
     elif option == "Calcular ruta completa":
         tab_calcular_ruta_completa()

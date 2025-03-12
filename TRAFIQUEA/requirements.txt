@@ -7,3 +7,5 @@ scikit-learn
 joblib
 prophet
 plotly
+folium
+streamlit-folium
