@@ -6,3 +6,4 @@ geopy
 scikit-learn
 joblib
 prophet
+plotly

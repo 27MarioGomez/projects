@@ -1,5 +1,5 @@
 import streamlit as st
-st.set_page_config(layout="wide")  # Debe ser la primera instrucción
+st.set_page_config(layout="wide")  # Debe ser la primera instrucción del script
 
 import os
 import requests
@@ -315,10 +315,10 @@ def render_tomtom_html(route_points, lat_start, lon_start, lat_end=None, lon_end
     except Exception as e:
         st.error("No se encontró el archivo my-map.html")
         return ""
-    # Reemplazar el marcador de posición por la API key real
+    # Reemplazar el placeholder por la API key real
     api_key = get_tomtom_key()
     html_template = html_template.replace("{{tomtom_api_key}}", api_key)
-    # Si existen puntos de ruta, inyectar código para la polilínea y marcador destino
+    # Inyectar polilínea y marcador destino si existen
     if route_points:
         coords_js = []
         for (la, lo) in route_points:
@@ -358,7 +358,6 @@ def render_tomtom_html(route_points, lat_start, lon_start, lat_end=None, lon_end
             .setLngLat([{lon_end}, {lat_end}])
             .addTo(map);
         """
-    # Suponemos que en my-map.html existe el comentario <!-- INSERT_POLYLINE -->
     html_code = html_template.replace("<!-- INSERT_POLYLINE -->", polyline_script + marker_dest)
     return html_code
 
@@ -527,7 +526,7 @@ def tab_prediccion_retrasos():
             st.info(f"Adelanto estimado: {format_minutes(abs(delay))}")
 
 # -----------------------------------------------------------------------------
-# TAB 4: Consumo de combustible
+# TAB 4: Consumo de Combustible
 # -----------------------------------------------------------------------------
 def tab_consumo():
     st.header("Consumo de Combustible")
@@ -537,8 +536,8 @@ def tab_consumo():
     veh_type = st.selectbox("Tipo de vehículo", ["Furgoneta", "Camión"])
     dist_km = st.session_state["distance_km"]
     weather = get_weather_open_meteo(
-        (st.session_state.get("origin_lat", 0)+st.session_state.get("dest_lat", 0))/2,
-        (st.session_state.get("origin_lon", 0)+st.session_state.get("dest_lon", 0))/2
+        (st.session_state.get("origin_lat", 0) + st.session_state.get("dest_lat", 0)) / 2,
+        (st.session_state.get("origin_lon", 0) + st.session_state.get("dest_lon", 0)) / 2
     ) or {}
     precip = weather.get("precip", 0.0)
     wind = weather.get("wind", 0.0)
