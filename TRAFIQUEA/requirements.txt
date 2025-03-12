@@ -3,10 +3,6 @@ pandas
 numpy
 requests
 geopy
-plotly
 scikit-learn
 joblib
-numba
-xgboost
-lightgbm
 prophet
