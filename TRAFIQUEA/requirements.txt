@@ -2,8 +2,6 @@ streamlit
 pandas
 numpy
 requests
-folium
-streamlit-folium
 geopy
 plotly
 scikit-learn
