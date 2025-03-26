@@ -33,12 +33,12 @@ El dashboard está desplegado en la nube y se puede acceder desde la siguiente U
 
 ## Estructura del Proyecto
 
-\`\`\`
+```
 CRYPTO_PREDICTION/
 ├── README.md               # Documentación del proyecto (este archivo).
 ├── main.py                 # Código completo de la aplicación.
 ├── requirements.txt        # Dependencias necesarias para desplegar el dashboard en Streamlit.
-\`\`\`
+```
 
 
 ## Notas Adicionales
