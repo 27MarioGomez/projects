@@ -1,6 +1,6 @@
 # Crypto Price Predictions
 
-Crypto Price Predictions es un dashboard interactivo desarrollado en Streamlit para predecir el precio futuro de criptomonedas. El sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento (noticias y Fear & Greed) para generar predicciones basadas en un ensamble de modelos que incluyen LSTM, XGBoost y Prophet.
+Crypto Price Predictions es un dashboard interactivo desarrollado en Streamlit para predecir el precio futuro de criptomonedas. El sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento (noticias y Fear & Greed) para generar predicciones basadas en un ensamble de modelos que incluyen LSTM, GRU, XGBoost y Prophet.
 
 ## Descripción del Dashboard
 
@@ -10,19 +10,24 @@ El dashboard realiza las siguientes tareas:
   Descarga datos históricos de criptomonedas mediante yfinance. Los datos se obtienen dinámicamente a través de APIs, por lo que no se incluye un directorio de datos en el repositorio.
 
 - **Cálculo de Indicadores Técnicos:**  
-  Se calculan indicadores esenciales como RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return y vol_30d, además del análisis de sentimiento.
+  Se calculan indicadores esenciales como RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return y vol_30d, además del análisis del sentimiento.
 
 - **Optimización de Features:**  
   Se utiliza un pipeline que aplica imputación (mediana), selección automática de features (usando ElasticNetCV refinado con XGBoost) y escalado, utilizando únicamente los datos del último año para el entrenamiento sin afectar la visualización completa.
 
 - **Análisis de Sentimiento:**  
-  Se combina el sentimiento derivado de noticias (usando NewsApiClient y modelos de análisis de sentimiento) con el índice Fear & Greed para ajustar las predicciones.
+  Se combina el sentimiento derivado de noticias (mediante NewsApiClient y modelos de análisis de sentimiento) con el índice Fear & Greed para ajustar las predicciones.
 
 - **Modelos de Predicción:**  
   Se implementa un ensamble de:
-  - **LSTM:** Con hiperparámetros optimizados mediante Keras Tuner (Hyperband) en 8 épocas.
-  - **XGBoost:** Para predicción iterativa a corto plazo.
-  - **Prophet:** Para predicciones a mediano/largo plazo, anclando el primer valor al precio actual.
+  - **LSTM:**  
+    Una red neuronal recurrente (RNN) de deep learning, cuyos hiperparámetros se optimizan con Keras Tuner (Hyperband) en 8 épocas.
+  - **GRU:**  
+    Otra variante de RNN que, gracias a su arquitectura más sencilla, puede entrenarse de manera más rápida y en ciertos casos capturar eficientemente las dependencias temporales.
+  - **XGBoost:**  
+    Un modelo de machine learning para predicción iterativa a corto plazo.
+  - **Prophet:**  
+    Un modelo de series temporales para predicciones a mediano/largo plazo, anclando el primer valor al precio actual.
 
 > **NFA:** Not Financial Advice
 
@@ -32,6 +37,7 @@ El dashboard está desplegado en la nube y se puede acceder desde la siguiente U
 [https://cryptopricepredictions.streamlit.app/](https://cryptopricepredictions.streamlit.app/)
 
 ## Estructura del Proyecto
+
 
 ```
 CRYPTO_PREDICTION/
