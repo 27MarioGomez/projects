@@ -700,7 +700,8 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
-    Más información [aquí](https://github.com/27MarioGomez/projects/blob/18467c6d0ff4ec1ce63999ded0e12dd2f0be7469/CRYPTO_PREDICTION/README.md)
+    Más información [aquí](https://github.com/27MarioGomez/projects/blob/18467c6d0ff4ec1ce63999ded0e12dd2f0be7469/CRYPTO_PREDICTION/README.md).
+    
     **NFA:** Not Financial Advice.
     """)
     st.sidebar.title("Configuración de Predicción")
