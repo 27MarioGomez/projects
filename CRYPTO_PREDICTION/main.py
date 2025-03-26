@@ -700,17 +700,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
-    **Descripción del Dashboard:**  
-    Este sistema integra datos históricos obtenidos de yfinance, indicadores técnicos y análisis de sentimiento (noticias y Fear & Greed) para predecir el precio futuro de criptomonedas.  
-    **Componentes del Modelo:**  
-      - **Indicadores Técnicos:** RSI, MACD, Bollinger Bands, SMA, ATR, OBV, EMA200, log_return, vol_30d y sentimiento.  
-      - **Optimización de Features:** Pipeline con imputación, selección automática (ElasticNetCV + XGBoost) y escalado.  
-      - **Análisis de Sentimiento:** Sentimiento de noticias + Fear & Greed.  
-      - **Modelos de Predicción:** Ensamble de:
-          - **LSTM**  
-          - **GRU**  
-          - **XGBoost**  
-          - **Prophet**  
+    Más información [aquí](https://github.com/27MarioGomez/projects/blob/18467c6d0ff4ec1ce63999ded0e12dd2f0be7469/CRYPTO_PREDICTION/README.md)
     **NFA:** Not Financial Advice.
     """)
     st.sidebar.title("Configuración de Predicción")
