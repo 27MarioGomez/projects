@@ -339,7 +339,6 @@ def build_gru_model_tuner(input_shape):
 
 # ---------------------------------------------------------------------
 # Funciones para predicción iterativa
-# (Se pueden reutilizar para LSTM y GRU si la forma de input es igual)
 # ---------------------------------------------------------------------
 def iterative_rnn_forecast(model, current_input, scaler, feature_cols, horizon_days):
     """Versión genérica para LSTM/GRU; el shape de input es el mismo."""
