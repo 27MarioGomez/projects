@@ -139,8 +139,8 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
 def load_sentiment_pipeline():
     return pipeline(
         "sentiment-analysis",
-        model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-        revision="714eb0f"
+        model="distilbert-base-uncased-finetuned-sst-2-english"
+        # revision="714eb0f"
     )
 
 def get_advanced_sentiment(text):
