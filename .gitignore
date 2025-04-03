@@ -1,0 +1,8 @@
+# Ignora la carpeta dist y build dentro de ITER
+ITER/dist/
+ITER/build/
+
+# Ignora ejecutables
+ITER/*.exe
+ITER/*.pkg
+ITER/*.pyz
