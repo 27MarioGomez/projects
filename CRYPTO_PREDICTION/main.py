@@ -25,6 +25,7 @@ from sklearn.linear_model import ElasticNetCV
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
+import torch
 from joblib import Parallel, delayed
 from textblob import TextBlob
 from dateutil.parser import parse as date_parse
