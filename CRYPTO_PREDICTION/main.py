@@ -10,7 +10,7 @@ from tensorflow.keras.layers import LSTM, GRU, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l2
 
-# Activar mixed precision si hay GPU (en CPU se ignora)
+# Activate mixed precision if GPU is available (ignored on CPU)
 if tf.config.list_physical_devices('GPU'):
     from tensorflow.keras.mixed_precision import set_global_policy
     set_global_policy('mixed_float16')
@@ -34,7 +34,7 @@ from requests.adapters import HTTPAdapter
 from newsapi import NewsApiClient
 from prophet import Prophet
 
-# Indicadores esenciales
+# Essential technical indicators
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator, EMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -43,16 +43,17 @@ from transformers.pipelines import pipeline
 from xgboost import XGBRegressor
 from numba import njit
 
-# Intentamos importar Keras Tuner (se instala como keras-tuner)
+# Try to import Keras Tuner (installed as keras-tuner)
 try:
     import keras_tuner as kt
 except ModuleNotFoundError:
     import kerastuner as kt
 
+# Set up the page configuration for the dashboard
 st.set_page_config(page_title="Crypto Price Predictions 🔮", layout="wide")
 
 # ---------------------------------------------------------------------
-# Definiciones globales
+# Global Definitions
 # ---------------------------------------------------------------------
 coincap_ids = {
     "Bitcoin (BTC)": "bitcoin",
@@ -71,7 +72,7 @@ coincap_ids = {
 coinid_to_symbol = {v: k.split(" (")[1][:-1] for k, v in coincap_ids.items()}
 
 # ---------------------------------------------------------------------
-# Transformador para conservar DataFrame en imputación
+# Transformer to preserve DataFrame structure during imputation
 # ---------------------------------------------------------------------
 class DataFrameTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, transformer):
@@ -86,12 +87,12 @@ class DataFrameTransformer(BaseEstimator, TransformerMixin):
         return X_trans
 
 # ---------------------------------------------------------------------
-# Transformador para selección de features
+# Feature Selection Transformer
 # ---------------------------------------------------------------------
 class FeatureSelector(BaseEstimator, TransformerMixin):
     """
-    Realiza una selección automática de features mediante ElasticNetCV,
-    refinando el resultado con la importancia calculada por XGBoost.
+    Performs automatic feature selection using ElasticNetCV,
+    refining the result with feature importance computed by XGBoost.
     """
     def __init__(self, feature_cols, target_col, enet_threshold=0.01, importance_threshold=0.01):
         self.feature_cols = feature_cols
@@ -134,7 +135,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
         return X[self.selected_features_]
 
 # ---------------------------------------------------------------------
-# Funciones de análisis de sentimiento
+# Sentiment Analysis Functions
 # ---------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
@@ -156,7 +157,7 @@ def get_advanced_sentiment(text):
 def get_newsapi_articles(coin_id, show_warning=True):
     newsapi_key = st.secrets.get("newsapi_key", "")
     if not newsapi_key:
-        st.error("Clave 'newsapi_key' no encontrada en Secrets.")
+        st.error("News API key not found in secrets.")
         return []
     try:
         query = f"{coin_id} crypto"
@@ -166,9 +167,9 @@ def get_newsapi_articles(coin_id, show_warning=True):
         if data.get("articles"):
             for art in data["articles"]:
                 image_url = art.get("urlToImage", "")
-                title = art.get("title") or "Sin título"
-                description = art.get("description") or "Sin descripción"
-                pub_date = art.get("publishedAt") or "Fecha no disponible"
+                title = art.get("title") or "No title"
+                description = art.get("description") or "No description"
+                pub_date = art.get("publishedAt") or "Date not available"
                 link = art.get("url") or "#"
                 try:
                     parsed_date = date_parse(pub_date)
@@ -187,9 +188,9 @@ def get_newsapi_articles(coin_id, show_warning=True):
         return articles
     except Exception as e:
         if ("rateLimited" in str(e) or "429" in str(e)) and show_warning:
-            st.warning("Se ha excedido el límite de peticiones. Vuelve en 12 horas.")
+            st.warning("Request rate limit exceeded. Please try again in 12 hours.")
         elif show_warning:
-            st.error(f"Error al obtener noticias: {e}")
+            st.error(f"Error fetching news: {e}")
         return []
 
 def get_news_sentiment(coin_id):
@@ -211,7 +212,7 @@ def get_fear_greed_index():
         data = requests.get("https://api.alternative.me/fng/?format=json", timeout=10).json()
         return float(data["data"][0]["value"])
     except Exception:
-        st.warning("Índice Fear & Greed no disponible. Se usará 50.0.")
+        st.warning("Fear & Greed Index not available. Using default value 50.0.")
         return 50.0
 
 def get_crypto_sentiment_combined(coin_id):
@@ -230,7 +231,7 @@ def adjust_predictions_for_sentiment(preds_array, gauge_val, current_price):
     return preds_adj
 
 # ---------------------------------------------------------------------
-# Cálculo de indicadores técnicos (paralelización y vectorización)
+# Technical Indicators Calculation (Parallel and Vectorized)
 # ---------------------------------------------------------------------
 def compute_rsi(df):
     return RSIIndicator(close=df["close_price"], window=14).rsi()
@@ -274,7 +275,7 @@ def compute_additional_features(df):
     return df
 
 # ---------------------------------------------------------------------
-# Creación de secuencias (usando Numba)
+# Sequence Creation (Using Numba)
 # ---------------------------------------------------------------------
 @njit
 def create_sequences_numba(data, window_size):
@@ -297,10 +298,10 @@ def flatten_sequences(X_seq):
     return X_seq.reshape((X_seq.shape[0], X_seq.shape[1] * X_seq.shape[2]))
 
 # ---------------------------------------------------------------------
-# Modelos con Keras Tuner (LSTM y GRU)
+# Models with Keras Tuner (LSTM and GRU)
 # ---------------------------------------------------------------------
 def build_lstm_model_tuner(input_shape):
-    """Espacio de búsqueda para LSTM."""
+    """Search space for LSTM."""
     def model_builder(hp):
         lstm_units1 = hp.Int('lstm_units1', min_value=64, max_value=128, step=32)
         lstm_units2 = hp.Int('lstm_units2', min_value=32, max_value=64, step=16)
@@ -321,7 +322,7 @@ def build_lstm_model_tuner(input_shape):
     return model_builder
 
 def build_gru_model_tuner(input_shape):
-    """Espacio de búsqueda para GRU."""
+    """Search space for GRU."""
     def model_builder(hp):
         gru_units1 = hp.Int('gru_units1', min_value=64, max_value=128, step=32)
         gru_units2 = hp.Int('gru_units2', min_value=32, max_value=64, step=16)
@@ -342,10 +343,10 @@ def build_gru_model_tuner(input_shape):
     return model_builder
 
 # ---------------------------------------------------------------------
-# Funciones para predicción iterativa
+# Iterative Forecast Functions
 # ---------------------------------------------------------------------
 def iterative_rnn_forecast(model, current_input, scaler, feature_cols, horizon_days):
-    """Versión genérica para LSTM/GRU; el shape de input es el mismo."""
+    """Generic forecast for LSTM/GRU; input shape is assumed to be consistent."""
     preds = []
     for _ in range(horizon_days):
         p_scaled = model.predict(current_input, verbose=0)[0][0]
@@ -371,10 +372,10 @@ def iterative_xgb_forecast(model, current_input, scaler, feature_cols, horizon_d
     return np.expm1(np.array(preds))
 
 # ---------------------------------------------------------------------
-# Nueva función de ensamble para 4 modelos: LSTM, GRU, XGB y Prophet
+# Ensemble Function for 4 Models: LSTM, GRU, XGB, and Prophet
 # ---------------------------------------------------------------------
 def ensemble_prediction_4(lstm_pred, gru_pred, xgb_pred, prophet_pred, w_lstm=0.3, w_gru=0.3, w_xgb=0.2, w_prophet=0.2):
-    """Combina 4 predicciones con pesos configurables."""
+    """Combine predictions from 4 models using configurable weights."""
     return (
         w_lstm * lstm_pred +
         w_gru * gru_pred +
@@ -396,7 +397,7 @@ def medium_long_term_prediction(df, days=180, current_price=None):
     return model, forecast
 
 # ---------------------------------------------------------------------
-# Función para cargar datos históricos
+# Function to Load Historical Data
 # ---------------------------------------------------------------------
 def load_crypto_data(coin_id, start_date=None, end_date=None):
     ticker_ids = {
@@ -415,7 +416,7 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     }
     ticker = ticker_ids.get(coin_id)
     if not ticker:
-        st.error("Ticker no encontrado.")
+        st.error("Ticker not found.")
         return None
 
     if start_date is None or end_date is None:
@@ -424,7 +425,7 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
         df = yf.download(ticker, start=start_date, end=end_date, progress=False)
 
     if df.empty:
-        st.warning("Datos no disponibles en yfinance.")
+        st.warning("Data not available from yfinance.")
         return None
 
     df = df.reset_index()
@@ -447,29 +448,29 @@ def load_crypto_data(coin_id, start_date=None, end_date=None):
     return df
 
 # ---------------------------------------------------------------------
-# Función principal de entrenamiento y predicción
+# Main Function for Training and Prediction
 # ---------------------------------------------------------------------
 def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end_date=None, training_period_years=1):
-    st.info("El proceso de entrenamiento y predicción puede tardar un poco. Por favor, espera...")
+    st.info("Training and prediction process may take a while. Please wait...")
     progress_text = st.empty()
     progress_bar = st.progress(0)
 
     # ----------------------
-    # Cargar y preparar datos
+    # Load and Prepare Data
     # ----------------------
     full_df = load_crypto_data(coin_id, start_date, end_date)
     if full_df is None or full_df.empty:
-        st.error("No se pudo cargar el histórico.")
+        st.error("Could not load historical data.")
         return None
 
     last_date = full_df["ds"].max()
     period_start = last_date - pd.DateOffset(years=training_period_years)
     df_pred = full_df[full_df["ds"] >= period_start].copy()
     if df_pred.empty:
-        st.error("No hay suficientes datos recientes para entrenamiento.")
+        st.error("Not enough recent data for training.")
         return None
 
-    progress_text.text("Preparando dataset y escalando datos...")
+    progress_text.text("Preparing dataset and scaling data...")
     progress_bar.progress(25)
 
     df_pred["log_price"] = np.log1p(df_pred["close_price"])
@@ -492,7 +493,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     window_size = 60 if horizon_days <= 30 else 90
     X, y = create_sequences(scaled_data, window_size)
     if X is None:
-        st.error("No hay suficientes datos para crear secuencias.")
+        st.error("Not enough data to create sequences.")
         return None
 
     split = int(len(X) * 0.8)
@@ -507,9 +508,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     input_shape = (window_size, len(selected_features))
 
     # ----------------------
-    # 1) Entrenar LSTM
+    # 1) Train LSTM Model
     # ----------------------
-    progress_text.text("Buscando hiperparámetros LSTM...")
+    progress_text.text("Searching hyperparameters for LSTM...")
     progress_bar.progress(30)
 
     if os.path.exists('kt_dir_lstm'):
@@ -539,9 +540,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     lstm_model = tuner_lstm.get_best_models(num_models=1)[0]
 
     # ----------------------
-    # 2) Entrenar GRU
+    # 2) Train GRU Model
     # ----------------------
-    progress_text.text("Buscando hiperparámetros GRU...")
+    progress_text.text("Searching hyperparameters for GRU...")
     progress_bar.progress(35)
 
     if os.path.exists('kt_dir_gru'):
@@ -566,9 +567,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     gru_model = tuner_gru.get_best_models(num_models=1)[0]
 
     # ----------------------
-    # Predicción LSTM / GRU en test
+    # Test Predictions for LSTM/GRU
     # ----------------------
-    progress_text.text("Realizando predicción en datos de test (LSTM/GRU)...")
+    progress_text.text("Predicting on test data (LSTM/GRU)...")
     progress_bar.progress(45)
 
     # LSTM
@@ -585,21 +586,21 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     preds_test_log_gru = reconst_test_inv_gru[:, 0]
     gru_test_preds = np.expm1(preds_test_log_gru)
 
-    # Reconstruir y_test
+    # Reconstruct y_test from scaled data
     reconst_y = np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), len(selected_features)-1))], axis=1)
     reconst_y_inv = pipe.named_steps['scaler'].inverse_transform(reconst_y)
     y_test_log = reconst_y_inv[:, 0]
     y_test_real = np.expm1(y_test_log)
 
-    # MAPE LSTM
+    # Calculate MAPE for LSTM
     lstm_mape = np.mean(np.abs((y_test_real - lstm_test_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
-    # MAPE GRU
+    # Calculate MAPE for GRU
     gru_mape = np.mean(np.abs((y_test_real - gru_test_preds) / np.maximum(np.abs(y_test_real), 1e-9))) * 100
 
     # ----------------------
-    # 3) Entrenar XGBoost y Prophet
+    # 3) Train XGBoost and Prophet (Ensemble)
     # ----------------------
-    progress_text.text("Entrenando XGBoost y Prophet (ensamble)...")
+    progress_text.text("Training XGBoost and Prophet (ensemble)...")
     progress_bar.progress(55)
 
     X_train_val = np.concatenate([X_train, X_val], axis=0)
@@ -631,7 +632,7 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     prophet_test_preds = np.expm1(prophet_preds_log)
 
     # ----------------------
-    # 4) Ensamble final (Test)
+    # 4) Final Ensemble (Test)
     # ----------------------
     test_ens_preds = ensemble_prediction_4(
         lstm_test_preds, gru_test_preds, xgb_test_preds, prophet_test_preds,
@@ -641,9 +642,9 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     ens_accuracy = max(0, 100 - ens_mape)
 
     # ----------------------
-    # 5) Predicción futura (LSTM, GRU, XGB, Prophet)
+    # 5) Future Prediction (LSTM, GRU, XGBoost, Prophet)
     # ----------------------
-    progress_text.text("Realizando predicción futura (LSTM, GRU, XGB, Prophet)...")
+    progress_text.text("Generating future predictions (LSTM, GRU, XGBoost, Prophet)...")
     progress_bar.progress(70)
 
     last_window = pipe.named_steps['scaler'].transform(df_pred[selected_features].values[-window_size:])
@@ -651,11 +652,11 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
     current_input_gru = np.copy(current_input_lstm)
     current_input_xgb = np.copy(current_input_lstm)
 
-    # LSTM futuro
+    # Future prediction using LSTM
     lstm_future_preds = iterative_rnn_forecast(lstm_model, current_input_lstm, pipe.named_steps['scaler'], selected_features, horizon_days)
-    # GRU futuro
+    # Future prediction using GRU
     gru_future_preds = iterative_rnn_forecast(gru_model, current_input_gru, pipe.named_steps['scaler'], selected_features, horizon_days)
-    # XGB futuro
+    # Future prediction using XGBoost
     xgb_future_preds = iterative_xgb_forecast(xgb_model, current_input_xgb, pipe.named_steps['scaler'], selected_features, horizon_days)
 
     current_price = full_df["close_price"].iloc[-1]
@@ -669,19 +670,19 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
         lstm_future_preds, gru_future_preds, xgb_future_preds, prophet_future_preds,
         w_lstm=0.3, w_gru=0.3, w_xgb=0.2, w_prophet=0.2
     )
-    # Ajustar primer valor
+    # Set the first value to the current price
     final_future_preds[0] = current_price
 
-    # Ajustar por sentimiento
+    # Adjust predictions based on sentiment analysis
     _, _, gauge_val = get_crypto_sentiment_combined(coin_id)
     final_future_preds = adjust_predictions_for_sentiment(final_future_preds, gauge_val, current_price)
     future_dates = pd.date_range(start=full_df["ds"].iloc[-1] + timedelta(days=1), periods=horizon_days).tolist()
 
-    progress_text.text("¡Predicción completada con éxito!")
+    progress_text.text("Prediction completed successfully!")
     progress_bar.progress(100)
 
     # ----------------------
-    # Salida final
+    # Final Output
     # ----------------------
     return {
         "df": full_df,
@@ -703,40 +704,40 @@ def train_and_predict_with_sentiment(coin_id, horizon_days, start_date=None, end
 def main_app():
     st.title("Crypto Price Predictions 🔮")
     st.markdown("""
-    Más información [aquí](https://github.com/27MarioGomez/projects/blob/18467c6d0ff4ec1ce63999ded0e12dd2f0be7469/CRYPTO_PREDICTION/README.md).
+    More information [here](https://github.com/27MarioGomez/projects/blob/18467c6d0ff4ec1ce63999ded0e12dd2f0be7469/CRYPTO_PREDICTION/README.md).
     
     **NFA:** Not Financial Advice.
     """)
-    st.sidebar.title("Configuración de Predicción")
-    crypto_name = st.sidebar.selectbox("Seleccione una criptomoneda:", list(coincap_ids.keys()))
+    st.sidebar.title("Prediction Settings")
+    crypto_name = st.sidebar.selectbox("Select a cryptocurrency:", list(coincap_ids.keys()))
     coin_id = coincap_ids[crypto_name]
 
     training_period = st.sidebar.select_slider(
-        "Periodo de entrenamiento (años):",
+        "Training period (years):",
         options=[1, 2, 3],
         value=1,
-        help="A mayor período, mayor tiempo tardará en entrenar el modelo."
+        help="A longer period requires more training time."
     )
-    horizon = st.sidebar.slider("Días a predecir:", 1, 60, 5, help="Más días a predecir implican mayor tiempo de procesamiento.")
+    horizon = st.sidebar.slider("Days to predict:", 1, 60, 5, help="A longer prediction horizon requires more processing time.")
 
-    use_custom_range = st.sidebar.checkbox("Habilitar rango de fechas", value=False)
+    use_custom_range = st.sidebar.checkbox("Enable date range", value=False)
     default_end = datetime.utcnow()
     default_start = default_end - timedelta(days=7)
     if use_custom_range:
-        start_date = st.sidebar.date_input("Fecha de inicio", default_start.date())
-        end_date = st.sidebar.date_input("Fecha de fin", default_end.date())
+        start_date = st.sidebar.date_input("Start date", default_start.date())
+        end_date = st.sidebar.date_input("End date", default_end.date())
         if start_date > end_date:
-            st.sidebar.error("La fecha de inicio no puede ser posterior a la de fin.")
+            st.sidebar.error("Start date cannot be later than end date.")
             return
         if (end_date - start_date).days > 7:
-            st.sidebar.warning("El rango excede 7 días. Se ajustará a 7 días.")
+            st.sidebar.warning("The range exceeds 7 days. It will be adjusted to 7 days.")
             end_date = start_date + timedelta(days=7)
         if start_date > datetime.utcnow().date():
             start_date = datetime.utcnow().date() - timedelta(days=7)
-            st.sidebar.warning("La fecha de inicio no puede ser futura. Ajustado a 7 días atrás.")
+            st.sidebar.warning("Start date cannot be in the future. Adjusted to 7 days ago.")
         if end_date > datetime.utcnow().date():
             end_date = datetime.utcnow().date()
-            st.sidebar.warning("La fecha de fin no puede ser futura. Ajustado a hoy.")
+            st.sidebar.warning("End date cannot be in the future. Adjusted to today.")
         end_date_with_offset = end_date + timedelta(days=1)
     else:
         start_date = None
@@ -748,44 +749,44 @@ def main_app():
             df_prices,
             x="ds",
             y="close_price",
-            title=f"Histórico de {crypto_name}",
-            labels={"ds": "Fecha", "close_price": "Precio (USD)"}
+            title=f"{crypto_name} Historical Prices",
+            labels={"ds": "Date", "close_price": "Price (USD)"}
         )
         fig_hist.update_layout(template="plotly_dark")
         fig_hist.update_xaxes(tickformat="%Y-%m-%d")
         st.plotly_chart(fig_hist, use_container_width=True)
     else:
-        st.warning("No se pudieron cargar datos históricos para el rango seleccionado.")
+        st.warning("Historical data could not be loaded for the selected range.")
 
     tabs = st.tabs([
-        "Entrenamiento del modelo",
-        "Predicción a corto plazo",
-        "Predicción a medio/largo plazo",
-        "Análisis de sentimiento",
-        "Noticias recientes"
+        "Model Training",
+        "Short Term Prediction",
+        "Medium/Long Term Prediction",
+        "Sentiment Analysis",
+        "Recent News"
     ])
 
     with tabs[0]:
-        if st.button("Entrenar Modelo y Predecir"):
+        if st.button("Train Model and Predict"):
             result = train_and_predict_with_sentiment(
                 coin_id, horizon,
                 start_date, end_date_with_offset,
                 training_period_years=training_period
             )
             if result:
-                st.success("Entrenamiento y predicción completados!")
-                st.write(f"Sentimiento Noticias ({result['symbol']}): {result['crypto_sent']:.2f}")
-                st.write(f"Sentimiento Mercado (Fear & Greed): {result['market_sent']:.2f}")
-                st.write(f"Gauge Combinado: {result['gauge_val']:.2f}")
-                st.metric("Precisión Ensamble (Test)", f"{result['accuracy']:.2f}%")
-                st.write(f"MAPE LSTM: {result['lstm_mape']:.2f}%")
-                st.write(f"MAPE GRU: {result['gru_mape']:.2f}%")
+                st.success("Training and prediction completed!")
+                st.write(f"News Sentiment ({result['symbol']}): {result['crypto_sent']:.2f}")
+                st.write(f"Market Sentiment (Fear & Greed): {result['market_sent']:.2f}")
+                st.write(f"Combined Gauge: {result['gauge_val']:.2f}")
+                st.metric("Ensemble Accuracy (Test)", f"{result['accuracy']:.2f}%")
+                st.write(f"LSTM MAPE: {result['lstm_mape']:.2f}%")
+                st.write(f"GRU MAPE: {result['gru_mape']:.2f}%")
                 st.session_state["result"] = result
 
     with tabs[1]:
         result = st.session_state.get("result", None)
         if result:
-            st.header(f"Predicción a corto plazo - {result['symbol']}")
+            st.header(f"Short Term Prediction - {result['symbol']}")
             last_date = result["df"]["ds"].iloc[-1].date()
             current_price = result["df"]["close_price"].iloc[-1]
             pred_series = np.concatenate(([current_price], result["future_preds"]))
@@ -795,32 +796,32 @@ def main_app():
                 x=future_dates_display,
                 y=pred_series,
                 mode="lines+markers",
-                name=f"Predicción – {result['symbol']}",
+                name=f"Prediction – {result['symbol']}",
                 line=dict(color="#ff7f0e", width=2, shape="spline")
             ))
             fig_future.update_layout(
-                title=f"Predicción Futura ({horizon} días) - {result['symbol']}",
+                title=f"Future Prediction ({horizon} days) - {result['symbol']}",
                 template="plotly_dark",
-                xaxis_title="Fecha",
-                yaxis_title="Precio (USD)"
+                xaxis_title="Date",
+                yaxis_title="Price (USD)"
             )
             st.plotly_chart(fig_future, use_container_width=True)
-            st.header("Resultados Numéricos (Corto Plazo)")
-            df_future = pd.DataFrame({"Fecha": future_dates_display, "Predicción": pred_series})
-            st.dataframe(df_future.style.format({"Predicción": "{:.2f}"}))
+            st.header("Numeric Results (Short Term)")
+            df_future = pd.DataFrame({"Date": future_dates_display, "Prediction": pred_series})
+            st.dataframe(df_future.style.format({"Prediction": "{:.2f}"}))
             st.download_button(
-                label="Descargar predicciones (corto plazo) en CSV",
+                label="Download short-term predictions in CSV",
                 data=df_future.to_csv(index=False).encode("utf-8"),
-                file_name="predicciones_corto_plazo.csv",
+                file_name="short_term_predictions.csv",
                 mime="text/csv"
             )
         else:
-            st.info("Entrena el modelo primero para ver la predicción a corto plazo.")
+            st.info("Train the model first to view the short-term prediction.")
 
     with tabs[2]:
         result = st.session_state.get("result", None)
         if result:
-            st.header(f"Predicción a medio/largo plazo - {result['symbol']}")
+            st.header(f"Medium/Long Term Prediction - {result['symbol']}")
             current_price = result["df"]["close_price"].iloc[-1]
             _, forecast_long = medium_long_term_prediction(result["df"], days=180, current_price=current_price)
             forecast_long["ds"] = pd.to_datetime(forecast_long["ds"]).dt.date
@@ -832,38 +833,38 @@ def main_app():
                 x=df_plot["ds"],
                 y=df_plot["close_price"],
                 mode="lines",
-                name="Histórico",
+                name="Historical",
                 line=dict(color="#1f77b4", width=2)
             ))
             fig_long.add_trace(go.Scatter(
                 x=forecast_long_part["ds"],
                 y=forecast_long_part["exp_yhat"],
                 mode="lines",
-                name="Predicción 180 días",
+                name="180-day Prediction",
                 line=dict(color="#ff7f0e", width=2, dash="dash")
             ))
             fig_long.update_layout(
-                title="Predicción a 180 días (Medio/Largo Plazo) - Prophet",
+                title="180-day Prediction (Medium/Long Term) - Prophet",
                 template="plotly_dark",
-                xaxis_title="Fecha",
-                yaxis_title="Precio (USD)"
+                xaxis_title="Date",
+                yaxis_title="Price (USD)"
             )
             st.plotly_chart(fig_long, use_container_width=True)
-            st.header("Valores Numéricos (Horizonte 180 días)")
+            st.header("Numeric Values (180-day Horizon)")
             styled_forecast = forecast_long_part.copy()
-            styled_forecast.columns = ["Fecha", "Predicción (USD)"]
-            st.dataframe(styled_forecast.style.format({"Predicción (USD)": "{:.2f}"}))
+            styled_forecast.columns = ["Date", "Prediction (USD)"]
+            st.dataframe(styled_forecast.style.format({"Prediction (USD)": "{:.2f}"}))
             st.download_button(
-                label="Descargar predicción (medio/largo plazo) en CSV",
+                label="Download medium/long term predictions in CSV",
                 data=styled_forecast.to_csv(index=False).encode("utf-8"),
-                file_name="predicciones_medio_largo_plazo.csv",
+                file_name="medium_long_term_predictions.csv",
                 mime="text/csv"
             )
         else:
-            st.info("Entrena el modelo para ver la predicción a medio/largo plazo.")
+            st.info("Train the model to view the medium/long term prediction.")
 
     with tabs[3]:
-        st.header("Análisis de sentimiento")
+        st.header("Sentiment Analysis")
         crypto_sent = get_news_sentiment(coin_id)
         market_sent = get_fear_greed_index()
         _, _, gauge_val = get_crypto_sentiment_combined(coin_id)
@@ -906,7 +907,7 @@ def main_app():
         ))
         fig_sentiment.update_layout(
             title={
-                "text": f"Sentimiento - {coinid_to_symbol[coin_id]}",
+                "text": f"Sentiment - {coinid_to_symbol[coin_id]}",
                 "x": 0.5, "xanchor": "center",
                 "font": {"size": 24}
             },
@@ -915,12 +916,12 @@ def main_app():
             margin=dict(l=20, r=20, t=80, b=20)
         )
         st.plotly_chart(fig_sentiment, use_container_width=True)
-        st.write(f"**Sentimiento Noticias ({coinid_to_symbol[coin_id]}):** {crypto_sent:.2f}")
-        st.write(f"**Sentimiento Mercado (Fear & Greed):** {market_sent:.2f}")
+        st.write(f"**News Sentiment ({coinid_to_symbol[coin_id]}):** {crypto_sent:.2f}")
+        st.write(f"**Market Sentiment (Fear & Greed):** {market_sent:.2f}")
         st.write(f"**Gauge Value:** {gauge_val:.2f} → **{gauge_text}**")
 
     with tabs[4]:
-        st.subheader(f"Noticias recientes sobre {crypto_name} ({coinid_to_symbol[coin_id]})")
+        st.subheader(f"Recent News about {crypto_name} ({coinid_to_symbol[coin_id]})")
         articles = get_newsapi_articles(coin_id, show_warning=True)
         if articles:
             st.markdown(
@@ -984,8 +985,8 @@ def main_app():
             for article in articles:
                 image_tag = ""
                 if article['image']:
-                    image_tag = f"<img src='{article['image']}' alt='Imagen'/>"
-                link_button = f"<a href='{article['link']}' target='_blank' class='read-more-btn'>Leer más</a>"
+                    image_tag = f"<img src='{article['image']}' alt='Image'/>"
+                link_button = f"<a href='{article['link']}' target='_blank' class='read-more-btn'>Read more</a>"
                 st.markdown(
                     f"""
                     <div class='news-item'>
@@ -1004,7 +1005,7 @@ def main_app():
                 )
             st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.warning("Se ha superado el límite de peticiones o no hay noticias disponibles.")
+            st.warning("Request rate limit exceeded or no news available.")
 
 if __name__ == "__main__":
     main_app()
