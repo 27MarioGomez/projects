@@ -1,3 +1,30 @@
-# Ignora la carpeta dist y build dentro de ITER
-ITER/dist/
-ITER/build/
+# Ignorar archivos compilados de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignorar entornos virtuales
+env/
+venv/
+ENV/
+.venv/
+
+# Ignorar directorios de distribución y build de otros proyectos
+build/
+dist/
+
+# EXCEPCIONES para que se rastreen los archivos de tu proyecto ITER:
+!ITER/dist/
+!ITER/build/
+
+# Ignorar archivos del sistema y temporales
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.bak
+*.swp
+
+# Ignorar configuraciones de editores y otros
+.vscode/
+.idea/
