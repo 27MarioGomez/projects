@@ -138,10 +138,12 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
 # ---------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_sentiment_pipeline():
+    hf_token = st.secrets.get("hf_token")
     return pipeline(
         "sentiment-analysis",
         model="distilbert-base-uncased-finetuned-sst-2-english",
-        revision="714eb0f"
+        revision="714eb0f",
+        use_auth_token=hf_token
     )
 
 def get_advanced_sentiment(text):
