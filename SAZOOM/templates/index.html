@@ -1,104 +1,90 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8"/>
   <title>Sazoom – ¿Qué cocino hoy?</title>
   <style>
-    body { font-family: sans-serif; max-width: 800px; margin: auto; padding: 1rem; }
-    form { display: grid; gap: 0.5rem; margin-bottom: 1rem; }
-    .tooltip { position: relative; display: inline-block; cursor: help; color: #888; }
+    body { font-family:sans-serif; max-width:800px; margin:auto; padding:1rem; }
+    form { display:grid; gap:.5rem; margin-bottom:1rem; }
+    .tooltip { position:relative; cursor:help; color:#888; }
     .tooltip .tooltiptext {
-      visibility: hidden; width: 200px; background: #333; color: #fff;
-      text-align: left; border-radius: 4px; padding: 5px;
-      position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%);
-      opacity: 0; transition: opacity 0.3s; z-index: 1;
+      visibility:hidden; width:200px; background:#333; color:#fff;
+      border-radius:4px; padding:5px;
+      position:absolute; bottom:125%; left:50%; transform:translateX(-50%);
+      opacity:0; transition:.3s; z-index:1;
     }
-    .tooltip:hover .tooltiptext,
-    .tooltip:focus .tooltiptext {
-      visibility: visible; opacity: 1;
-    }
-    .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill,minmax(200px,1fr)); }
-    .card { border: 1px solid #ddd; border-radius:8px; overflow: hidden; }
+    .tooltip:hover .tooltiptext { visibility:visible; opacity:1; }
+    .grid { display:grid; gap:1rem; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); }
+    .card { border:1px solid #ddd; border-radius:8px; overflow:hidden; }
     .card img { width:100%; height:120px; object-fit:cover; }
-    .card-content { padding: 0.5rem; }
-    .btn { background:#28a745; color:#fff; padding:0.6rem; border:none; border-radius:4px; cursor:pointer; width:100%; }
-    #loadingOverlay {
-      display:none; position: fixed; top:0; left:0; width:100%; height:100%;
-      background: rgba(0,0,0,0.4); color:#fff; font-size:1.5rem;
-      align-items: center; justify-content: center; z-index:9999;
-    }
+    .card-content { padding:.5rem; }
+    .btn { display:block; width:100%; background:#28a745; color:#fff;
+           padding:.6rem; border:none; border-radius:4px; cursor:pointer; text-align:center; }
   </style>
 </head>
 <body>
-  <div id="loadingOverlay">⏳ Espere un momento… estamos cocinando para ti.</div>
-
   <h1>Sazoom</h1>
   <p>Busca recetas por ingredientes y filtra por dieta o alérgenos.</p>
-
-  <form id="searchForm">
+  <form id="searchForm" action="/recipes">
     <div>
-      <label>
-        Ingredientes
+      <label>Ingredientes
         <span class="tooltip">?
-          <span class="tooltiptext">Escribe ingredientes en español, separados por comas.</span>
+          <span class="tooltiptext">Ej. tomate,pollo,lechuga</span>
         </span>
       </label>
-      <input name="ingredients" placeholder="p.ej. tomate,cebolla,ajo" required style="width:100%" />
+      <input name="ingredients" required style="width:100%" placeholder="p.ej. tomate,pollo,lechuga"/>
     </div>
     <div>
-      <label>
-        Dieta
+      <label>Dieta
         <span class="tooltip">?
-          <span class="tooltiptext">Opcional: p.ej. keto, vegan.</span>
+          <span class="tooltiptext">Opcional: keto, vegan (en inglés)</span>
         </span>
       </label>
-      <input name="diet" placeholder="p.ej. keto, vegan" style="width:100%" />
+      <input name="diet" style="width:100%" placeholder="p.ej. keto"/>
     </div>
     <div>
-      <label>
-        Alérgenos
+      <label>Alérgenos
         <span class="tooltip">?
-          <span class="tooltiptext">Escribe alérgenos en español, separados por comas.</span>
+          <span class="tooltiptext">Opcional: gluten-free, peanut-free (en inglés)</span>
         </span>
       </label>
-      <input name="intolerances" placeholder="p.ej. gluten,nuez" style="width:100%" />
+      <input name="health" style="width:100%" placeholder="p.ej. gluten-free"/>
+    </div>
+    <div>
+      <label>Nº resultados</label>
+      <input type="number" name="number" min="1" max="30" value="10" style="width:100%"/>
     </div>
     <button type="submit" class="btn">Buscar</button>
   </form>
 
-  <div id="results" class="grid"></div>
+  <div id="results" class="grid">
+    <!-- Se llena en servidor -->
+    {% for r in request.url.include_query %}{% endfor %}
+  </div>
 
   <script>
+    // Simplemente dejamos que FastAPI devuelva JSON; 
+    // mejor usar JS para fetch y mostrar tarjetas dinamicamente.
     const form = document.getElementById('searchForm');
     const results = document.getElementById('results');
-    const overlay = document.getElementById('loadingOverlay');
 
     form.addEventListener('submit', async e => {
       e.preventDefault();
-      results.innerHTML = '';
-      overlay.style.display = 'flex';
-
-      const fd = new FormData(form);
-      const qs = new URLSearchParams({
-        ingredients: fd.get('ingredients'),
-        diet: fd.get('diet'),
-        intolerances: fd.get('intolerances'),
-        number: 12
-      });
-      const res = await fetch(`/recipes?${qs}`);
+      results.innerHTML = '<p>Cargando…</p>';
+      const q = new URLSearchParams(new FormData(form));
+      const res = await fetch(`/recipes?${q}`);
       const list = await res.json();
-
-      overlay.style.display = 'none';
       results.innerHTML = list.length
-        ? list.map(r => `
-            <div class="card">
-              <img src="${r.image}" alt="${r.title}" />
-              <div class="card-content">
-                <h4>${r.title}</h4>
-                <button class="btn" onclick="location.href='/recipe/${r.id}'">Ver receta completa</button>
-              </div>
+        ? list.map(r=>`
+          <div class="card">
+            <img src="${r.image}" alt="${r.title}"/>
+            <div class="card-content">
+              <h4>${r.title}</h4>
+              <button class="btn" onclick="location.href='/recipe/${r.id}'">
+                Ver receta completa
+              </button>
             </div>
-          `).join('')
+          </div>`).join('')
         : '<p>No hay resultados.</p>';
     });
   </script>

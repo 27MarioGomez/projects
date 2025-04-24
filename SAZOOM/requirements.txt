@@ -3,5 +3,3 @@ uvicorn
 jinja2
 python-dotenv
 requests
-pydantic
-argostranslate
