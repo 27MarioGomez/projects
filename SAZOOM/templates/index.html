@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sazoom – ¿Qué cocino hoy?</title>
+  <style>
+    body { font-family: sans-serif; max-width: 800px; margin: auto; }
+    form { display: grid; gap: 0.5rem; margin-bottom: 1rem; }
+    .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill,minmax(200px,1fr)); }
+    .card { border: 1px solid #ddd; border-radius:8px; overflow: hidden; }
+    .card img { width:100%; height:120px; object-fit:cover; }
+    .card-content { padding: 0.5rem; }
+    .btn { background:#28a745; color:#fff; padding:0.4rem; border:none; border-radius:4px; cursor:pointer; }
+    #details { margin-top:2rem; }
+  </style>
+</head>
+<body>
+  <h1>Sazoom</h1>
+  <p>Busca recetas por ingredientes y filtra por dieta o alérgenos.</p>
+  <form id="searchForm">
+    <input name="ingredients" placeholder="e.g. chicken,tomato" required />
+    <input name="diet" placeholder="e.g. keto, vegan" />
+    <input name="intolerances" placeholder="e.g. gluten,nut" />
+    <button type="submit" class="btn">Buscar</button>
+  </form>
+
+  <div id="results" class="grid"></div>
+  <div id="details"></div>
+
+  <script>
+    const form = document.getElementById('searchForm');
+    const results = document.getElementById('results');
+    const details = document.getElementById('details');
+
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      results.textContent = 'Cargando…';
+      details.innerHTML = '';
+      const fd = new FormData(form);
+      const qs = new URLSearchParams({
+        ingredients: fd.get('ingredients'),
+        diet: fd.get('diet'),
+        intolerances: fd.get('intolerances'),
+        number: 12
+      });
+      const res = await fetch(`/recipes?${qs}`);
+      const list = await res.json();
+      results.innerHTML = list.map(r => `
+        <div class="card">
+          <img src="${r.image}" alt="${r.title}" />
+          <div class="card-content">
+            <h4>${r.title}</h4>
+            <button class="btn" onclick="loadDetail('${r.id}')">Ver</button>
+          </div>
+        </div>
+      `).join('') || '<p>No hay resultados.</p>';
+    });
+
+    async function loadDetail(id) {
+      details.textContent = 'Cargando detalles…';
+      const res = await fetch(`/recipes/${id}`);
+      const d = await res.json();
+      details.innerHTML = `
+        <h2>${d.title}</h2>
+        <img src="${d.image}" style="width:100%;max-width:400px;border-radius:8px"/>
+        <p><strong>Tiempo:</strong> ${d.time||'–'} min &nbsp; 
+           <strong>Porciones:</strong> ${d.servings||'–'}</p>
+        <h3>Ingredientes</h3>
+        <ul>${d.ingredients.map(i=>`<li>${i}</li>`).join('')}</ul>
+        <h3>Instrucciones</h3>
+        <ol>${d.instructions.map(s=>`<li>${s}</li>`).join('')}</ol>
+        ${d.allergens?.length? `<p><strong>Alergenos:</strong> ${d.allergens.join(', ')}</p>` : ''}
+        ${d.nutrients? `<h3>Nutrición</h3>
+           <ul>${Object.entries(d.nutrients).map(([k,v])=>`<li>${k}: ${v}</li>`).join('')}</ul>` : ''}
+      `;
+      details.scrollIntoView({behavior:'smooth'});
+    }
+  </script>
+</body>
+</html>

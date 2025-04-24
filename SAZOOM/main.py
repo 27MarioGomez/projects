@@ -1,34 +1,29 @@
-# main.py
-
-import os
-import time
+import os, time, requests
 from typing import List, Optional, Dict
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-import requests
 from dotenv import load_dotenv
 
-# Carga SPOONACULAR_API_KEY desde .env
 load_dotenv()
 SPOONACULAR_API_KEY = os.getenv("SPOONACULAR_API_KEY", "")
 
-# URLs de las APIs
 MEALDB_URL = "https://www.themealdb.com/api/json/v1/1"
 SPOONACULAR_URL = "https://api.spoonacular.com/recipes"
 
-# App FastAPI renombrada a Sazoom
-app = FastAPI(
-    title="Sazoom",
-    description="Sazoom: ¿Qué cocino hoy? Búsqueda de recetas por ingredientes, filtros de dieta y alérgenos.",
-    version="1.0.0"
-)
+app = FastAPI(title="Sazoom")
 
-# Modelos Pydantic
+# Carpeta estática y plantillas
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+# Modelos
 class RecipeSummary(BaseModel):
     id: str
     title: str
     image: str
-    source: str  # 'mealdb' o 'spoonacular'
+    source: str
 
 class RecipeDetail(RecipeSummary):
     ingredients: List[str]
@@ -36,50 +31,46 @@ class RecipeDetail(RecipeSummary):
     time: Optional[int]
     servings: Optional[int]
     allergens: Optional[List[str]]
-    nutrients: Optional[Dict[str, str]]  # ej. {"Calories":"200 kcal", ...}
+    nutrients: Optional[Dict[str,str]]
 
-# Caché simple con TTL
+# Caché con TTL
 class SimpleCache:
-    def __init__(self, ttl_seconds: int):
-        self.ttl = ttl_seconds
-        self.store: Dict[str, tuple[float, any]] = {}
-
-    def get(self, key: str):
-        entry = self.store.get(key)
-        if not entry:
+    def __init__(self, ttl):
+        self.ttl = ttl
+        self.store = {}
+    def get(self, k):
+        v = self.store.get(k)
+        if not v or time.time() - v[0] > self.ttl:
             return None
-        timestamp, value = entry
-        if time.time() - timestamp > self.ttl:
-            del self.store[key]
-            return None
-        return value
+        return v[1]
+    def set(self, k, v):
+        self.store[k] = (time.time(), v)
 
-    def set(self, key: str, value: any):
-        self.store[key] = (time.time(), value)
+search_cache = SimpleCache(3600)   # 1h
+detail_cache = SimpleCache(86400)  # 24h
 
-# Instancias de caché
-search_cache = SimpleCache(ttl_seconds=3600)    # 1 hora
-detail_cache = SimpleCache(ttl_seconds=86400)   # 24 horas
+# Home: interfaz
+@app.get("/")
+def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
-# Endpoint de búsqueda de recetas
+# API: búsqueda
 @app.get("/recipes", response_model=List[RecipeSummary])
 def search_recipes(
-    ingredients: str = Query(..., description="Ingredientes separados por comas"),
-    diet: Optional[str] = Query(None, description="Dieta (vegan, keto, etc.)"),
-    intolerances: Optional[str] = Query(None, description="Alérgenos separados por comas"),
-    number: int = Query(10, ge=1, le=30, description="Nº máximo de resultados")
+    ingredients: str = Query(...),
+    diet: Optional[str] = None,
+    intolerances: Optional[str] = None,
+    number: int = Query(10, ge=1, le=30)
 ):
-    cache_key = f"search:{ingredients}:{diet}:{intolerances}:{number}"
-    if cached := search_cache.get(cache_key):
+    key = f"{ingredients}|{diet}|{intolerances}|{number}"
+    if cached := search_cache.get(key):
         return cached
 
     results: List[RecipeSummary] = []
-
-    # 1) Intento con TheMealDB
-    resp = requests.get(f"{MEALDB_URL}/filter.php", params={"i": ingredients}, timeout=5)
-    data = resp.json()
-    if resp.ok and data.get("meals"):
-        for m in data["meals"]:
+    # 1) TheMealDB
+    r1 = requests.get(f"{MEALDB_URL}/filter.php", params={"i":ingredients}, timeout=5).json()
+    if r1.get("meals"):
+        for m in r1["meals"]:
             results.append(RecipeSummary(
                 id=f"mealdb_{m['idMeal']}",
                 title=m["strMeal"],
@@ -87,17 +78,15 @@ def search_recipes(
                 source="mealdb"
             ))
     else:
-        # 2) Fallback a Spoonacular
+        # 2) Spoonacular
         params = {
             "apiKey": SPOONACULAR_API_KEY,
             "includeIngredients": ingredients,
             "number": number,
             "addRecipeInformation": True
         }
-        if diet:
-            params["diet"] = diet
-        if intolerances:
-            params["intolerances"] = intolerances
+        if diet: params["diet"] = diet
+        if intolerances: params["intolerances"] = intolerances
         sp = requests.get(f"{SPOONACULAR_URL}/complexSearch", params=params, timeout=5).json()
         for r in sp.get("results", []):
             results.append(RecipeSummary(
@@ -107,98 +96,79 @@ def search_recipes(
                 source="spoonacular"
             ))
 
-    search_cache.set(cache_key, results)
+    search_cache.set(key, results)
     return results
 
-# Endpoint de detalle de receta
+# API: detalle
 @app.get("/recipes/{recipe_id}", response_model=RecipeDetail)
-def get_recipe(
-    recipe_id: str,
-    intolerances: Optional[str] = Query(None, description="Alérgenos a destacar")
-):
-    cache_key = recipe_id + f":{intolerances}"
-    if cached := detail_cache.get(cache_key):
+def get_recipe(recipe_id: str, intolerances: Optional[str] = None):
+    key = recipe_id + "|" + (intolerances or "")
+    if cached := detail_cache.get(key):
         return cached
 
-    # 1) Detalle desde TheMealDB
+    # TheMealDB
     if recipe_id.startswith("mealdb_"):
-        mid = recipe_id.split("_", 1)[1]
-        resp = requests.get(f"{MEALDB_URL}/lookup.php", params={"i": mid}, timeout=5).json()
-        meals = resp.get("meals")
-        if not meals:
-            raise HTTPException(404, "Receta no encontrada")
-        meal = meals[0]
-
-        ingredients, allergens = [], []
-        for i in range(1, 21):
-            ing = meal.get(f"strIngredient{i}")
+        mid = recipe_id.split("_",1)[1]
+        r = requests.get(f"{MEALDB_URL}/lookup.php", params={"i":mid}, timeout=5).json()
+        meal = r.get("meals", [{}])[0]
+        if not meal:
+            raise HTTPException(404, "Not found")
+        ing, alg = [], []
+        for i in range(1,21):
+            name = meal.get(f"strIngredient{i}")
             meas = meal.get(f"strMeasure{i}")
-            if ing and ing.strip():
-                txt = f"{meas.strip()} {ing.strip()}"
-                ingredients.append(txt)
-                low = ing.lower()
-                if any(a in low for a in ["milk","egg","peanut","nut","wheat","soy"]):
-                    allergens.append(ing.strip())
-
-        instructions = [step.strip() for step in meal["strInstructions"].split(".") if step.strip()]
-
+            if name:
+                text = f"{meas.strip()} {name.strip()}"
+                ing.append(text)
+                ln = name.lower()
+                if any(a in ln for a in ["milk","egg","peanut","nut","wheat","soy"]):
+                    alg.append(name)
+        instr = [s.strip() for s in meal.get("strInstructions","").split(".") if s.strip()]
         detail = RecipeDetail(
-            id=recipe_id,
-            title=meal["strMeal"],
-            image=meal["strMealThumb"],
-            source="mealdb",
-            ingredients=ingredients,
-            instructions=instructions,
-            time=None,
-            servings=None,
-            allergens=allergens or (intolerances.split(",") if intolerances else []),
+            id=recipe_id, title=meal["strMeal"],
+            image=meal["strMealThumb"], source="mealdb",
+            ingredients=ing, instructions=instr,
+            time=None, servings=None,
+            allergens=alg or (intolerances.split(",") if intolerances else []),
             nutrients=None
         )
 
-    # 2) Detalle desde Spoonacular
+    # Spoonacular
     elif recipe_id.startswith("spoon_"):
-        sid = recipe_id.split("_", 1)[1]
-        params = {"apiKey": SPOONACULAR_API_KEY, "includeNutrition": True}
-        data = requests.get(f"{SPOONACULAR_URL}/{sid}/information", params=params, timeout=5).json()
+        sid = recipe_id.split("_",1)[1]
+        data = requests.get(
+            f"{SPOONACULAR_URL}/{sid}/information",
+            params={"apiKey":SPOONACULAR_API_KEY,"includeNutrition":True},
+            timeout=5
+        ).json()
         if not data.get("id"):
-            raise HTTPException(404, "Receta no encontrada")
-
-        ingredients = [
-            f"{ing['amount']} {ing['unit']} {ing['name']}"
-            for ing in data.get("extendedIngredients", [])
-        ]
-        instructions = []
-        for bloc in data.get("analyzedInstructions", []):
-            for step in bloc.get("steps", []):
-                instructions.append(step["step"])
-
-        nutrients = {}
-        for nut in data.get("nutrition", {}).get("nutrients", []):
-            name = nut["name"]
-            val = f"{nut['amount']}{nut['unit']}"
-            if name.lower() in ("calories","fat","carbohydrates","protein"):
-                nutrients[name] = val
-
+            raise HTTPException(404,"Not found")
+        ing = [f"{i['amount']} {i['unit']} {i['name']}" for i in data.get("extendedIngredients",[])]
+        instr = []
+        for blk in data.get("analyzedInstructions",[]):
+            for s in blk.get("steps",[]):
+                instr.append(s["step"])
+        nutr = {
+            n["name"]:f"{n['amount']}{n['unit']}"
+            for n in data.get("nutrition",{}).get("nutrients",[])
+            if n["name"].lower() in ("calories","fat","carbohydrates","protein")
+        }
         detail = RecipeDetail(
-            id=recipe_id,
-            title=data["title"],
-            image=data["image"],
-            source="spoonacular",
-            ingredients=ingredients,
-            instructions=instructions,
+            id=recipe_id, title=data["title"],
+            image=data["image"], source="spoonacular",
+            ingredients=ing, instructions=instr,
             time=data.get("readyInMinutes"),
             servings=data.get("servings"),
-            allergens=intolerances.split(",") if intolerances else [],
-            nutrients=nutrients
+            allergens=(intolerances.split(",") if intolerances else []),
+            nutrients=nutr
         )
     else:
-        raise HTTPException(400, "ID de receta inválido")
+        raise HTTPException(400, "Invalid ID")
 
-    detail_cache.set(cache_key, detail)
+    detail_cache.set(key, detail)
     return detail
 
-# Para ejecutar con `python main.py`
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0",
+                port=int(os.getenv("PORT", 8000)), reload=True)
