@@ -4,4 +4,3 @@ jinja2
 python-dotenv
 requests
 pydantic
-deep-translator

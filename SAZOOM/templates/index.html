@@ -6,37 +6,61 @@
   <style>
     body { font-family: sans-serif; max-width: 800px; margin: auto; padding: 1rem; }
     form { display: grid; gap: 0.5rem; margin-bottom: 1rem; }
-    .info { cursor: help; color: #888; margin-left: 0.3rem; }
+    .tooltip { position: relative; display: inline-block; cursor: help; color: #888; }
+    .tooltip .tooltiptext {
+      visibility: hidden; width: 200px; background: #333; color: #fff;
+      text-align: left; border-radius: 4px; padding: 5px;
+      position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%);
+      opacity: 0; transition: opacity 0.3s; z-index: 1;
+    }
+    .tooltip:hover .tooltiptext,
+    .tooltip:focus .tooltiptext {
+      visibility: visible; opacity: 1;
+    }
     .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill,minmax(200px,1fr)); }
     .card { border: 1px solid #ddd; border-radius:8px; overflow: hidden; }
     .card img { width:100%; height:120px; object-fit:cover; }
     .card-content { padding: 0.5rem; }
     .btn { background:#28a745; color:#fff; padding:0.6rem; border:none; border-radius:4px; cursor:pointer; }
     #details { margin-top:2rem; }
+    #loadingOverlay {
+      display:none; position: fixed; top:0; left:0; width:100%; height:100%;
+      background: rgba(0,0,0,0.4); color:#fff; font-size:1.5rem;
+      display: flex; align-items: center; justify-content: center; z-index:9999;
+    }
   </style>
 </head>
 <body>
+  <div id="loadingOverlay">⏳ Espere un momento… estamos cocinando para ti.</div>
+
   <h1>Sazoom</h1>
   <p>Busca recetas por ingredientes y filtra por dieta o alérgenos.</p>
+
   <form id="searchForm">
     <div>
       <label>
         Ingredientes 
-        <span class="info" title="Introduce ingredientes en español, separados por comas.">?</span>
+        <span class="tooltip">?
+          <span class="tooltiptext">Escribe ingredientes en español, separados por comas.</span>
+        </span>
       </label>
       <input name="ingredients" placeholder="p.ej. tomate,cebolla,ajo" required style="width:100%" />
     </div>
     <div>
       <label>
         Dieta 
-        <span class="info" title="Opcional. P.ej. keto, vegan (en inglés).">?</span>
+        <span class="tooltip">?
+          <span class="tooltiptext">Opcional: p.ej. keto, vegan.</span>
+        </span>
       </label>
       <input name="diet" placeholder="p.ej. keto, vegan" style="width:100%" />
     </div>
     <div>
       <label>
         Alérgenos 
-        <span class="info" title="Introduce alérgenos en español, separados por comas.">?</span>
+        <span class="tooltip">?
+          <span class="tooltiptext">Escribe alérgenos en español, separados por comas.</span>
+        </span>
       </label>
       <input name="intolerances" placeholder="p.ej. gluten,nuez" style="width:100%" />
     </div>
@@ -50,11 +74,14 @@
     const form = document.getElementById('searchForm');
     const results = document.getElementById('results');
     const details = document.getElementById('details');
+    const overlay = document.getElementById('loadingOverlay');
 
     form.addEventListener('submit', async e => {
       e.preventDefault();
-      results.textContent = 'Cargando…'; 
+      results.innerHTML = '';
       details.innerHTML = '';
+      overlay.style.display = 'flex';
+
       const fd = new FormData(form);
       const qs = new URLSearchParams({
         ingredients: fd.get('ingredients'),
@@ -64,6 +91,8 @@
       });
       const res = await fetch(`/recipes?${qs}`);
       const list = await res.json();
+      overlay.style.display = 'none';
+
       results.innerHTML = list.length
         ? list.map(r => `
             <div class="card">
@@ -78,9 +107,11 @@
     });
 
     async function loadDetail(id) {
-      details.textContent = 'Cargando detalles…';
+      overlay.style.display = 'flex';
       const res = await fetch(`/recipes/${id}`);
       const d = await res.json();
+      overlay.style.display = 'none';
+
       details.innerHTML = `
         <h2>${d.title}</h2>
         <img src="${d.image}" style="width:100%;max-width:400px;border-radius:8px"/>
@@ -93,7 +124,7 @@
         ${d.nutrients? `<h3>Nutrición</h3>
            <ul>${Object.entries(d.nutrients).map(([k,v])=>`<li>${k}: ${v}</li>`).join('')}</ul>` : ''}
       `;
-      details.scrollIntoView({behavior:'smooth'});
+      details.scrollIntoView({ behavior: 'smooth' });
     }
   </script>
 </body>
