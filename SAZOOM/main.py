@@ -14,12 +14,25 @@ MEALDB_URL = "https://www.themealdb.com/api/json/v1/1"
 SPOONACULAR_URL = "https://api.spoonacular.com/recipes"
 
 app = FastAPI(title="Sazoom")
-
-# Carpeta estática y plantillas
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# Modelos
+# Instancias de traductor
+es_en = GoogleTranslator(source='es', target='en')
+en_es = GoogleTranslator(source='en', target='es')
+
+def batch_traduce(traductor: GoogleTranslator, texto_comas: str) -> str:
+    if not texto_comas:
+        return ""
+    items = [i.strip() for i in texto_comas.split(",") if i.strip()]
+    traducidos = traductor.translate_batch(items)
+    return ",".join(traducidos)
+
+def lista_traduce(traductor: GoogleTranslator, items: List[str]) -> List[str]:
+    if not items:
+        return []
+    return traductor.translate_batch(items)
+
 class RecipeSummary(BaseModel):
     id: str
     title: str
@@ -32,36 +45,24 @@ class RecipeDetail(RecipeSummary):
     time: Optional[int]
     servings: Optional[int]
     allergens: Optional[List[str]]
-    nutrients: Optional[Dict[str,str]]
+    nutrients: Optional[Dict[str, str]]
 
-# Caché con TTL
 class SimpleCache:
-    def __init__(self, ttl):
-        self.ttl = ttl
-        self.store = {}
+    def __init__(self, ttl): self.ttl, self.store = ttl, {}
     def get(self, k):
         v = self.store.get(k)
-        if not v or time.time() - v[0] > self.ttl:
-            return None
+        if not v or time.time() - v[0] > self.ttl: return None
         return v[1]
     def set(self, k, v):
         self.store[k] = (time.time(), v)
 
-search_cache = SimpleCache(3600)   # 1h
-detail_cache = SimpleCache(86400)  # 24h
+search_cache = SimpleCache(3600)
+detail_cache = SimpleCache(86400)
 
-# Función de traducción
-def traducir_ingredientes(texto_es: str) -> str:
-    lista = [i.strip() for i in texto_es.split(",") if i.strip()]
-    traducidos = GoogleTranslator(source='es', target='en').translate_batch(lista)
-    return ",".join(traducidos)
-
-# Home: interfaz
 @app.get("/")
 def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-# API: búsqueda
 @app.get("/recipes", response_model=List[RecipeSummary])
 def search_recipes(
     ingredients: str = Query(...),
@@ -69,23 +70,20 @@ def search_recipes(
     intolerances: Optional[str] = None,
     number: int = Query(10, ge=1, le=30)
 ):
-    # traducimos ingredientes y alérgenos al inglés
-    ingr_en = traducir_ingredientes(ingredients)
-    intol_en = traducir_ingredientes(intolerances) if intolerances else None
+    # traduce los inputs ES→EN
+    ingr_en = batch_traduce(es_en, ingredients)
+    diet_en = diet  # dieta usamos misma palabra en inglés si el usuario la mete en inglés
+    intol_en = batch_traduce(es_en, intolerances) if intolerances else None
 
-    key = f"{ingredients}|{diet}|{intolerances}|{number}"
-    if cached := search_cache.get(key):
+    cache_key = f"{ingredients}|{diet}|{intolerances}|{number}"
+    if cached := search_cache.get(cache_key):
         return cached
 
     results: List[RecipeSummary] = []
     # 1) TheMealDB
-    r1 = requests.get(
-        f"{MEALDB_URL}/filter.php",
-        params={"i": ingr_en},
-        timeout=5
-    ).json()
-    if r1.get("meals"):
-        for m in r1["meals"]:
+    resp = requests.get(f"{MEALDB_URL}/filter.php", params={"i":ingr_en}, timeout=5).json()
+    if resp.get("meals"):
+        for m in resp["meals"]:
             results.append(RecipeSummary(
                 id=f"mealdb_{m['idMeal']}",
                 title=m["strMeal"],
@@ -100,13 +98,9 @@ def search_recipes(
             "number": number,
             "addRecipeInformation": True
         }
-        if diet: params["diet"] = diet
+        if diet_en: params["diet"] = diet_en
         if intol_en: params["intolerances"] = intol_en
-        sp = requests.get(
-            f"{SPOONACULAR_URL}/complexSearch",
-            params=params,
-            timeout=5
-        ).json()
+        sp = requests.get(f"{SPOONACULAR_URL}/complexSearch", params=params, timeout=5).json()
         for r in sp.get("results", []):
             results.append(RecipeSummary(
                 id=f"spoon_{r['id']}",
@@ -115,88 +109,90 @@ def search_recipes(
                 source="spoonacular"
             ))
 
-    search_cache.set(key, results)
+    # traduce títulos EN→ES
+    titles = [r.title for r in results]
+    titles_es = lista_traduce(en_es, titles)
+    for r, te in zip(results, titles_es):
+        r.title = te
+
+    search_cache.set(cache_key, results)
     return results
 
-# API: detalle
 @app.get("/recipes/{recipe_id}", response_model=RecipeDetail)
 def get_recipe(recipe_id: str, intolerances: Optional[str] = None):
-    key = recipe_id + "|" + (intolerances or "")
-    if cached := detail_cache.get(key):
+    cache_key = f"{recipe_id}|{intolerances or ''}"
+    if cached := detail_cache.get(cache_key):
         return cached
 
-    # TheMealDB
+    # obtiene datos
     if recipe_id.startswith("mealdb_"):
         mid = recipe_id.split("_",1)[1]
-        r = requests.get(
-            f"{MEALDB_URL}/lookup.php",
-            params={"i": mid},
-            timeout=5
-        ).json()
-        meal = r.get("meals", [{}])[0]
-        if not meal:
-            raise HTTPException(404, "Not found")
+        data = requests.get(f"{MEALDB_URL}/lookup.php", params={"i":mid}, timeout=5).json().get("meals",[{}])[0]
+        if not data: raise HTTPException(404,"Not found")
         ing, alg = [], []
         for i in range(1,21):
-            name = meal.get(f"strIngredient{i}")
-            meas = meal.get(f"strMeasure{i}")
-            if name:
-                txt = f"{meas.strip()} {name.strip()}"
-                ing.append(txt)
-                ln = name.lower()
-                if any(a in ln for a in ["milk","egg","peanut","nut","wheat","soy"]):
-                    alg.append(name)
-        instr = [s.strip() for s in meal.get("strInstructions","").split(".") if s.strip()]
+            nm = data.get(f"strIngredient{i}")
+            ms = data.get(f"strMeasure{i}")
+            if nm:
+                ing.append(f"{ms.strip()} {nm.strip()}")
+                if any(a in nm.lower() for a in ["milk","egg","peanut","nut","wheat","soy"]):
+                    alg.append(nm)
+        instr = [s.strip() for s in data.get("strInstructions","").split(".") if s.strip()]
         detail = RecipeDetail(
             id=recipe_id,
-            title=meal["strMeal"],
-            image=meal["strMealThumb"],
+            title=data["strMeal"],
+            image=data["strMealThumb"],
             source="mealdb",
             ingredients=ing,
             instructions=instr,
-            time=None,
-            servings=None,
+            time=None, servings=None,
             allergens=alg,
             nutrients=None
         )
-
-    # Spoonacular
     elif recipe_id.startswith("spoon_"):
         sid = recipe_id.split("_",1)[1]
-        data = requests.get(
-            f"{SPOONACULAR_URL}/{sid}/information",
-            params={"apiKey": SPOONACULAR_API_KEY, "includeNutrition": True},
-            timeout=5
-        ).json()
-        if not data.get("id"):
-            raise HTTPException(404, "Not found")
-        ing = [f"{i['amount']} {i['unit']} {i['name']}" for i in data.get("extendedIngredients",[])]
-        instr, nutr = [], {}
-        for blk in data.get("analyzedInstructions",[]):
-            for s in blk.get("steps",[]):
-                instr.append(s["step"])
-        for n in data.get("nutrition",{}).get("nutrients",[]):
-            if n["name"].lower() in ("calories","fat","carbohydrates","protein"):
-                nutr[n["name"]] = f"{n['amount']}{n['unit']}"
+        d = requests.get(f"{SPOONACULAR_URL}/{sid}/information",
+                         params={"apiKey":SPOONACULAR_API_KEY,"includeNutrition":True},
+                         timeout=5).json()
+        if not d.get("id"): raise HTTPException(404,"Not found")
+        ing = [f"{i['amount']} {i['unit']} {i['name']}" for i in d.get("extendedIngredients",[])]
+        instr = []
+        for blk in d.get("analyzedInstructions",[]):
+            instr += [s["step"] for s in blk.get("steps",[])]
+        nutr = {
+            n["name"]:f"{n['amount']}{n['unit']}"
+            for n in d.get("nutrition",{}).get("nutrients",[])
+            if n["name"].lower() in ("calories","fat","carbohydrates","protein")
+        }
         detail = RecipeDetail(
             id=recipe_id,
-            title=data["title"],
-            image=data["image"],
+            title=d["title"],
+            image=d["image"],
             source="spoonacular",
             ingredients=ing,
             instructions=instr,
-            time=data.get("readyInMinutes"),
-            servings=data.get("servings"),
+            time=d.get("readyInMinutes"),
+            servings=d.get("servings"),
             allergens=(intolerances.split(",") if intolerances else []),
             nutrients=nutr
         )
     else:
-        raise HTTPException(400, "Invalid ID")
+        raise HTTPException(400,"Invalid ID")
 
-    detail_cache.set(key, detail)
+    # traduce todo EN→ES
+    detail.title = en_es.translate(detail.title)
+    detail.ingredients = lista_traduce(en_es, detail.ingredients)
+    detail.instructions = lista_traduce(en_es, detail.instructions)
+    detail.allergens = lista_traduce(en_es, detail.allergens or [])
+    if detail.nutrients:
+        keys = list(detail.nutrients.keys())
+        keys_es = lista_traduce(en_es, keys)
+        detail.nutrients = {ke: detail.nutrients[k] for ke,k in zip(keys_es, keys)}
+
+    detail_cache.set(cache_key, detail)
     return detail
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0",
-                port=int(os.getenv("PORT", 8000)), reload=True)
+                port=int(os.getenv("PORT",8000)), reload=True)
