@@ -21,12 +21,11 @@
     .card { border: 1px solid #ddd; border-radius:8px; overflow: hidden; }
     .card img { width:100%; height:120px; object-fit:cover; }
     .card-content { padding: 0.5rem; }
-    .btn { background:#28a745; color:#fff; padding:0.6rem; border:none; border-radius:4px; cursor:pointer; }
-    #details { margin-top:2rem; }
+    .btn { background:#28a745; color:#fff; padding:0.6rem; border:none; border-radius:4px; cursor:pointer; width:100%; }
     #loadingOverlay {
       display:none; position: fixed; top:0; left:0; width:100%; height:100%;
       background: rgba(0,0,0,0.4); color:#fff; font-size:1.5rem;
-      display: flex; align-items: center; justify-content: center; z-index:9999;
+      align-items: center; justify-content: center; z-index:9999;
     }
   </style>
 </head>
@@ -39,7 +38,7 @@
   <form id="searchForm">
     <div>
       <label>
-        Ingredientes 
+        Ingredientes
         <span class="tooltip">?
           <span class="tooltiptext">Escribe ingredientes en español, separados por comas.</span>
         </span>
@@ -48,7 +47,7 @@
     </div>
     <div>
       <label>
-        Dieta 
+        Dieta
         <span class="tooltip">?
           <span class="tooltiptext">Opcional: p.ej. keto, vegan.</span>
         </span>
@@ -57,7 +56,7 @@
     </div>
     <div>
       <label>
-        Alérgenos 
+        Alérgenos
         <span class="tooltip">?
           <span class="tooltiptext">Escribe alérgenos en español, separados por comas.</span>
         </span>
@@ -68,18 +67,15 @@
   </form>
 
   <div id="results" class="grid"></div>
-  <div id="details"></div>
 
   <script>
     const form = document.getElementById('searchForm');
     const results = document.getElementById('results');
-    const details = document.getElementById('details');
     const overlay = document.getElementById('loadingOverlay');
 
     form.addEventListener('submit', async e => {
       e.preventDefault();
       results.innerHTML = '';
-      details.innerHTML = '';
       overlay.style.display = 'flex';
 
       const fd = new FormData(form);
@@ -91,41 +87,20 @@
       });
       const res = await fetch(`/recipes?${qs}`);
       const list = await res.json();
-      overlay.style.display = 'none';
 
+      overlay.style.display = 'none';
       results.innerHTML = list.length
         ? list.map(r => `
             <div class="card">
               <img src="${r.image}" alt="${r.title}" />
               <div class="card-content">
                 <h4>${r.title}</h4>
-                <button class="btn" onclick="loadDetail('${r.id}')">Ver</button>
+                <button class="btn" onclick="location.href='/recipe/${r.id}'">Ver receta completa</button>
               </div>
             </div>
           `).join('')
         : '<p>No hay resultados.</p>';
     });
-
-    async function loadDetail(id) {
-      overlay.style.display = 'flex';
-      const res = await fetch(`/recipes/${id}`);
-      const d = await res.json();
-      overlay.style.display = 'none';
-
-      details.innerHTML = `
-        <h2>${d.title}</h2>
-        <img src="${d.image}" style="width:100%;max-width:400px;border-radius:8px"/>
-        <p><strong>Tiempo:</strong> ${d.time||'–'} min · <strong>Porciones:</strong> ${d.servings||'–'}</p>
-        <h3>Ingredientes</h3>
-        <ul>${d.ingredients.map(i=>`<li>${i}</li>`).join('')}</ul>
-        <h3>Instrucciones</h3>
-        <ol>${d.instructions.map(s=>`<li>${s}</li>`).join('')}</ol>
-        ${d.allergens?.length? `<p><strong>Alergenos:</strong> ${d.allergens.join(', ')}</p>` : ''}
-        ${d.nutrients? `<h3>Nutrición</h3>
-           <ul>${Object.entries(d.nutrients).map(([k,v])=>`<li>${k}: ${v}</li>`).join('')}</ul>` : ''}
-      `;
-      details.scrollIntoView({ behavior: 'smooth' });
-    }
   </script>
 </body>
 </html>

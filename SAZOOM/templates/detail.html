@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>{{ recipe.title }} — Sazoom</title>
+  <style>
+    body { font-family: sans-serif; max-width: 800px; margin: auto; padding: 1rem; }
+    img { width:100%; border-radius:8px; margin-bottom:1rem; }
+    ul, ol { margin-left:1.5rem; }
+    a.btn { display:inline-block; margin-bottom:1rem; background:#28a745; color:#fff;
+             padding:0.5rem 1rem; border-radius:4px; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <a href="/" class="btn">← Nueva búsqueda</a>
+  <h1>{{ recipe.title }}</h1>
+  <img src="{{ recipe.image }}" alt="{{ recipe.title }}" />
+  <p><strong>Tiempo:</strong> {{ recipe.time or '–' }} min ·
+     <strong>Porciones:</strong> {{ recipe.servings or '–' }}</p>
+
+  <h2>Ingredientes</h2>
+  <ul>
+    {% for i in recipe.ingredients %}
+      <li>{{ i }}</li>
+    {% endfor %}
+  </ul>
+
+  <h2>Instrucciones</h2>
+  <ol>
+    {% for s in recipe.instructions %}
+      <li>{{ s }}</li>
+    {% endfor %}
+  </ol>
+
+  {% if recipe.allergens %}
+    <h3>Alergenos</h3>
+    <p>{{ recipe.allergens | join(", ") }}</p>
+  {% endif %}
+
+  {% if recipe.nutrients %}
+    <h3>Nutrición</h3>
+    <ul>
+      {% for k,v in recipe.nutrients.items() %}
+        <li>{{ k }}: {{ v }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</body>
+</html>
