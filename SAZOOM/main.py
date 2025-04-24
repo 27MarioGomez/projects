@@ -2,6 +2,7 @@ import os
 import time
 import requests
 from typing import List, Optional, Dict
+from functools import lru_cache
 
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.gzip import GZipMiddleware
@@ -10,23 +11,46 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
+import argostranslate.translate
+
+# ——— Carga de entorno ———
 load_dotenv()
 SPOONACULAR_API_KEY = os.getenv("SPOONACULAR_API_KEY", "")
 
+# ——— URLs externas ———
 MEALDB_URL      = "https://www.themealdb.com/api/json/v1/1"
 SPOONACULAR_URL = "https://api.spoonacular.com/recipes"
-LIBRETRANSLATE  = "https://libretranslate.de/translate"
-MYMEMORY        = "https://api.mymemory.translated.net/get"
 
+# ——— Inicialización Argos Translate (offline) ———
+installed_langs = argostranslate.translate.get_installed_languages()
+argos_en = next(lang for lang in installed_langs if lang.code == "en")
+argos_es = next(lang for lang in installed_langs if lang.code == "es")
+argos_trans = argos_en.get_translation(argos_es)
+
+@lru_cache(maxsize=2048)
+def translate_text(text: str) -> str:
+    """Traduce un texto EN→ES usando Argos Translate (offline)."""
+    if not text:
+        return ""
+    try:
+        return argos_trans.translate(text)
+    except Exception:
+        return text
+
+def translate_list(items: List[str]) -> List[str]:
+    """Traduce cada elemento de una lista EN→ES."""
+    return [translate_text(item) for item in items] if items else []
+
+# ——— FastAPI app ———
 app = FastAPI(title="Sazoom")
-# 1. GZip para respuestas grandes
+# GZip para respuestas >1KB
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
-# 2. Montar estáticos + plantillas
+# Montar estáticos y plantillas
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# 3. Cache-Control para estáticos
+# Cache-Control para estáticos
 @app.middleware("http")
 async def add_static_cache_control(request: Request, call_next):
     response = await call_next(request)
@@ -34,33 +58,7 @@ async def add_static_cache_control(request: Request, call_next):
         response.headers["Cache-Control"] = "public, max-age=86400"
     return response
 
-# Traducción híbrida
-def _lt(text: str, src: str, tgt: str) -> str:
-    try:
-        r = requests.post(
-            LIBRETRANSLATE,
-            json={"q": text, "source": src, "target": tgt, "format": "text"},
-            timeout=3
-        ).json()
-        return r.get("translatedText", text)
-    except:
-        try:
-            r = requests.get(
-                MYMEMORY,
-                params={"q": text, "langpair": f"{src}|{tgt}"},
-                timeout=3
-            ).json()
-            return r.get("responseData", {}).get("translatedText", text)
-        except:
-            return text
-
-def translate_text(text: str) -> str:
-    return _lt(text, "en", "es")
-
-def translate_list(items: List[str]) -> List[str]:
-    return [translate_text(i) for i in items] if items else []
-
-# Modelos
+# ——— Modelos Pydantic ———
 class RecipeSummary(BaseModel):
     id: str
     title: str
@@ -75,43 +73,44 @@ class RecipeDetail(RecipeSummary):
     allergens: Optional[List[str]]
     nutrients: Optional[Dict[str, str]]
 
-# Caché simple en memoria
+# ——— Caché simple en memoria ———
 class SimpleCache:
     def __init__(self, ttl: int):
         self.ttl = ttl
         self.store: Dict[str, tuple] = {}
     def get(self, key: str):
-        v = self.store.get(key)
-        if not v or time.time() - v[0] > self.ttl:
+        entry = self.store.get(key)
+        if not entry or time.time() - entry[0] > self.ttl:
             return None
-        return v[1]
+        return entry[1]
     def set(self, key: str, value):
         self.store[key] = (time.time(), value)
 
-search_cache = SimpleCache(3600)
-detail_cache = SimpleCache(86400)
+search_cache = SimpleCache(3600)   # 1h
+detail_cache = SimpleCache(86400)  # 24h
 
-# Rutas
+# ——— Rutas ———
 @app.get("/")
 async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.get("/recipes", response_model=List[RecipeSummary])
 async def search_recipes(
-    ingredients: str = Query(...),
-    diet: Optional[str] = None,
-    intolerances: Optional[str] = None,
-    number: int = Query(10, ge=1, le=30)
+    ingredients: str = Query(..., description="Ingredientes en español, separados por comas"),
+    diet: Optional[str] = Query(None, description="Dieta opcional, en inglés (p.ej. keto)"),
+    intolerances: Optional[str] = Query(None, description="Alérgenos en español, separados por comas"),
+    number: int = Query(10, ge=1, le=30, description="Número máximo de resultados")
 ):
-    # traducir solo ingredientes y alérgenos ES→EN
-    ingr_en  = _lt(ingredients,  "es", "en")
-    intol_en = _lt(intolerances, "es", "en") if intolerances else None
+    # traducir ES→EN SOLO ingredientes y alérgenos
+    ingr_en  = translate_text(ingredients)  
+    intol_en = translate_text(intolerances) if intolerances else None
 
-    key = f"{ingredients}|{diet}|{intolerances}|{number}"
-    if cached := search_cache.get(key):
+    cache_key = f"{ingredients}|{diet}|{intolerances}|{number}"
+    if cached := search_cache.get(cache_key):
         return cached
 
     results: List[RecipeSummary] = []
+
     # 1) TheMealDB
     m = requests.get(
         f"{MEALDB_URL}/filter.php",
@@ -154,14 +153,14 @@ async def search_recipes(
     for r in results:
         r.title = translate_text(r.title)
 
-    search_cache.set(key, results)
+    search_cache.set(cache_key, results)
     return results
 
 @app.get("/recipe/{recipe_id}")
 async def recipe_page(
     request: Request,
     recipe_id: str,
-    intolerances: Optional[str] = None
+    intolerances: Optional[str] = Query(None, description="Alérgenos en español")
 ):
     try:
         detail = _fetch_detail(recipe_id, intolerances)
@@ -172,11 +171,10 @@ async def recipe_page(
     except HTTPException as he:
         return templates.TemplateResponse("error.html", {"request": request}, status_code=he.status_code)
     except Exception:
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         return templates.TemplateResponse("error.html", {"request": request}, status_code=500)
 
-@app.get("/recipes/{recipe_id}", response_model=RecipeDetail)
+@app.get("/recipes/{recipe_id}", response_model=RecipeDetail])
 async def get_recipe(
     recipe_id: str,
     intolerances: Optional[str] = None
@@ -195,29 +193,28 @@ def _fetch_detail(recipe_id: str, intolerances: Optional[str]):
             f"{MEALDB_URL}/lookup.php", params={"i": mid}, timeout=5
         ).json().get("meals", [{}])[0]
         if not data:
-            raise HTTPException(404, "No encontrada")
+            raise HTTPException(404, "Receta no encontrada")
 
-        ingredients, allergens = [], []
+        ing, alg = [], []
         for i in range(1,21):
-            nm = data.get(f"strIngredient{i}")
-            ms = data.get(f"strMeasure{i}")
-            if nm:
-                ingredients.append(f"{ms.strip()} {nm.strip()}")
-                if any(a in nm.lower() for a in ["milk","egg","peanut","nut","wheat","soy"]):
-                    allergens.append(nm)
-        instructions = [
-            s.strip() for s in data.get("strInstructions","").split(".") if s.strip()
-        ]
+            name = data.get(f"strIngredient{i}")
+            meas = data.get(f"strMeasure{i}")
+            if name:
+                ing.append(f"{meas.strip()} {name.strip()}")
+                if any(a in name.lower() for a in ["milk","egg","peanut","nut","wheat","soy"]):
+                    alg.append(name)
+        instr = [s.strip() for s in data.get("strInstructions","").split(".") if s.strip()]
+
         detail = RecipeDetail(
             id=recipe_id,
             title=data["strMeal"],
             image=data["strMealThumb"],
             source="mealdb",
-            ingredients=ingredients,
-            instructions=instructions,
+            ingredients=ing,
+            instructions=instr,
             time=None,
             servings=None,
-            allergens=allergens,
+            allergens=alg,
             nutrients=None
         )
 
@@ -230,15 +227,15 @@ def _fetch_detail(recipe_id: str, intolerances: Optional[str]):
             timeout=5
         ).json()
         if not d.get("id"):
-            raise HTTPException(404, "No encontrada")
+            raise HTTPException(404, "Receta no encontrada")
 
-        ingredients = [f"{i['amount']} {i['unit']} {i['name']}" for i in d.get("extendedIngredients",[])]
-        instructions = []
+        ing = [f"{i['amount']} {i['unit']} {i['name']}" for i in d.get("extendedIngredients",[])]
+        instr = []
         for blk in d.get("analyzedInstructions", []):
-            instructions += [step["step"] for step in blk.get("steps", [])]
-        nutrients = {
+            instr += [step["step"] for step in blk.get("steps", [])]
+        nutr = {
             n["name"]: f"{n['amount']}{n['unit']}"
-            for n in d.get("nutrition", {}).get("nutrients", [])
+            for n in d.get("nutrition",{}).get("nutrients",[])
             if n["name"].lower() in ("calories","fat","carbohydrates","protein")
         }
 
@@ -247,17 +244,17 @@ def _fetch_detail(recipe_id: str, intolerances: Optional[str]):
             title=d["title"],
             image=d["image"],
             source="spoonacular",
-            ingredients=ingredients,
-            instructions=instructions,
+            ingredients=ing,
+            instructions=instr,
             time=d.get("readyInMinutes"),
             servings=d.get("servings"),
             allergens=(intolerances.split(",") if intolerances else []),
-            nutrients=nutrients
+            nutrients=nutr
         )
     else:
         raise HTTPException(400, "ID inválido")
 
-    # traducir contenido
+    # traducir contenido EN→ES
     detail.title        = translate_text(detail.title)
     detail.ingredients  = translate_list(detail.ingredients)
     detail.instructions = translate_list(detail.instructions)
@@ -265,7 +262,7 @@ def _fetch_detail(recipe_id: str, intolerances: Optional[str]):
     if detail.nutrients:
         keys    = list(detail.nutrients.keys())
         keys_es = translate_list(keys)
-        detail.nutrients = {ke: detail.nutrients[k] for ke,k in zip(keys_es, keys)}
+        detail.nutrients = {kes: detail.nutrients[k] for kes,k in zip(keys_es, keys)}
 
     detail_cache.set(key, detail)
     return detail
