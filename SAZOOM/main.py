@@ -18,46 +18,33 @@ app = FastAPI(title="Sazoom")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-
 def _lt(text: str, src: str, tgt: str) -> str:
-    # Intenta LibreTranslate
     try:
         r = requests.post(
             LIBRETRANSLATE_URL,
             json={"q": text, "source": src, "target": tgt, "format": "text"},
-            timeout=5
+            timeout=3
         ).json()
         return r.get("translatedText", text)
-    except Exception:
-        # Fallback a MyMemory
+    except:
         try:
-            params = {"q": text, "langpair": f"{src}|{tgt}"}
-            r = requests.get(MYMEMORY_URL, params=params, timeout=5).json()
+            p = {"q": text, "langpair": f"{src}|{tgt}"}
+            r = requests.get(MYMEMORY_URL, params=p, timeout=3).json()
             return r.get("responseData", {}).get("translatedText", text)
-        except Exception:
+        except:
             return text
 
+def translate_text(text: str) -> str:
+    return _lt(text, "en", "es")
 
-def translate_text(text: str, src="en", tgt="es") -> str:
-    return _lt(text, src, tgt)
-
-
-def translate_list(items: List[str], src="en", tgt="es") -> List[str]:
-    if not items:
-        return []
-    # manda todo en un solo texto separado por líneas
-    joined = "\n".join(items)
-    trans = _lt(joined, src, tgt)
-    # reconstruye la lista
-    return trans.split("\n")
-
+def translate_list(items: List[str]) -> List[str]:
+    return [translate_text(i) for i in items] if items else []
 
 class RecipeSummary(BaseModel):
     id: str
     title: str
     image: str
     source: str
-
 
 class RecipeDetail(RecipeSummary):
     ingredients: List[str]
@@ -67,9 +54,8 @@ class RecipeDetail(RecipeSummary):
     allergens: Optional[List[str]]
     nutrients: Optional[Dict[str, str]]
 
-
 class SimpleCache:
-    def __init__(self, ttl): 
+    def __init__(self, ttl):
         self.ttl, self.store = ttl, {}
     def get(self, k):
         v = self.store.get(k)
@@ -79,15 +65,12 @@ class SimpleCache:
     def set(self, k, v):
         self.store[k] = (time.time(), v)
 
-
 search_cache = SimpleCache(3600)
 detail_cache = SimpleCache(86400)
-
 
 @app.get("/")
 def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
-
 
 @app.get("/recipes", response_model=List[RecipeSummary])
 def search_recipes(
@@ -96,18 +79,14 @@ def search_recipes(
     intolerances: Optional[str] = None,
     number: int = Query(10, ge=1, le=30)
 ):
-    # 1) traducir inputs ES→EN para APIs
-    ingr_en = _lt(ingredients, "es", "en")
-    intol_en = _lt(intolerances, "es", "en") if intolerances else None
-
-    cache_key = f"{ingredients}|{diet}|{intolerances}|{number}"
-    if cached := search_cache.get(cache_key):
+    key = f"{ingredients}|{diet}|{intolerances}|{number}"
+    if cached := search_cache.get(key):
         return cached
 
     results: List[RecipeSummary] = []
-
-    # TheMealDB
-    r1 = requests.get(f"{MEALDB_URL}/filter.php", params={"i": ingr_en}, timeout=5).json()
+    # 1) TheMealDB
+    r1 = requests.get(f"{MEALDB_URL}/filter.php",
+                      params={"i": ingredients}, timeout=5).json()
     if r1.get("meals"):
         for m in r1["meals"]:
             results.append(RecipeSummary(
@@ -117,16 +96,17 @@ def search_recipes(
                 source="mealdb"
             ))
     else:
-        # Spoonacular
+        # 2) Spoonacular
         params = {
             "apiKey": SPOONACULAR_API_KEY,
-            "includeIngredients": ingr_en,
+            "includeIngredients": ingredients,
             "number": number,
             "addRecipeInformation": True
         }
         if diet: params["diet"] = diet
-        if intol_en: params["intolerances"] = intol_en
-        sp = requests.get(f"{SPOONACULAR_URL}/complexSearch", params=params, timeout=5).json()
+        if intolerances: params["intolerances"] = intolerances
+        sp = requests.get(f"{SPOONACULAR_URL}/complexSearch",
+                          params=params, timeout=5).json()
         for r in sp.get("results", []):
             results.append(RecipeSummary(
                 id=f"spoon_{r['id']}",
@@ -135,13 +115,12 @@ def search_recipes(
                 source="spoonacular"
             ))
 
-    # traducir títulos EN→ES
+    # traducir sólo los títulos EN→ES
     for r in results:
         r.title = translate_text(r.title)
 
-    search_cache.set(cache_key, results)
+    search_cache.set(key, results)
     return results
-
 
 @app.get("/recipe/{recipe_id}")
 def recipe_page(request: Request, recipe_id: str, intolerances: Optional[str] = None):
@@ -151,11 +130,9 @@ def recipe_page(request: Request, recipe_id: str, intolerances: Optional[str] = 
         "recipe": detail
     })
 
-
 @app.get("/recipes/{recipe_id}", response_model=RecipeDetail)
 def get_recipe(recipe_id: str, intolerances: Optional[str] = None):
     return _fetch_detail(recipe_id, intolerances)
-
 
 def _fetch_detail(recipe_id: str, intolerances: Optional[str]):
     key = f"{recipe_id}|{intolerances or ''}"
@@ -165,34 +142,29 @@ def _fetch_detail(recipe_id: str, intolerances: Optional[str]):
     # TheMealDB
     if recipe_id.startswith("mealdb_"):
         mid = recipe_id.split("_",1)[1]
-        m = requests.get(f"{MEALDB_URL}/lookup.php", params={"i": mid}, timeout=5).json()
-        data = m.get("meals", [{}])[0]
+        data = requests.get(f"{MEALDB_URL}/lookup.php",
+                            params={"i": mid}, timeout=5).json()\
+                       .get("meals", [{}])[0]
         if not data:
             raise HTTPException(404, "Not found")
-
-        ingredients, allergens = [], []
-        for i in range(1, 21):
-            nm = data.get(f"strIngredient{i}")
-            ms = data.get(f"strMeasure{i}")
-            if nm:
-                ingredients.append(f"{ms.strip()} {nm.strip()}")
-                if any(a in nm.lower() for a in ["milk","egg","peanut","nut","wheat","soy"]):
-                    allergens.append(nm)
-
-        instructions = [
-            s.strip() for s in data.get("strInstructions","").split(".") if s.strip()
-        ]
+        ing, alg = [], []
+        for i in range(1,21):
+            n = data.get(f"strIngredient{i}")
+            m = data.get(f"strMeasure{i}")
+            if n:
+                ing.append(f"{m.strip()} {n.strip()}")
+                if any(a in n.lower() for a in
+                       ["milk","egg","peanut","nut","wheat","soy"]):
+                    alg.append(n)
+        instr = [s.strip() for s in
+                 data.get("strInstructions","").split(".")
+                 if s.strip()]
         detail = RecipeDetail(
-            id=recipe_id,
-            title=data["strMeal"],
-            image=data["strMealThumb"],
-            source="mealdb",
-            ingredients=ingredients,
-            instructions=instructions,
-            time=None,
-            servings=None,
-            allergens=allergens,
-            nutrients=None
+            id=recipe_id, title=data["strMeal"],
+            image=data["strMealThumb"], source="mealdb",
+            ingredients=ing, instructions=instr,
+            time=None, servings=None,
+            allergens=alg, nutrients=None
         )
 
     # Spoonacular
@@ -200,43 +172,38 @@ def _fetch_detail(recipe_id: str, intolerances: Optional[str]):
         sid = recipe_id.split("_",1)[1]
         d = requests.get(
             f"{SPOONACULAR_URL}/{sid}/information",
-            params={"apiKey": SPOONACULAR_API_KEY, "includeNutrition": True},
+            params={"apiKey": SPOONACULAR_API_KEY,
+                    "includeNutrition": True},
             timeout=5
         ).json()
         if not d.get("id"):
             raise HTTPException(404, "Not found")
-
-        ingredients = [
-            f"{ing['amount']} {ing['unit']} {ing['name']}"
-            for ing in d.get("extendedIngredients", [])
-        ]
-        instructions = []
-        for blk in d.get("analyzedInstructions", []):
-            instructions += [step["step"] for step in blk.get("steps", [])]
-
-        nutrients = {
+        ing = [f"{i['amount']} {i['unit']} {i['name']}"
+               for i in d.get("extendedIngredients", [])]
+        instr = []
+        for b in d.get("analyzedInstructions", []):
+            instr += [s["step"] for s in b.get("steps", [])]
+        nutr = {
             n["name"]: f"{n['amount']}{n['unit']}"
-            for n in d.get("nutrition", {}).get("nutrients", [])
-            if n["name"].lower() in ("calories","fat","carbohydrates","protein")
+            for n in d.get("nutrition", {})\
+                        .get("nutrients", [])
+            if n["name"].lower() in
+               ("calories","fat","carbohydrates","protein")
         }
-
         detail = RecipeDetail(
-            id=recipe_id,
-            title=d["title"],
-            image=d["image"],
-            source="spoonacular",
-            ingredients=ingredients,
-            instructions=instructions,
+            id=recipe_id, title=d["title"],
+            image=d["image"], source="spoonacular",
+            ingredients=ing, instructions=instr,
             time=d.get("readyInMinutes"),
             servings=d.get("servings"),
-            allergens=(intolerances.split(",") if intolerances else []),
-            nutrients=nutrients
+            allergens=(intolerances.split(",")
+                       if intolerances else []),
+            nutrients=nutr
         )
-
     else:
         raise HTTPException(400, "Invalid ID")
 
-    # traducir TODO EN→ES
+    # traducir sólo por ítem EN→ES
     detail.title = translate_text(detail.title)
     detail.ingredients = translate_list(detail.ingredients)
     detail.instructions = translate_list(detail.instructions)
@@ -244,11 +211,11 @@ def _fetch_detail(recipe_id: str, intolerances: Optional[str]):
     if detail.nutrients:
         keys = list(detail.nutrients.keys())
         keys_es = translate_list(keys)
-        detail.nutrients = {ke: detail.nutrients[k] for ke,k in zip(keys_es, keys)}
+        detail.nutrients = {ke: detail.nutrients[k]
+                            for ke,k in zip(keys_es, keys)}
 
     detail_cache.set(key, detail)
     return detail
-
 
 if __name__ == "__main__":
     import uvicorn
