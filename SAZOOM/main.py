@@ -79,14 +79,20 @@ def search_recipes(
     intolerances: Optional[str] = None,
     number: int = Query(10, ge=1, le=30)
 ):
-    key = f"{ingredients}|{diet}|{intolerances}|{number}"
-    if cached := search_cache.get(key):
+    # traducir ES→EN SOLO ingredientes y alérgenos (timeout corto)
+    ingr_en = _lt(ingredients, "es", "en")
+    intol_en = _lt(intolerances, "es", "en") if intolerances else None
+
+    cache_key = f"{ingredients}|{diet}|{intolerances}|{number}"
+    if cached := search_cache.get(cache_key):
         return cached
 
     results: List[RecipeSummary] = []
     # 1) TheMealDB
-    r1 = requests.get(f"{MEALDB_URL}/filter.php",
-                      params={"i": ingredients}, timeout=5).json()
+    r1 = requests.get(
+        f"{MEALDB_URL}/filter.php",
+        params={"i": ingr_en}, timeout=5
+    ).json()
     if r1.get("meals"):
         for m in r1["meals"]:
             results.append(RecipeSummary(
@@ -99,14 +105,19 @@ def search_recipes(
         # 2) Spoonacular
         params = {
             "apiKey": SPOONACULAR_API_KEY,
-            "includeIngredients": ingredients,
+            "includeIngredients": ingr_en,
             "number": number,
             "addRecipeInformation": True
         }
-        if diet: params["diet"] = diet
-        if intolerances: params["intolerances"] = intolerances
-        sp = requests.get(f"{SPOONACULAR_URL}/complexSearch",
-                          params=params, timeout=5).json()
+        if diet:
+            params["diet"] = diet
+        if intol_en:
+            params["intolerances"] = intol_en
+
+        sp = requests.get(
+            f"{SPOONACULAR_URL}/complexSearch",
+            params=params, timeout=5
+        ).json()
         for r in sp.get("results", []):
             results.append(RecipeSummary(
                 id=f"spoon_{r['id']}",
@@ -115,12 +126,13 @@ def search_recipes(
                 source="spoonacular"
             ))
 
-    # traducir sólo los títulos EN→ES
+    # traducir sólo títulos EN→ES
     for r in results:
         r.title = translate_text(r.title)
 
-    search_cache.set(key, results)
+    search_cache.set(cache_key, results)
     return results
+
 
 @app.get("/recipe/{recipe_id}")
 def recipe_page(request: Request, recipe_id: str, intolerances: Optional[str] = None):
