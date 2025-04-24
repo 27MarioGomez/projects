@@ -1,0 +1,10 @@
+# Ignorar entorno virtual
+venv/
+.venv/
+
+# Ignorar bytecode Python
+__pycache__/
+*.py[cod]
+
+# Ignorar fichero de secretos
+.env
