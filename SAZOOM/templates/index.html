@@ -4,24 +4,36 @@
   <meta charset="UTF-8" />
   <title>Sazoom – ¿Qué cocino hoy?</title>
   <style>
-    body { font-family: sans-serif; max-width: 800px; margin: auto; }
+    body { font-family: sans-serif; max-width: 800px; margin: auto; padding: 1rem; }
     form { display: grid; gap: 0.5rem; margin-bottom: 1rem; }
+    label { font-weight: bold; }
     .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill,minmax(200px,1fr)); }
     .card { border: 1px solid #ddd; border-radius:8px; overflow: hidden; }
     .card img { width:100%; height:120px; object-fit:cover; }
     .card-content { padding: 0.5rem; }
-    .btn { background:#28a745; color:#fff; padding:0.4rem; border:none; border-radius:4px; cursor:pointer; }
+    .btn { background:#28a745; color:#fff; padding:0.6rem; border:none; border-radius:4px; cursor:pointer; }
     #details { margin-top:2rem; }
+    .nota { font-size:0.9rem; color:#555; }
   </style>
 </head>
 <body>
   <h1>Sazoom</h1>
   <p>Busca recetas por ingredientes y filtra por dieta o alérgenos.</p>
   <form id="searchForm">
-    <input name="ingredients" placeholder="e.g. chicken,tomato" required />
-    <input name="diet" placeholder="e.g. keto, vegan" />
-    <input name="intolerances" placeholder="e.g. gluten,nut" />
+    <div>
+      <label for="ingredients">Ingredientes (español):</label>
+      <input id="ingredients" name="ingredients" placeholder="p.ej. tomate,cebolla,ajo" required style="width:100%" />
+    </div>
+    <div>
+      <label for="diet">Dieta (opcional):</label>
+      <input id="diet" name="diet" placeholder="p.ej. keto, vegan" style="width:100%" />
+    </div>
+    <div>
+      <label for="intolerances">Alérgenos a evitar (español):</label>
+      <input id="intolerances" name="intolerances" placeholder="p.ej. gluten,nuez" style="width:100%" />
+    </div>
     <button type="submit" class="btn">Buscar</button>
+    <p class="nota">No te preocupes por el idioma: los ingredientes y alérgenos se traducen automáticamente al inglés.</p>
   </form>
 
   <div id="results" class="grid"></div>
@@ -45,15 +57,17 @@
       });
       const res = await fetch(`/recipes?${qs}`);
       const list = await res.json();
-      results.innerHTML = list.map(r => `
-        <div class="card">
-          <img src="${r.image}" alt="${r.title}" />
-          <div class="card-content">
-            <h4>${r.title}</h4>
-            <button class="btn" onclick="loadDetail('${r.id}')">Ver</button>
-          </div>
-        </div>
-      `).join('') || '<p>No hay resultados.</p>';
+      results.innerHTML = list.length
+        ? list.map(r => `
+            <div class="card">
+              <img src="${r.image}" alt="${r.title}" />
+              <div class="card-content">
+                <h4>${r.title}</h4>
+                <button class="btn" onclick="loadDetail('${r.id}')">Ver</button>
+              </div>
+            </div>
+          `).join('')
+        : '<p>No hay resultados.</p>';
     });
 
     async function loadDetail(id) {
@@ -63,8 +77,7 @@
       details.innerHTML = `
         <h2>${d.title}</h2>
         <img src="${d.image}" style="width:100%;max-width:400px;border-radius:8px"/>
-        <p><strong>Tiempo:</strong> ${d.time||'–'} min &nbsp; 
-           <strong>Porciones:</strong> ${d.servings||'–'}</p>
+        <p><strong>Tiempo:</strong> ${d.time||'–'} min · <strong>Porciones:</strong> ${d.servings||'–'}</p>
         <h3>Ingredientes</h3>
         <ul>${d.ingredients.map(i=>`<li>${i}</li>`).join('')}</ul>
         <h3>Instrucciones</h3>
