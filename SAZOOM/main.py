@@ -174,7 +174,7 @@ async def recipe_page(
         import traceback; traceback.print_exc()
         return templates.TemplateResponse("error.html", {"request": request}, status_code=500)
 
-@app.get("/recipes/{recipe_id}", response_model=RecipeDetail])
+@app.get("/recipes/{recipe_id}", response_model=RecipeDetail)
 async def get_recipe(
     recipe_id: str,
     intolerances: Optional[str] = None

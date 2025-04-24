@@ -14,7 +14,7 @@ en_es_pkg = next(
 )
 
 # 4) Descarga e instala
-print(f"Descargando {en_es_pkg.name} versión {en_es_pkg.version}...")
+print(f"Descargando modelo {en_es_pkg.from_name} → {en_es_pkg.to_name} (v{en_es_pkg.package_version})…")
 download_path = en_es_pkg.download()
 argostranslate.package.install_from_path(download_path)
 print("✅ Modelo Argos EN→ES instalado correctamente.")
