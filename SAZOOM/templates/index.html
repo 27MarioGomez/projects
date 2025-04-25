@@ -5,43 +5,32 @@
   <title>Sazoom – ¿Qué cocino hoy?</title>
   <style>
     body {
-      font-family: sans-serif;
+      font-family: Arial, sans-serif;
       max-width: 800px;
       margin: auto;
       padding: 1rem;
+      line-height: 1.4;
     }
     h1 { margin-bottom: 0.5rem; }
+    form { display: grid; gap: 1rem; margin-bottom: 1.5rem; }
+    label { font-weight: bold; }
 
-    form {
-      display: grid;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }
-
-    label {
-      font-weight: bold;
-      display: block;
-      margin-bottom: 0.25rem;
-    }
-
-    /* Área de multiselect */
     select {
       width: 100%;
-      min-height: 2.5em;
-      padding: 0.4em;
+      padding: 0.5em;
       border: 1px solid #ccc;
       border-radius: 4px;
-      background: #fff;
       font-size: 1rem;
+      background: #fff;
     }
-
+    /* multiselect tamaño y scroll */
     select[multiple] {
       height: auto;
-      max-height: 8em;
+      min-height: 6em;
+      max-height: 12em;
       overflow-y: auto;
     }
 
-    /* Botón */
     .btn {
       background: #28a745;
       color: #fff;
@@ -56,7 +45,6 @@
       cursor: not-allowed;
     }
 
-    /* Overlay de carga */
     #loadingOverlay {
       display: none;
       position: fixed;
@@ -69,6 +57,25 @@
       justify-content: center;
       z-index: 9999;
     }
+
+    .grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fill,minmax(200px,1fr));
+    }
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .card img {
+      width: 100%; height: 120px;
+      object-fit: cover;
+    }
+    .card-content {
+      padding: 0.5rem;
+    }
   </style>
 </head>
 <body>
@@ -80,18 +87,24 @@
   <form id="searchForm">
     <div>
       <label for="ingredients">Ingredientes</label>
-      <select id="ingredients" name="ingredients" multiple required>
+      <select id="ingredients" name="ingredients" multiple required size="8">
+        <!-- Ejemplo: más opciones -->
         <option value="chicken">pollo</option>
         <option value="beef">ternera</option>
         <option value="pork">cerdo</option>
         <option value="fish">pescado</option>
-        <option value="shrimp">marisco</option>
+        <option value="shrimp">camarón</option>
         <option value="rice">arroz</option>
         <option value="tomato">tomate</option>
         <option value="onion">cebolla</option>
-        <option value="cheese">queso</option>
+        <option value="potato">patata</option>
         <option value="egg">huevo</option>
-        <!-- añade más opciones según tus necesidades -->
+        <option value="cheese">queso</option>
+        <option value="mushroom">setas</option>
+        <option value="pepper">pimiento</option>
+        <option value="spinach">espinacas</option>
+        <option value="carrot">zanahoria</option>
+        <!-- puedes seguir añadiendo -->
       </select>
     </div>
 
@@ -102,20 +115,22 @@
         <option value="balanced">balanced</option>
         <option value="high-protein">high-protein</option>
         <option value="low-carb">low-carb</option>
-        <option value="low-fat">low-fat</option>
+        <option value="vegetarian">vegetarian</option>
+        <option value="vegan">vegan</option>
       </select>
     </div>
 
     <div>
       <label for="intolerances">Alérgenos</label>
-      <select id="intolerances" name="intolerances" multiple>
+      <select id="intolerances" name="intolerances" multiple size="6">
         <option value="gluten-free">gluten-free</option>
         <option value="dairy-free">dairy-free</option>
         <option value="peanut-free">peanut-free</option>
         <option value="soy-free">soy-free</option>
-        <option value="vegetarian">vegetarian</option>
-        <option value="vegan">vegan</option>
-        <!-- añade más etiquetas según API -->
+        <option value="tree-nut-free">tree-nut-free</option>
+        <option value="shellfish-free">shellfish-free</option>
+        <option value="sesame-free">sesame-free</option>
+        <option value="egg-free">egg-free</option>
       </select>
     </div>
 
@@ -131,23 +146,27 @@
 
     form.addEventListener('submit', async e => {
       e.preventDefault();
-      // Recopilar valores multiselect
-      const ingrSel = Array.from(document.getElementById('ingredients').selectedOptions)
-                           .map(o => o.value).join(',');
-      const diet = document.getElementById('diet').value;
-      const intolSel = Array.from(document.getElementById('intolerances').selectedOptions)
-                             .map(o => o.value).join(',');
-      overlay.style.display = 'flex';
       results.innerHTML = '';
+      overlay.style.display = 'flex';
 
-      const params = new URLSearchParams({
+      const ingrSel = Array.from(
+        document.getElementById('ingredients').selectedOptions
+      ).map(o => o.value).join(',');
+
+      const diet = document.getElementById('diet').value;
+      const intolSel = Array.from(
+        document.getElementById('intolerances').selectedOptions
+      ).map(o => o.value).join(',');
+
+      const qs = new URLSearchParams({
         ingredients: ingrSel,
         diet: diet,
         intolerances: intolSel,
         number: 12
       });
+
       try {
-        const res = await fetch(`/recipes?${params.toString()}`);
+        const res = await fetch(`/recipes?${qs}`);
         const list = await res.json();
         overlay.style.display = 'none';
 

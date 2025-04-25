@@ -123,11 +123,14 @@ def search_recipes(
     # filtro subset
     for mid in list(common)[:number]:
         meal = fetch_mealdb_detail(mid)
-        ingr_list = [
-            meal.get(f"strIngredient{i}", "").strip().lower()
-            for i in range(1,21)
-            if meal.get(f"strIngredient{i}", "").strip()
-        ]
+        ingr_list = []
+        for i in range(1, 21):
+            ing = meal.get(f"strIngredient{i}") or ""
+            meas = meal.get(f"strMeasure{i}")   or ""
+            if ing.strip():
+                ingr_list.append(f"{meas.strip()} {ing.strip()}")
+
+        
         if set(ingr_list).issubset(sel):
             results.append(RecipeSummary(
                 id=mid, title=meal["strMeal"],
