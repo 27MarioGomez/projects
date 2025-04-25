@@ -1,98 +1,177 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8"/>
+  <meta charset="UTF-8" />
   <title>Sazoom – ¿Qué cocino hoy?</title>
   <style>
-    body { font-family:sans-serif; max-width:800px; margin:auto; padding:1rem; }
-    .field { margin-bottom:1rem; }
-    label { font-weight:bold; display:block; margin-bottom:.3rem; }
-    select, button { width:100%; }
-    select { padding:.4rem; border:1px solid #ccc; border-radius:4px;
-      max-height:120px; overflow-y:auto; }
-    button.btn { background:#28a745; color:#fff; padding:.6rem; border:none;
-      border-radius:4px; cursor:pointer; }
-    .grid { display:grid; gap:1rem; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); }
-    .card { border:1px solid #ddd; border-radius:8px; overflow:hidden; }
-    .card img { width:100%; height:120px; object-fit:cover; }
-    .card-content { padding:.5rem; }
-    #overlay { display:none; position:fixed; top:0;left:0;width:100%;height:100%;
-      background:rgba(0,0,0,0.4); color:#fff;font-size:1.5rem;
-      display:flex;align-items:center;justify-content:center;z-index:999; }
+    body {
+      font-family: sans-serif;
+      max-width: 800px;
+      margin: auto;
+      padding: 1rem;
+    }
+    h1 { margin-bottom: 0.5rem; }
+
+    form {
+      display: grid;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    label {
+      font-weight: bold;
+      display: block;
+      margin-bottom: 0.25rem;
+    }
+
+    /* Área de multiselect */
+    select {
+      width: 100%;
+      min-height: 2.5em;
+      padding: 0.4em;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background: #fff;
+      font-size: 1rem;
+    }
+
+    select[multiple] {
+      height: auto;
+      max-height: 8em;
+      overflow-y: auto;
+    }
+
+    /* Botón */
+    .btn {
+      background: #28a745;
+      color: #fff;
+      padding: 0.75rem;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 1rem;
+    }
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    /* Overlay de carga */
+    #loadingOverlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0,0,0,0.5);
+      color: #fff;
+      font-size: 1.5rem;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
   </style>
 </head>
 <body>
-  <div id="overlay">⏳ Cocinando para ti…</div>
-  <h1>Sazoom</h1>
+  <div id="loadingOverlay">⏳ Cocinando para ti…</div>
 
-  <form id="f">
-    <div class="field">
-      <label>Ingredientes</label>
-      <select id="ings" name="ingredients" multiple>
-        {% for ing in all_ingredients %}
-          <option value="{{ ing }}">{{ ing }}</option>
-        {% endfor %}
+  <h1>Sazoom</h1>
+  <p>Selecciona los ingredientes que tienes y filtra por dieta o alérgenos.</p>
+
+  <form id="searchForm">
+    <div>
+      <label for="ingredients">Ingredientes</label>
+      <select id="ingredients" name="ingredients" multiple required>
+        <option value="chicken">pollo</option>
+        <option value="beef">ternera</option>
+        <option value="pork">cerdo</option>
+        <option value="fish">pescado</option>
+        <option value="shrimp">marisco</option>
+        <option value="rice">arroz</option>
+        <option value="tomato">tomate</option>
+        <option value="onion">cebolla</option>
+        <option value="cheese">queso</option>
+        <option value="egg">huevo</option>
+        <!-- añade más opciones según tus necesidades -->
       </select>
     </div>
-    <div class="field">
-      <label>Dieta</label>
+
+    <div>
+      <label for="diet">Dieta</label>
       <select id="diet" name="diet">
         <option value="">— ninguna —</option>
-        {% for d in all_diets %}
-          <option value="{{ d }}">{{ d }}</option>
-        {% endfor %}
+        <option value="balanced">balanced</option>
+        <option value="high-protein">high-protein</option>
+        <option value="low-carb">low-carb</option>
+        <option value="low-fat">low-fat</option>
       </select>
     </div>
-    <div class="field">
-      <label>Alergenos</label>
-      <select id="health" name="health" multiple>
-        {% for h in all_health %}
-          <option value="{{ h }}">{{ h }}</option>
-        {% endfor %}
+
+    <div>
+      <label for="intolerances">Alérgenos</label>
+      <select id="intolerances" name="intolerances" multiple>
+        <option value="gluten-free">gluten-free</option>
+        <option value="dairy-free">dairy-free</option>
+        <option value="peanut-free">peanut-free</option>
+        <option value="soy-free">soy-free</option>
+        <option value="vegetarian">vegetarian</option>
+        <option value="vegan">vegan</option>
+        <!-- añade más etiquetas según API -->
       </select>
     </div>
+
     <button type="submit" class="btn">Buscar</button>
   </form>
 
   <div id="results" class="grid"></div>
 
   <script>
-    const f = document.getElementById('f'),
-          overlay = document.getElementById('overlay'),
-          results = document.getElementById('results');
+    const form = document.getElementById('searchForm');
+    const overlay = document.getElementById('loadingOverlay');
+    const results = document.getElementById('results');
 
-    f.addEventListener('submit', async e => {
+    form.addEventListener('submit', async e => {
       e.preventDefault();
-      results.innerHTML = '';
+      // Recopilar valores multiselect
+      const ingrSel = Array.from(document.getElementById('ingredients').selectedOptions)
+                           .map(o => o.value).join(',');
+      const diet = document.getElementById('diet').value;
+      const intolSel = Array.from(document.getElementById('intolerances').selectedOptions)
+                             .map(o => o.value).join(',');
       overlay.style.display = 'flex';
+      results.innerHTML = '';
 
-      const selI = [...document.getElementById('ings').selectedOptions].map(o=>o.value),
-            diet  = document.getElementById('diet').value,
-            selH  = [...document.getElementById('health').selectedOptions].map(o=>o.value);
+      const params = new URLSearchParams({
+        ingredients: ingrSel,
+        diet: diet,
+        intolerances: intolSel,
+        number: 12
+      });
+      try {
+        const res = await fetch(`/recipes?${params.toString()}`);
+        const list = await res.json();
+        overlay.style.display = 'none';
 
-      const params = new URLSearchParams();
-      selI.forEach(i=> params.append('ingredients', i));
-      if (diet)  params.append('diet', diet);
-      selH.forEach(h=> params.append('health', h));
-      params.append('number', '12');
+        if (!list.length) {
+          results.innerHTML = '<p>No hay resultados.</p>';
+          return;
+        }
 
-      const res = await fetch(`/recipes?${params}`),
-            list = await res.json();
-
-      overlay.style.display = 'none';
-      results.innerHTML = list.length
-        ? list.map(r=>`
-            <div class="card">
-              <img src="${r.image}" alt="${r.title}"/>
-              <div class="card-content">
-                <h4>${r.title}</h4>
-                <button class="btn" onclick="location.href='/recipe/${r.id}'">
-                  Ver receta
-                </button>
-              </div>
+        results.innerHTML = list.map(r => `
+          <div class="card">
+            <img src="${r.image}" alt="${r.title}" />
+            <div class="card-content">
+              <h4>${r.title}</h4>
+              <button class="btn" onclick="location.href='/recipe/${r.id}'">
+                Ver receta completa
+              </button>
             </div>
-          `).join('')
-        : '<p>No hay resultados.</p>';
+          </div>
+        `).join('');
+      } catch (err) {
+        overlay.style.display = 'none';
+        results.innerHTML = '<p>Error al buscar recetas.</p>';
+        console.error(err);
+      }
     });
   </script>
 </body>
