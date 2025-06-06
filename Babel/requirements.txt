@@ -1,0 +1,31 @@
+# Transcripción
+openai-whisper
+faster-whisper
+
+# Traducción
+argostranslate==1.8.*
+
+# TTS
+TTS
+bark-TTS
+
+# Audio local
+sounddevice
+pydub
+
+# ML base
+torch
+torchaudio
+
+# Logging y CLI bonitos
+rich
+
+# Web / deploy
+streamlit
+streamlit-webrtc
+# Si optas por FastAPI en lugar de Streamlit
+fastapi
+uvicorn
+
+# (Opcional) GUI local
+PyQt6

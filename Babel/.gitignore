@@ -1,0 +1,13 @@
+# Byte-code y entornos virtuales
+__pycache__/
+*.py[cod]
+.venv/
+.env/
+
+# Modelos y datos grandes
+models/
+data/sessions/
+data/voices/
+
+# Archivos temporales de SO
+.DS_Store
